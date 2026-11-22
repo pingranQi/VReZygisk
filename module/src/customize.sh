@@ -98,7 +98,7 @@ extract "$ZIPFILE" 'post-fs-data.sh' "$MODPATH"
 extract "$ZIPFILE" 'service.sh'      "$MODPATH"
 extract "$ZIPFILE" 'uninstall.sh'    "$MODPATH"
 extract "$ZIPFILE" 'start-monitor.sh' "$MODPATH"
-extract "$ZIPFILE" 'late-load.sh' "$MODPATH/late-load.sh"
+extract "$ZIPFILE" 'late-load.sh' "$MODPATH"
 extract "$ZIPFILE" 'rezygisk.sh' "/data/adb/service.d/"
 
 # KernelSU executes scripts in /data/adb/late-load.d after ksud late-load.
