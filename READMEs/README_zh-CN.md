@@ -2,7 +2,7 @@
 
 [English](../README.md)
 
-ReZygisk 是 Zygisk Next 的一个分支，是 Zygisk 的独立实现，为 KernelSU、APatch 和 Magisk 提供 Zygisk API 支持。
+ReZygisk 是一个仅支持 arm64 的 Zygisk 独立实现，为 KernelSU、APatch 和 Magisk 提供 Zygisk API 支持。模块不包含 WebUI，运行状态和已启用的 Zygisk 模块列表会直接显示在 Root 管理器的模块描述中。
 
 代码库已经完全重写为 C 语言，这不仅带来了更干净、更易读的代码库，还让生成的二进制文件更轻量、更快速。同时还引入了自定义链接器，在正常情况下完全不使用系统链接器，从而让 ReZygisk 能够应对未来的检测，并规避所有基于链接器的检测。
 
@@ -51,14 +51,13 @@ Zygisk Next 的开发者是 Android 社区中著名且值得信赖的，然而�
 
 ### 3. 验证安装
 
-重启后，你可以通过检查 root 管理器 `模块` 部分中的模块描述来验证 ReZygisk 是否正常工作。描述应指示必要的守护进程正在运行。例如，如果你的环境同时支持 64 位和 32 位，它应类似于这样：`[Monitor: ✅, ReZygisk 64-bit: ✅, ReZygisk 32-bit: ✅] Standalone implementation of Zygisk.`
+重启后，检查 Root 管理器 `模块` 页面中的模块描述即可。描述会显示 Monitor 状态、arm64 运行状态以及已启用的 Zygisk 模块，例如：`[Monitor: ✓, ReZygisk 64-bit: ✓] Modules: LSPosed (Next), ...`。仅支持 arm64 设备，不会注入次要的 32 位 Zygote。
 
 ## 翻译
 
 目前有两种不同的方式可以为 ReZygisk 贡献翻译：
 
 *   **README 的翻译**：你可以在 `READMEs` 文件夹中创建一个新文件，遵循命名约定 `README_<语言>.md`，其中 `<语言>` 是语言代码（例如，巴西葡萄牙语为 `README_pt-BR.md`），并向 `main` 分支提交一个包含你更改的 pull request。
-*   **ReZygisk WebUI 的翻译**：你应该首先贡献到我们的 [Crowdin](https://crowdin.com/project/rezygisk)。一旦获得批准，请从那里检索 `.json` 文件，并提交一个包含你更改的 pull request——将 `.json` 文件添加到 `webroot/lang` 文件夹，并将你的署名按字母顺序添加到 `TRANSLATOR.md` 文件中。
 
 ## 支持
 
