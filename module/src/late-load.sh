@@ -12,6 +12,16 @@ MODDIR=/data/adb/modules/rezygisk
 [ ! -f "$MODDIR/remove" ] || exit 0
 [ -x "$MODDIR/start-monitor.sh" ] || exit 0
 
+# A monitor that survived a soft reboot already observed the reboot-driven
+# Zygote restart. Do not trigger a second framework restart on stage replay.
+existing_tracer="$(awk '/^TracerPid:/{print $2; exit}' /proc/1/status 2>/dev/null || true)"
+if { [ -n "$existing_tracer" ] && [ "$existing_tracer" != "0" ]; } ||
+   pidof zygisk-ptrace64 >/dev/null 2>&1 ||
+   pidof zygisk-ptrace32 >/dev/null 2>&1; then
+  "$MODDIR/start-monitor.sh" late
+  exit 0
+fi
+
 "$MODDIR/start-monitor.sh" late
 
 # Wait for monitor to seize init before restarting Zygote. A bounded wait
