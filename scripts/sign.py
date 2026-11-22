@@ -50,7 +50,7 @@ def sign_machikado(module_dir: str, sig_name: str, abi: str, is_64bit: bool, pri
   entries = []
 
   # INFO: The files where virtual = real
-  for fname in ["module.prop", "rezygisk.sh", "sepolicy.rule", "post-fs-data.sh", "service.sh", "uninstall.sh"]:
+  for fname in ["module.prop", "rezygisk.sh", "sepolicy.rule", "post-fs-data.sh", "service.sh", "uninstall.sh", "start-monitor.sh", "late-load.sh", "update-description.sh"]:
     vpath = root / fname
     entries.append((str(vpath), fname, str(vpath)))
 
@@ -153,9 +153,8 @@ def main():
 
     print("No private_key and public_key found, this build will not be signed")
 
-    # INFO: Create empty machikado files
-    for name in ["machikado.arm64", "machikado.arm", "machikado.x86_64", "machikado.x86"]:
-      (root / name).touch()
+    # This fork builds arm64-v8a only.
+    (root / "machikado.arm64").touch()
 
     # INFO: Compute SHA256 hashes
     compute_sha256_hashes(module_dir)
@@ -175,11 +174,8 @@ def main():
 
   print("=== Guards the peace of Machikado ===")
 
-  # INFO: Sign machikado for each architecture
+  # This fork builds arm64-v8a only.
   sign_machikado(module_dir, "machikado.arm64", "arm64-v8a", True, private_key_bytes, public_key_bytes)
-  sign_machikado(module_dir, "machikado.arm", "armeabi-v7a", False, private_key_bytes, public_key_bytes)
-  sign_machikado(module_dir, "machikado.x86_64", "x86_64", True, private_key_bytes, public_key_bytes)
-  sign_machikado(module_dir, "machikado.x86", "x86", False, private_key_bytes, public_key_bytes)
 
   # INFO: Compute SHA256 hashes for all files (including machikado)
   compute_sha256_hashes(module_dir)
