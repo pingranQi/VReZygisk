@@ -39,6 +39,16 @@ if [ -z "${tracer:-}" ] || [ "$tracer" = "0" ]; then
   exit 1
 fi
 
+# Ensure the tracer survived socket/event-loop initialization, not just a
+# transient TracerPid update while a failed monitor is exiting.
+sleep 0.5
+tracer_check="$(awk '/^TracerPid:/{print $2; exit}' /proc/1/status 2>/dev/null || true)"
+if [ -z "$tracer_check" ] || [ "$tracer_check" = "0" ] ||
+   { ! pidof zygisk-ptrace64 >/dev/null 2>&1 && ! pidof zygisk-ptrace32 >/dev/null 2>&1; }; then
+  echo "ReZygisk: monitor failed to stay alive; leaving Zygote untouched" >&2
+  exit 1
+fi
+
 # Re-exec Zygote so injection runs at its supported early startup point.
 if [ "$(getprop init.svc.zygote)" = "running" ]; then
   log -p i -t ReZygisk "Late-load: restarting zygote for first injection"
