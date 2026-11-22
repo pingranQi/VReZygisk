@@ -16,8 +16,7 @@ MODDIR=/data/adb/modules/rezygisk
 # Zygote restart. Do not trigger a second framework restart on stage replay.
 existing_tracer="$(awk '/^TracerPid:/{print $2; exit}' /proc/1/status 2>/dev/null || true)"
 if { [ -n "$existing_tracer" ] && [ "$existing_tracer" != "0" ]; } ||
-   pidof zygisk-ptrace64 >/dev/null 2>&1 ||
-   pidof zygisk-ptrace32 >/dev/null 2>&1; then
+   pidof zygisk-ptrace64 >/dev/null 2>&1; then
   "$MODDIR/start-monitor.sh" late
   exit 0
 fi
@@ -55,9 +54,7 @@ if [ "$(getprop init.svc.zygote)" = "running" ]; then
   setprop ctl.restart zygote
 fi
 
-if [ "$(getprop init.svc.zygote_secondary)" = "running" ]; then
-  log -p i -t ReZygisk "Late-load: restarting secondary zygote"
-  setprop ctl.restart zygote_secondary
-fi
+
+"$MODDIR/update-description.sh"
 
 exit 0
