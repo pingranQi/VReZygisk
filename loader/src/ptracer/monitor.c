@@ -858,7 +858,7 @@ static bool update_status(const char *message) {
     return true;
   }
 
-  char status_text[256] = "Monitor: ";
+  char status_text[2048] = "Monitor: ";
   switch (tracing_state) {
     case TRACING: {
       strcat(status_text, "✅");
@@ -879,7 +879,20 @@ static bool update_status(const char *message) {
   }
 
   WRITE_STATUS_ABI(64)
-  WRITE_STATUS_ABI(32)
+
+  if (environment_information64.modules_len > 0 && environment_information64.modules != NULL) {
+    size_t used = strlen(status_text);
+    int written = snprintf(status_text + used, sizeof(status_text) - used, "\\nZygisk modules: ");
+    if (written > 0 && (size_t)written < sizeof(status_text) - used) {
+      used += (size_t)written;
+      for (uint32_t i = 0; i < environment_information64.modules_len; i++) {
+        written = snprintf(status_text + used, sizeof(status_text) - used, "%s%s",
+                           i == 0 ? "" : ", ", environment_information64.modules[i]);
+        if (written < 0 || (size_t)written >= sizeof(status_text) - used) break;
+        used += (size_t)written;
+      }
+    }
+  }
 
   fprintf(prop, "%s[%s] %s", pre_section, status_text, post_section);
   fclose(prop);

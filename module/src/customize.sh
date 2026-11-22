@@ -97,110 +97,41 @@ extract "$ZIPFILE" 'module.prop'     "$MODPATH"
 extract "$ZIPFILE" 'post-fs-data.sh' "$MODPATH"
 extract "$ZIPFILE" 'service.sh'      "$MODPATH"
 extract "$ZIPFILE" 'uninstall.sh'    "$MODPATH"
-extract "$ZIPFILE" 'rezygisk.sh' "/data/adb/service.d/"
+extract "$ZIPFILE" 'zygisk-init.sh' "$MODPATH"
+extract "$ZIPFILE" 'late-load.sh' "$MODPATH"
 
 cp "$MODPATH/module.prop" "$MODPATH/module.prop.bak"
 
 chmod +x "$MODPATH/uninstall.sh"
-chmod +x "/data/adb/service.d/rezygisk.sh"
+chmod +x "$MODPATH/zygisk-init.sh" "$MODPATH/late-load.sh"
 
 mv "$TMPDIR/sepolicy.rule" "$MODPATH"
 
 mkdir "$MODPATH/bin"
-mkdir "$MODPATH/webroot"
+mkdir "$MODPATH/lib64"
 
-ui_print "- Extracting webroot"
-unzip -o "$ZIPFILE" "webroot/*" -x "*.sha256" -d "$MODPATH"
-
-# INFO: Utilize the one with the biggest output, as some devices with Tango have the full list
-#         in ro.product.cpu.abilist but others only have a subset there, and the full list in
-#         ro.system.product.cpu.abilist
-CPU_ABIS_PROP1=$(getprop ro.system.product.cpu.abilist)
-CPU_ABIS_PROP2=$(getprop ro.product.cpu.abilist)
-
-if [ "${#CPU_ABIS_PROP2}" -gt "${#CPU_ABIS_PROP1}" ]; then
-  CPU_ABIS=$CPU_ABIS_PROP2
-else
-  CPU_ABIS=$CPU_ABIS_PROP1
+# This build intentionally supports arm64 devices only.
+if [ "$ARCH" != "arm64" ]; then
+  abort "! ReZygisk arm64-only build: unsupported installer architecture $ARCH"
 fi
 
-SUPPORTS_32BIT=false
-SUPPORTS_64BIT=false
+CPU_ABIS="$(getprop ro.product.cpu.abilist)"
+case ",$CPU_ABIS," in
+  *,arm64-v8a,*) ;;
+  *) abort "! This build requires arm64-v8a device ABI" ;;
+esac
 
-if [[ "$CPU_ABIS" == *"x86"* && "$CPU_ABIS" != "x86_64" || "$CPU_ABIS" == *"armeabi"* ]]; then
-  SUPPORTS_32BIT=true
-  ui_print "- Device supports 32-bit"
-fi
-
-if [[ "$CPU_ABIS" == *"x86_64"* || "$CPU_ABIS" == *"arm64-v8a"* ]]; then
-  SUPPORTS_64BIT=true
-  ui_print "- Device supports 64-bit"
-fi
-
-if [ "$SUPPORTS_32BIT" = true ]; then
-  mkdir "$MODPATH/lib"
-fi
-
-if [ "$SUPPORTS_64BIT" = true ]; then
-  mkdir "$MODPATH/lib64"
-fi
-
-if [ "$ARCH" = "x86" ] || [ "$ARCH" = "x64" ]; then
-  if [ "$SUPPORTS_32BIT" = true ]; then
-    ui_print "- Extracting x86 libraries"
-    extract "$ZIPFILE" 'bin/x86/zygiskd' "$MODPATH/bin" true
-    mv "$MODPATH/bin/zygiskd" "$MODPATH/bin/zygiskd32"
-    extract "$ZIPFILE" 'lib/x86/libzygisk.so' "$MODPATH/lib" true
-    extract "$ZIPFILE" 'lib/x86/libzygisk_ptrace.so' "$MODPATH/bin" true
-    mv "$MODPATH/bin/libzygisk_ptrace.so" "$MODPATH/bin/zygisk-ptrace32"
-
-    extract "$ZIPFILE" 'machikado.x86' "$MODPATH" true
-  fi
-
-  if [ "$SUPPORTS_64BIT" = true ]; then
-    ui_print "- Extracting x64 libraries"
-    extract "$ZIPFILE" 'bin/x86_64/zygiskd' "$MODPATH/bin" true
-    mv "$MODPATH/bin/zygiskd" "$MODPATH/bin/zygiskd64"
-    extract "$ZIPFILE" 'lib/x86_64/libzygisk.so' "$MODPATH/lib64" true
-    extract "$ZIPFILE" 'lib/x86_64/libzygisk_ptrace.so' "$MODPATH/bin" true
-    mv "$MODPATH/bin/libzygisk_ptrace.so" "$MODPATH/bin/zygisk-ptrace64"
-
-    extract "$ZIPFILE" 'machikado.x86_64' "$MODPATH" true
-  fi
-else
-  if [ "$SUPPORTS_32BIT" = true ]; then
-    ui_print "- Extracting arm libraries"
-    extract "$ZIPFILE" 'bin/armeabi-v7a/zygiskd' "$MODPATH/bin" true
-    mv "$MODPATH/bin/zygiskd" "$MODPATH/bin/zygiskd32"
-    extract "$ZIPFILE" 'lib/armeabi-v7a/libzygisk.so' "$MODPATH/lib" true
-    extract "$ZIPFILE" 'lib/armeabi-v7a/libzygisk_ptrace.so' "$MODPATH/bin" true
-    mv "$MODPATH/bin/libzygisk_ptrace.so" "$MODPATH/bin/zygisk-ptrace32"
-
-    extract "$ZIPFILE" 'machikado.arm' "$MODPATH" true
-  fi
-
-  if [ "$SUPPORTS_64BIT" = true ]; then
-    ui_print "- Extracting arm64 libraries"
-    extract "$ZIPFILE" 'bin/arm64-v8a/zygiskd' "$MODPATH/bin" true
-    mv "$MODPATH/bin/zygiskd" "$MODPATH/bin/zygiskd64"
-    extract "$ZIPFILE" 'lib/arm64-v8a/libzygisk.so' "$MODPATH/lib64" true
-    extract "$ZIPFILE" 'lib/arm64-v8a/libzygisk_ptrace.so' "$MODPATH/bin" true
-    mv "$MODPATH/bin/libzygisk_ptrace.so" "$MODPATH/bin/zygisk-ptrace64"
-
-    extract "$ZIPFILE" 'machikado.arm64' "$MODPATH" true
-  fi
-fi
+ui_print "- Extracting arm64 libraries"
+extract "$ZIPFILE" 'bin/arm64-v8a/zygiskd' "$MODPATH/bin" true
+mv "$MODPATH/bin/zygiskd" "$MODPATH/bin/zygiskd64"
+extract "$ZIPFILE" 'lib/arm64-v8a/libzygisk.so' "$MODPATH/lib64" true
+extract "$ZIPFILE" 'lib/arm64-v8a/libzygisk_ptrace.so' "$MODPATH/bin" true
+mv "$MODPATH/bin/libzygisk_ptrace.so" "$MODPATH/bin/zygisk-ptrace64"
 
 ui_print "- Setting permissions"
 set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
 
-if [ "$SUPPORTS_32BIT" = true ]; then
-  set_perm_recursive "$MODPATH/lib" 0 0 0755 0644 u:object_r:system_lib_file:s0
-fi
-
-if [ "$SUPPORTS_64BIT" = true ]; then
-  set_perm_recursive "$MODPATH/lib64" 0 0 0755 0644 u:object_r:system_lib_file:s0
-fi
+set_perm_recursive "$MODPATH/lib64" 0 0 0755 0644 u:object_r:system_lib_file:s0
 
 # If Huawei's Maple is enabled, system_server is created with a special way which is out of Zygisk's control
 HUAWEI_MAPLE_ENABLED=$(grep_prop ro.maple.enable)
