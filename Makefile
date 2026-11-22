@@ -32,7 +32,6 @@ ZYGISKD_INPUTS = common.mk zygiskd/Makefile \
 
 MODULE_INPUTS = scripts/sign.py \
         $(shell find module/src -type f | sort) \
-        $(shell find webroot -type f | sort) \
         $(wildcard module/private_key module/public_key)
 
 .PHONY: debug release build clean                                         \
@@ -72,7 +71,7 @@ $(MODULE_DONE): $(LOADER_DONE) $(ZYGISKD_DONE) $(MODULE_INPUTS)
 
 
 	@echo "Copying module files..."
-	@cp module/src/verify.sh module/src/sepolicy.rule module/src/rezygisk.sh $(MODULE_OUT)/
+	@cp module/src/verify.sh module/src/sepolicy.rule $(MODULE_OUT)/
 
 	@echo "Customizing module.prop..."
 	@sed -e 's/$${moduleId}/$(MODULE_ID)/g'                                             \
@@ -82,7 +81,7 @@ $(MODULE_DONE): $(LOADER_DONE) $(ZYGISKD_DONE) $(MODULE_INPUTS)
 	    module/src/module.prop > $(MODULE_OUT)/module.prop
 
 	@echo "Customizing scripts..."
-	@for script in customize.sh post-fs-data.sh service.sh uninstall.sh; do \
+	@for script in customize.sh post-fs-data.sh late-load.sh zygisk-init.sh service.sh uninstall.sh; do \
 		sed -e 's/@DEBUG@/$(if $(filter debug,$(BUILD_TYPE)),true,false)/g' \
 		    -e 's/@MIN_APATCH_VERSION@/$(MIN_APATCH_VERSION)/g'             \
 		    -e 's/@MIN_KSU_VERSION@/$(MIN_KSU_VERSION)/g'                   \
@@ -99,8 +98,6 @@ $(MODULE_DONE): $(LOADER_DONE) $(ZYGISKD_DONE) $(MODULE_INPUTS)
 		cp $(OBJ_DIR)/loader/$$arch/stripped/libzygisk_ptrace.so $(MODULE_OUT)/lib/$$arch/libzygisk_ptrace.so; \
 	done
 
-	@echo "Copying webroot..."
-	@cp -r webroot $(MODULE_OUT)/webroot
 
 	@if [ -f module/private_key ]; then                                             \
 		echo "Signing module...";                                                   \

@@ -76,3 +76,10 @@ Zygisk Next 的开发者是 Android 社区中著名且值得信赖的，然而�
 ## 许可证
 
 ReZygisk 采用 [AGPL 3.0](../LICENSE) 授权。你可以在 [开源倡议组织 (Open Source Initiative)](https://opensource.org/licenses/AGPL-3.0) 上了解更多相关信息。
+
+
+## 本分支构建说明
+
+- 仅构建和安装 ARM64（arm64-v8a），不包含 32 位及 x86 二进制。
+- 完全移除 WebUI；运行状态和检测到的 Zygisk 模块名称显示在 Root 管理器的模块描述中。
+- KernelSU Late Load 通过 `late-load.sh` 启动 monitor，并请求 init 重新启动 Zygote，使 monitor 能捕获新的 fork/exec 注入入口。
