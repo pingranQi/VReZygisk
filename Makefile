@@ -32,7 +32,6 @@ ZYGISKD_INPUTS = common.mk zygiskd/Makefile \
 
 MODULE_INPUTS = scripts/sign.py \
         $(shell find module/src -type f | sort) \
-        $(shell find webroot -type f | sort) \
         $(wildcard module/private_key module/public_key)
 
 .PHONY: debug release build clean                                         \
@@ -73,7 +72,7 @@ $(MODULE_DONE): $(LOADER_DONE) $(ZYGISKD_DONE) $(MODULE_INPUTS)
 
 	@echo "Copying module files..."
 	@cp module/src/verify.sh module/src/sepolicy.rule module/src/rezygisk.sh \
-	   module/src/start-monitor.sh module/src/late-load.sh $(MODULE_OUT)/
+	   module/src/start-monitor.sh module/src/late-load.sh module/src/update-description.sh $(MODULE_OUT)/
 
 	@echo "Customizing module.prop..."
 	@sed -e 's/$${moduleId}/$(MODULE_ID)/g'                                             \
@@ -100,8 +99,6 @@ $(MODULE_DONE): $(LOADER_DONE) $(ZYGISKD_DONE) $(MODULE_INPUTS)
 		cp $(OBJ_DIR)/loader/$$arch/stripped/libzygisk_ptrace.so $(MODULE_OUT)/lib/$$arch/libzygisk_ptrace.so; \
 	done
 
-	@echo "Copying webroot..."
-	@cp -r webroot $(MODULE_OUT)/webroot
 
 	@if [ -f module/private_key ]; then                                             \
 		echo "Signing module...";                                                   \
