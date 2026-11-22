@@ -10,10 +10,21 @@ if [ -n "${ZYGISK_ENABLED:-}" ]; then
   exit 0
 fi
 
+# Preserve Magisk's module lifecycle callbacks from the original package.
+if [ "$MODE" = "normal" ] && command -v magisk >/dev/null 2>&1; then
+  for module in "$MODDIR"/../*; do
+    [ -d "$module/zygisk" ] || continue
+    [ -f "$module/disable" ] && continue
+    if [ -f "$module/post-fs-data.sh" ]; then
+      (cd "$module" && sh "$(realpath ./post-fs-data.sh)") || true
+    fi
+  done
+fi
+
 # Reuse the existing monitor if the late-load hook is replayed.
 if ! pidof zygisk-ptrace64 >/dev/null 2>&1; then
   mkdir -p "$TMP_PATH"
-  chmod 0755 "$TMP_PATH"
+  chmod 0555 "$TMP_PATH"
   chcon u:object_r:system_file:s0 "$TMP_PATH" 2>/dev/null || true
 
   # Restore a clean module.prop before the monitor starts composing status.
