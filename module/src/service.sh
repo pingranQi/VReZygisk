@@ -9,6 +9,7 @@ MODDIR=${0%/*}
 if [ "$ZYGISK_ENABLED" ]; then
   sed -i "s|^description=|description=[❌ Disable Magisk's built-in Zygisk] |" "$MODDIR/module.prop"
 
+  "$MODDIR/update-description.sh" disabled
   exit 0
 fi
 
@@ -34,5 +35,7 @@ if [ "$(which magisk)" ]; then
     fi
   done
 fi
+
+"$MODDIR/update-description.sh"
 
 exit 0
