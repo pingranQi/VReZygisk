@@ -15,6 +15,8 @@ The Zygisk Next developers are famous and trusted in the Android community, howe
 ## Advantages
 
 - FOSS (Forever)
+- arm64-v8a only; no 32-bit or x86 binaries are built or packaged
+- No WebUI; monitor state and enabled Zygisk modules are displayed in the module card
 
 ## Dependencies
 
