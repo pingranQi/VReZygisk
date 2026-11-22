@@ -97,11 +97,22 @@ extract "$ZIPFILE" 'module.prop'     "$MODPATH"
 extract "$ZIPFILE" 'post-fs-data.sh' "$MODPATH"
 extract "$ZIPFILE" 'service.sh'      "$MODPATH"
 extract "$ZIPFILE" 'uninstall.sh'    "$MODPATH"
+extract "$ZIPFILE" 'start-monitor.sh' "$MODPATH"
+extract "$ZIPFILE" 'late-load.sh' "$MODPATH/late-load.sh"
 extract "$ZIPFILE" 'rezygisk.sh' "/data/adb/service.d/"
+
+# KernelSU executes scripts in /data/adb/late-load.d after ksud late-load.
+if [ "$KSU" ]; then
+  mkdir -p /data/adb/late-load.d
+  cp "$MODPATH/late-load.sh" /data/adb/late-load.d/rezygisk.sh
+  chmod 0755 /data/adb/late-load.d/rezygisk.sh
+fi
 
 cp "$MODPATH/module.prop" "$MODPATH/module.prop.bak"
 
 chmod +x "$MODPATH/uninstall.sh"
+chmod +x "$MODPATH/start-monitor.sh"
+chmod +x "$MODPATH/late-load.sh"
 chmod +x "/data/adb/service.d/rezygisk.sh"
 
 mv "$TMPDIR/sepolicy.rule" "$MODPATH"
