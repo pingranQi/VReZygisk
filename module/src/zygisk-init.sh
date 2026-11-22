@@ -24,6 +24,7 @@ fi
 # Reuse the existing monitor if the late-load hook is replayed.
 if ! pidof zygisk-ptrace64 >/dev/null 2>&1; then
   mkdir -p "$TMP_PATH"
+  rm -f "$TMP_PATH/init_monitor" "$TMP_PATH/cp64.sock"
   chmod 0555 "$TMP_PATH"
   chcon u:object_r:system_file:s0 "$TMP_PATH" 2>/dev/null || true
 
@@ -53,7 +54,12 @@ if [ "$MODE" = "late-load" ]; then
   # The monitor only sees future fork/exec events. Restarting zygote makes
   # init create a fresh app_process instance that can be traced and injected.
   setprop ctl.restart zygote
-  setprop ctl.restart zygote_secondary
+  if [ -n "$(getprop init.svc.zygote_secondary)" ]; then
+    setprop ctl.restart zygote_secondary
+  fi
+  if [ -n "$(getprop init.svc.hyos_spawner)" ]; then
+    setprop ctl.restart hyos_spawner
+  fi
 fi
 
 exit 0
