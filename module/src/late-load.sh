@@ -18,6 +18,7 @@ existing_tracer="$(awk '/^TracerPid:/{print $2; exit}' /proc/1/status 2>/dev/nul
 if { [ -n "$existing_tracer" ] && [ "$existing_tracer" != "0" ]; } ||
    pidof zygisk-ptrace64 >/dev/null 2>&1; then
   "$MODDIR/start-monitor.sh" late
+  "$MODDIR/update-description.sh"
   exit 0
 fi
 
@@ -43,7 +44,7 @@ fi
 sleep 0.5
 tracer_check="$(awk '/^TracerPid:/{print $2; exit}' /proc/1/status 2>/dev/null || true)"
 if [ -z "$tracer_check" ] || [ "$tracer_check" = "0" ] ||
-   { ! pidof zygisk-ptrace64 >/dev/null 2>&1 && ! pidof zygisk-ptrace32 >/dev/null 2>&1; }; then
+   ! pidof zygisk-ptrace64 >/dev/null 2>&1; then
   echo "ReZygisk: monitor failed to stay alive; leaving Zygote untouched" >&2
   exit 1
 fi
