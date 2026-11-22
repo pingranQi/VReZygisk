@@ -33,7 +33,7 @@ init_tracer="$(awk '/^TracerPid:/{print $2; exit}' /proc/1/status 2>/dev/null ||
 if [ -n "$init_tracer" ] && [ "$init_tracer" != "0" ]; then
   exit 0
 fi
-if pidof zygisk-ptrace64 >/dev/null 2>&1 || pidof zygisk-ptrace32 >/dev/null 2>&1; then
+if pidof zygisk-ptrace64 >/dev/null 2>&1; then
   exit 0
 fi
 
@@ -49,23 +49,10 @@ export TMP_PATH
 # sockets may still belong to a live daemon during soft reboot.
 rm -f "$TMP_PATH/init_monitor"
 
-# Keep the monitor's relative ./bin/zygiskdXX lookup valid.
-CPU_ABIS_PROP1="$(getprop ro.system.product.cpu.abilist)"
-CPU_ABIS_PROP2="$(getprop ro.product.cpu.abilist)"
-if [ "${#CPU_ABIS_PROP2}" -gt "${#CPU_ABIS_PROP1}" ]; then
-  CPU_ABIS="$CPU_ABIS_PROP2"
-else
-  CPU_ABIS="$CPU_ABIS_PROP1"
-fi
-
-if [ -x "$MODDIR/bin/zygisk-ptrace64" ] && {
-  [ "$MODE" = "late" ] || echo "$CPU_ABIS" | grep -Eq 'arm64-v8a|x86_64';
-}; then
-  MONITOR="$MODDIR/bin/zygisk-ptrace64"
-elif [ -x "$MODDIR/bin/zygisk-ptrace32" ]; then
-  MONITOR="$MODDIR/bin/zygisk-ptrace32"
-else
-  echo "ReZygisk: no compatible monitor binary" >&2
+# This package contains only the arm64 monitor and daemon.
+MONITOR="$MODDIR/bin/zygisk-ptrace64"
+if [ ! -x "$MONITOR" ]; then
+  echo "ReZygisk: arm64 monitor binary is missing" >&2
   exit 1
 fi
 
