@@ -110,8 +110,6 @@ mv "$TMPDIR/sepolicy.rule" "$MODPATH"
 mkdir "$MODPATH/bin"
 mkdir "$MODPATH/lib64"
 
-ui_print "- Extracting webroot"
-
 # This build intentionally supports arm64 devices only.
 if [ "$ARCH" != "arm64" ]; then
   abort "! ReZygisk arm64-only build: unsupported installer architecture $ARCH"
@@ -133,9 +131,7 @@ mv "$MODPATH/bin/libzygisk_ptrace.so" "$MODPATH/bin/zygisk-ptrace64"
 ui_print "- Setting permissions"
 set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
 
-if [ "$SUPPORTS_64BIT" = true ]; then
-  set_perm_recursive "$MODPATH/lib64" 0 0 0755 0644 u:object_r:system_lib_file:s0
-fi
+set_perm_recursive "$MODPATH/lib64" 0 0 0755 0644 u:object_r:system_lib_file:s0
 
 # If Huawei's Maple is enabled, system_server is created with a special way which is out of Zygisk's control
 HUAWEI_MAPLE_ENABLED=$(grep_prop ro.maple.enable)
