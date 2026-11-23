@@ -1212,7 +1212,8 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
              and even if so, it should not impact in detections, performance or
              any area.
   */
-  uid_t target_uid = *ctx->args.app->uid;\n  uid_t uid = target_uid;
+  uid_t target_uid = *ctx->args.app->uid;
+  uid_t uid = target_uid;
   if (IS_ISOLATED_SERVICE(uid) && ctx->args.app->app_data_dir) {
     /* INFO: If the app is an isolated service, we use the UID of the
                app's process data directory, which is the UID of the
