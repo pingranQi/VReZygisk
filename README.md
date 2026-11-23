@@ -53,7 +53,11 @@ After flashing, check the installation logs to ensure there are no errors, and i
 
 After rebooting, you can verify if ReZygisk is working properly by checking the module description in the `Modules` section of your root manager. The description should indicate that the necessary daemons are running. The ARM64-only build reports the 64-bit Zygote status, for example: `[Monitor: ✅, ReZygisk 64-bit: ✅] Standalone implementation of Zygisk.`
 
-## Build profile\n\nThis forked build targets **ARM64 (`arm64-v8a`) only**. The module has no WebUI; runtime status and detected Zygisk module names are shown directly in the root manager's module description. KernelSU late-load mode uses `late-load.sh` to start the monitor and request a fresh Zygote start so the monitor can observe its fork/exec path.\n\n## Translation
+## Build profile
+
+This forked build targets **ARM64 (`arm64-v8a`) only**. The build system rejects non-ARM64 targets, the installer rejects non-ARM64 devices, and the ptracer only supports AArch64 register layouts and 64-bit Zygote injection. Runtime status and detected Zygisk module names are shown directly in the root manager's module description.
+
+## Translation
 
 There are currently two different ways to contribute translations for ReZygisk:
 
