@@ -150,11 +150,20 @@ struct rezygisk_api {
   uint32_t (*get_flags)();
 };
 
+enum module_loader_backend {
+  MODULE_LOADER_NONE = 0,
+  MODULE_LOADER_CSO,
+  MODULE_LOADER_SYSTEM
+};
+
 struct rezygisk_module {
   struct rezygisk_abi abi;
   struct rezygisk_api api;
 
+  /* Exactly one loader owns the image; never pass a system handle to CSOLoader. */
   struct csoloader lib;
+  void *system_handle;
+  enum module_loader_backend loader_backend;
 
   dev_t dev;
   ino_t ino;
