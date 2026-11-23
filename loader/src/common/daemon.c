@@ -320,6 +320,8 @@ bool rezygiskd_update_mns(enum mount_namespace_state nms_state, char *buf, size_
 
   safe_write(write_uint8_t(fd, (uint8_t)UpdateMountNamespace), "UpdateMountNamespace action", return false);
   safe_write(write_uint32_t(fd, (uint32_t)getpid()), "pid", return false);
+  safe_write(write_uint32_t(fd, (uint32_t)uid), "target uid", return false);
+  safe_write(write_string(fd, process), "target process name", return false);
   safe_write(write_uint8_t(fd, (uint8_t)nms_state), "mount namespace state", return false);
 
   uint32_t target_pid = 0;
@@ -327,6 +329,13 @@ bool rezygiskd_update_mns(enum mount_namespace_state nms_state, char *buf, size_
 
   uint32_t target_fd = 0;
   safe_read(read_uint32_t(fd, &target_fd), "target fd", return false);
+
+  if (target_fd == UINT32_MAX) {
+    /* Daemon explicitly declined cleanup for this protected process. */
+    if (buf_size > 0) buf[0] = '\\0';
+    close(fd);
+    return true;
+  }
 
   if (target_fd == 0) {
     LOGE("Failed to get target fd");
