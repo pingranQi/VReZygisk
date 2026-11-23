@@ -7,6 +7,7 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 #include <sys/xattr.h>
 
