@@ -1096,6 +1096,33 @@ static void rz_fork_post(struct zygisk_context *ctx __attribute__((unused))) {
   g_ctx = NULL;
 }
 
+static void release_unregistered_module(struct rezygisk_module *module, const char *lib_path) {
+  bool released = true;
+
+  if (module->loader_backend == MODULE_LOADER_CSO) {
+    released = csoloader_unload(&module->lib);
+    if (!released) {
+      csoloader_pinned = true;
+      LOGE("Retaining failed CSOLoader image for [%s]", lib_path);
+    }
+  } else if (module->loader_backend == MODULE_LOADER_SYSTEM) {
+    if (!module->system_handle || dlclose(module->system_handle) != 0) {
+      const char *error = dlerror();
+      LOGE("Failed to close system-loaded module [%s]: %s", lib_path,
+           error ? error : "invalid handle");
+      released = false;
+    }
+  }
+
+  if (!released) {
+    /* The image/handle must remain resident; libzygisk must not be unmapped. */
+    should_unmap_zygisk = false;
+    return;
+  }
+
+  memset(module, 0, sizeof(*module));
+}
+
 static bool load_modules_only(void) {
   struct zygisk_modules ms;
   if (!rezygiskd_read_modules(&ms)) {
@@ -1149,19 +1176,7 @@ static bool load_modules_only(void) {
     struct stat st;
     if (stat(lib_path, &st) != 0) {
       PLOGE("Failed to stat module [%s]", lib_path);
-      if (module->loader_backend == MODULE_LOADER_CSO) {
-        if (!csoloader_unload(&module->lib)) {
-          csoloader_pinned = true;
-          should_unmap_zygisk = false;
-        }
-      } else if (module->loader_backend == MODULE_LOADER_SYSTEM) {
-        if (dlclose(module->system_handle) != 0) {
-          const char *error = dlerror();
-          LOGE("Failed to close system-loaded module [%s]: %s", lib_path,
-               error ? error : "unknown dlclose error");
-          should_unmap_zygisk = false;
-        }
-      }
+      release_unregistered_module(module, lib_path);
       rezygiskd_remove_module(i);
       continue;
     }
@@ -1184,19 +1199,7 @@ static bool load_modules_only(void) {
 
     if (!entry) {
       LOGE("Failed to find entry point in module [%s]", lib_path);
-      if (module->loader_backend == MODULE_LOADER_CSO) {
-        if (!csoloader_unload(&module->lib)) {
-          csoloader_pinned = true;
-          should_unmap_zygisk = false;
-        }
-      } else if (module->loader_backend == MODULE_LOADER_SYSTEM) {
-        if (dlclose(module->system_handle) != 0) {
-          const char *error = dlerror();
-          LOGE("Failed to close system-loaded module [%s]: %s",
-               lib_path, error ? error : "unknown dlclose error");
-          should_unmap_zygisk = false;
-        }
-      }
+      release_unregistered_module(module, lib_path);
       rezygiskd_remove_module(i);
       memset(module, 0, sizeof(*module));
       continue;
