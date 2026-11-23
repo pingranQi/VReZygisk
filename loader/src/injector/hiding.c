@@ -165,9 +165,7 @@ static bool hide_one_mapping(const struct hide_target *target,
     if (mprotect(address, size, target->perms) == 0) {
       source_needs_restore = false;
     } else {
-      const int restore_error = errno;
-      LOGE("restore the permissions of [%s] failed with %d: %s",
-           path, restore_error, strerror(restore_error));
+      PLOGE("restore the permissions of [%s]", path);
     }
   }
 
@@ -177,16 +175,13 @@ static bool hide_one_mapping(const struct hide_target *target,
    * SELinux policy denies anonymous executable memory.
    */
   if (mprotect(copy, size, target->perms) == -1) {
-    const int protect_error = errno;
-
     if (source_needs_restore &&
         mprotect(address, size, target->perms) == -1) {
       PLOGE("restore the permissions of [%s] after preflight failure", path);
     }
 
+    PLOGE("set the permissions of the copy of [%s]", path);
     munmap(copy, size);
-    LOGE("set the permissions of the copy of [%s] failed with %d: %s",
-         path, protect_error, strerror(protect_error));
     return false;
   }
 
@@ -195,16 +190,13 @@ static bool hide_one_mapping(const struct hide_target *target,
   }
 
   if (mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, address) == MAP_FAILED) {
-    const int remap_error = errno;
-
     if (source_needs_restore &&
         mprotect(address, size, target->perms) == -1) {
       PLOGE("restore the permissions of [%s] after replacement failure", path);
     }
 
+    PLOGE("move the copy of [%s] over the original", path);
     munmap(copy, size);
-    LOGE("move the copy of [%s] over the original failed with %d: %s",
-         path, remap_error, strerror(remap_error));
     return false;
   }
 
