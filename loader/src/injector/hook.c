@@ -1398,19 +1398,10 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
     setenv("ZYGISK_ENABLED", "1", 1);
   }
 
-  /* INFO: Modules only have two "start off" points from Zygisk, preSpecialize and
-             postSpecialize. In preSpecialize, the process still has privileged
-             permissions, and therefore can execute mount/umount/setns functions.
-             If we update the mount namespace AFTER executing them, any mounts made
-             will be lost, and the process will not have access to them anymore.
-
-           In postSpecialize, while still could have its mounts modified with the
-             assistance of a Zygisk companion, it will already have the mount
-             namespace switched by then, so there won't be issues.
-
-           Knowing this, we update the mns before execution, so that they can still
-             make changes to mounts in DenyListed processes without being reverted.
-  */
+  /* Run selective mount cleanup in preSpecialize while the Zygote child
+     still has the privileges required for unshare(), mount(), and umount2().
+     DenyList cleanup happens before module callbacks so their own mount changes
+     are not accidentally removed by this pass. */
   bool in_denylist = (ctx->info_flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST;
   if (in_denylist) {
     FLAG_SET(ctx, DO_REVERT_UNMOUNT);
