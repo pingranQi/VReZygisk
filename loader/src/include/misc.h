@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #ifdef __LP64__
   #define LP_SELECT(lp32, lp64) lp64
@@ -37,11 +38,15 @@ struct maps_info {
   size_t length;
 };
 
+typedef bool (*maps_visitor)(const struct map_entry *map, void *userdata);
+
 int parse_int(const char *str);
 
 struct kernel_version parse_kversion();
 
 struct maps_info *parse_maps(const char *pid);
+
+bool scan_maps_safe(const char *pid, maps_visitor visit, void *userdata);
 
 void free_maps(struct maps_info *maps);
 
