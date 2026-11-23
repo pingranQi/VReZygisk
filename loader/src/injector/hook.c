@@ -21,6 +21,7 @@
 
 #include "daemon.h"
 #include "hook.h"
+#include "hiding.h"
 #include "misc.h"
 #include "module.h"
 
@@ -1312,6 +1313,20 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
 
 static void rz_app_specialize_post(struct zygisk_context *ctx) {
   rz_run_modules_post(ctx);
+
+  /*
+   * Module callbacks have finished, so the retained module images are now
+   * known. Anonymize only for processes whose mount traces are being reverted.
+   */
+  if (FLAG_GET(ctx, DO_REVERT_UNMOUNT)) {
+    struct maps_info *libraries = get_loaded_libraries();
+    if (libraries != NULL) {
+      hide_module_maps(libraries);
+      free_maps(libraries);
+    } else {
+      LOGW("anonymous-memory: unable to enumerate loaded libraries");
+    }
+  }
 
   /* INFO: Allow the process name string to be released */
   (*ctx->env)->ReleaseStringUTFChars(ctx->env, *ctx->args.app->nice_name, ctx->process);
