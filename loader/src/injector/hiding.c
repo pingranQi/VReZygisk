@@ -162,8 +162,9 @@ static bool hide_one_mapping(const struct hide_target *target,
     if (mprotect(address, size, target->perms) == 0) {
       source_needs_restore = false;
     } else {
-      PLOGW("anonymous-memory: defer source permission restore for [%s]",
-            path);
+      const int restore_error = errno;
+      LOGW("anonymous-memory: defer source permission restore for [%s]: %s",
+           path, strerror(restore_error));
     }
   }
 
