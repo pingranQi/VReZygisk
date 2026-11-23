@@ -203,7 +203,7 @@ static bool update_mnt_ns(enum mount_namespace_state mns_state, uid_t uid,
   }
 
   /* Empty path means the daemon deliberately preserved the target namespace. */
-  if (ns_path[0] == '\\0') {
+  if (ns_path[0] == '\0') {
     LOGD("Keeping original mount namespace for [%s]", process ? process : "(unknown)");
     return true;
   }
