@@ -11,7 +11,7 @@
 #include <elf.h>
 #include <unistd.h>
 
-#define LOG_TAG "zygisk-injector" LP_SELECT("32", "64")
+#define LOG_TAG "zygisk-injector64"
 
 #include "misc.h"
 #include "utils.h"
@@ -112,11 +112,7 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
                                          (uintptr_t)libc_return_addr, args, 3);
 
   bool injector_returned = false;
-  #if defined(__arm__)
-    injector_returned = (((uintptr_t)regs.REG_IP & ~1u) == ((uintptr_t)libc_return_addr & ~1u));
-  #else
-    injector_returned = ((uintptr_t)regs.REG_IP == (uintptr_t)libc_return_addr);
-  #endif
+  injector_returned = ((uintptr_t)regs.REG_IP == (uintptr_t)libc_return_addr);
 
   if (!injector_returned) {
     /* The entry may have installed some hooks before faulting. Keep its image
@@ -204,7 +200,7 @@ bool trace_zygote(int pid, bool tango_flag) {
   LOGD("Resolved __libc_init at %p (GOT slot %p)", (void *)libc_init_resolved, (void *)libc_init_got_slot);
 
   if (STOPPED_WITH(SIGSTOP, PTRACE_EVENT_STOP)) {
-    char *lib_path = "/data/adb/modules/rezygisk/lib" LP_SELECT("", "64") "/libzygisk.so";
+    char *lib_path = "/data/adb/modules/rezygisk/lib64/libzygisk.so";
     if (!inject_on_main(pid, lib_path, libc_init_resolved, libc_init_got_slot, tango_flag)) {
       LOGE("failed to inject");
 
