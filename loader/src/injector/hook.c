@@ -1171,6 +1171,8 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
   FLAG_SET(ctx, POST_SPECIALIZE);
 
   size_t modules_unloaded = 0;
+  bool all_modules_unloaded = true;
+
   for (size_t i = 0; i < zygisk_module_length; i++) {
     struct rezygisk_module *m = &zygisk_modules[i];
 
@@ -1180,22 +1182,38 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
     if (!m->unload) {
       LOGD("Abandoning module library at %p", &m->lib);
 
+      /*
+       * Abandoned modules remain mapped in this process. Do not tear down
+       * CSOLoader's process-wide state while any such image is still resident.
+       */
+      all_modules_unloaded = false;
       csoloader_abandon(&m->lib);
-
       continue;
     }
 
     if (!csoloader_unload(&m->lib)) {
       LOGE("Failed to unload module library");
-
+      all_modules_unloaded = false;
       continue;
     }
 
     modules_unloaded++;
   }
 
-  if (zygisk_module_length > 0)
+  if (zygisk_module_length > 0) {
     LOGD("Modules unloaded: %zu/%zu", modules_unloaded, zygisk_module_length);
+
+    /*
+     * CSOLoader owns process-wide TLS/linker bookkeeping. It is safe to
+     * deinitialize only after every module was actually unloaded; calling
+     * this while an abandoned module remains mapped can invalidate state
+     * still reachable from that image.
+     */
+    if (all_modules_unloaded) {
+      csoloader_deinit();
+      LOGD("CSOLoader global state deinitialized");
+    }
+  }
 }
 
 static void rz_app_specialize_pre(struct zygisk_context *ctx) {
