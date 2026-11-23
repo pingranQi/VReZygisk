@@ -1191,6 +1191,11 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
     LOGD("Modules unloaded: %zu/%zu", modules_unloaded, zygisk_module_length);
 }
 
+static bool is_webview_zygote_process(const char *process) {
+  if (!process) return false;
+  return strstr(process, "webview_zygote") != NULL;
+}
+
 static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   FLAG_SET(ctx, APP_SPECIALIZE);
 
@@ -1235,6 +1240,11 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   }
 
   ctx->info_flags = rezygiskd_get_process_flags(uid, ctx->process);
+
+  /* WebView Zygote can inherit procfs descriptors opened by the parent
+     Zygote before mount namespace changes. Drop those stale descriptors
+     before evaluating mounts or invoking third-party module callbacks. */
+  refresh_mountinfo_fds(is_webview_zygote_process(ctx->process));
   /* INFO: To ensure we are really using a clean mount namespace, we use
               the first process it as reference for clean mount namespace,
               before it even does something, so that it will be clean yet
@@ -1293,6 +1303,9 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
     }
   }
 
+  /* Refresh again after either per-process detach or setns fallback. */
+  refresh_mountinfo_fds(is_webview_zygote_process(ctx->process));
+
   /* INFO: Executed after setns to ensure a module can update the mounts of an
               application without worrying about it being overwritten by setns.
   */
@@ -1312,6 +1325,7 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
       if (!update_mnt_ns(Clean, false))
         LOGE("Requested mount revert and clean namespace fallback failed");
     }
+    refresh_mountinfo_fds(is_webview_zygote_process(ctx->process));
   }
 }
 
