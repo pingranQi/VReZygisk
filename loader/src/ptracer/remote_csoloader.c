@@ -838,10 +838,10 @@ static bool apply_relocations(int pid, int fd, const struct elf_dyn_info *info,
   /* INFO: Process JMPREL section (PLT relocations) - uses same format as RELA/REL */
   if (info->jmprel_sz && info->jmprel_off) {
     if (info->pltrel_type == DT_RELA) {
-      if (!apply_rela_section(pid, fd, info, local_map, remote_map, needed_paths, load_bias, info->jmprel_off, info->jmprel_sz))
+      if (!apply_rela_section(pid, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->jmprel_off, info->jmprel_sz))
         return false;
     } else if (info->pltrel_type == DT_REL) {
-      if (!apply_rel_section(pid, fd, info, local_map, remote_map, needed_paths, load_bias, info->jmprel_off, info->jmprel_sz))
+      if (!apply_rel_section(pid, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->jmprel_off, info->jmprel_sz))
         return false;
     } else {
       LOGE("Unknown DT_PLTREL type %d", info->pltrel_type);
