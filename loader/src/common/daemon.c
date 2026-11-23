@@ -332,7 +332,7 @@ bool rezygiskd_update_mns(enum mount_namespace_state nms_state, char *buf, size_
 
   if (target_fd == UINT32_MAX) {
     /* Daemon explicitly declined cleanup for this protected process. */
-    if (buf_size > 0) buf[0] = '\\0';
+    if (buf_size > 0) buf[0] = '\0';
     close(fd);
     return true;
   }
