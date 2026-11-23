@@ -244,6 +244,8 @@ static void elf_dyn_info_destroy(struct elf_dyn_info *info) {
 
 /* INFO: Parse PT_DYNAMIC and extract relocation/symbol table info. */
 static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *phdr, struct elf_dyn_info *out) {
+  if (!eh || !phdr || !out) return false;
+
   memset(out, 0, sizeof(*out));
   out->pltrel_type = 0;
 
@@ -261,9 +263,13 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
     break;
   }
 
-  if (!dyn_phdr || dyn_phdr->p_filesz == 0) {
-    LOGE("Failed to find PT_DYNAMIC");
-
+  struct stat st;
+  if (!dyn_phdr || dyn_phdr->p_filesz == 0 ||
+      dyn_phdr->p_filesz % sizeof(ElfW(Dyn)) != 0 ||
+      fstat(fd, &st) != 0 ||
+      dyn_phdr->p_offset > (ElfW(Off))st.st_size ||
+      dyn_phdr->p_filesz > (ElfW(Xword))((ElfW(Off))st.st_size - dyn_phdr->p_offset)) {
+    LOGE("Missing or out-of-bounds PT_DYNAMIC");
     return false;
   }
 
@@ -271,6 +277,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   out->dyn_sz = (size_t)dyn_phdr->p_filesz;
 
   size_t dyn_count = out->dyn_sz / sizeof(ElfW(Dyn));
+  if (dyn_count == 0) return false;
 
   dyn = (ElfW(Dyn) *)calloc(dyn_count, sizeof(ElfW(Dyn)));
   if (!dyn) {
@@ -299,9 +306,17 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   size_t syment = 0;
 
   size_t needed_count = 0;
+  bool has_dt_null = false;
   for (size_t i = 0; i < dyn_count; i++) {
     if (dyn[i].d_tag == DT_NEEDED) needed_count++;
-    if (dyn[i].d_tag == DT_NULL) break;
+    if (dyn[i].d_tag == DT_NULL) {
+      has_dt_null = true;
+      break;
+    }
+  }
+  if (!has_dt_null) {
+    LOGE("PT_DYNAMIC has no DT_NULL terminator");
+    goto cleanup;
   }
 
   if (needed_count) {
