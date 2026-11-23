@@ -21,6 +21,10 @@
 
 #include "utils.h"
 
+#if !defined(__aarch64__)
+#error "ReZygisk ptracer supports AArch64 only"
+#endif
+
 ssize_t write_proc(int pid, uintptr_t remote_addr, const void *buf, size_t len) {
   LOGV("write to remote addr %" PRIxPTR " size %zu", remote_addr, len);
 

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/csoloader-hardening
+      - optimize/hiding-memory-concurrency
   pull_request:
   merge_group:
   workflow_dispatch:

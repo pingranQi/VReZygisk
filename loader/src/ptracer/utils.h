@@ -10,33 +10,19 @@
 
 /* Redefining logging macros with different tag */
 #ifndef LOG_TAG
-  #define LOG_TAG "zygisk-ptrace" LP_SELECT("32", "64")
+  #define LOG_TAG "zygisk-ptrace64"
 #endif
 
 #include "logging.h"
 
-#if defined(__x86_64__)
-  #define REG_SP rsp
-  #define REG_IP rip
-  #define REG_RET rax
-  #define REG_SYSNR orig_rax
-#elif defined(__i386__)
-  #define REG_SP esp
-  #define REG_IP eip
-  #define REG_RET eax
-  #define REG_SYSNR orig_eax
-#elif defined(__aarch64__)
-  #define REG_SP sp
-  #define REG_IP pc
-  #define REG_RET regs[0]
-  #define REG_SYSNR regs[8]
-#elif defined(__arm__)
-  #define REG_SP uregs[13]
-  #define REG_IP uregs[15]
-  #define REG_RET uregs[0]
-  #define REG_SYSNR uregs[7]
-  #define user_regs_struct user_regs
+#if !defined(__aarch64__)
+  #error "ReZygisk ptracer supports AArch64 only"
 #endif
+
+#define REG_SP sp
+#define REG_IP pc
+#define REG_RET regs[0]
+#define REG_SYSNR regs[8]
 
 ssize_t write_proc(int pid, uintptr_t remote_addr, const void *buf, size_t len);
 

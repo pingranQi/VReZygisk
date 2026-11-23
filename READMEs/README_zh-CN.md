@@ -51,7 +51,7 @@ Zygisk Next 的开发者是 Android 社区中著名且值得信赖的，然而�
 
 ### 3. 验证安装
 
-重启后，你可以通过检查 root 管理器 `模块` 部分中的模块描述来验证 ReZygisk 是否正常工作。描述应指示必要的守护进程正在运行。例如，如果你的环境同时支持 64 位和 32 位，它应类似于这样：`[Monitor: ✅, ReZygisk 64-bit: ✅, ReZygisk 32-bit: ✅] Standalone implementation of Zygisk.`
+重启后，你可以通过检查 root 管理器 `模块` 部分中的模块描述来验证 ReZygisk 是否正常工作。描述应指示必要的守护进程正在运行。ARM64 专用版本仅显示 64 位 Zygote 状态，例如：`[Monitor: ✅, ReZygisk 64-bit: ✅] Standalone implementation of Zygisk.`
 
 ## 翻译
 
@@ -80,6 +80,6 @@ ReZygisk 采用 [AGPL 3.0](../LICENSE) 授权。你可以在 [开源倡议组织
 
 ## 本分支构建说明
 
-- 仅构建和安装 ARM64（arm64-v8a），不包含 32 位及 x86 二进制。
+- 仅支持 ARM64（arm64-v8a）；构建系统、安装器和 ptracer 均拒绝其他 ABI。
 - 完全移除 WebUI；运行状态和检测到的 Zygisk 模块名称显示在 Root 管理器的模块描述中。
 - KernelSU Late Load 通过 `late-load.sh` 启动 monitor，并请求 init 重新启动 Zygote，使 monitor 能捕获新的 fork/exec 注入入口。

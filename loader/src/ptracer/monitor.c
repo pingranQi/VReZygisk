@@ -441,38 +441,29 @@ void rezygiskd_listener_stop() {
   }
 
 CREATE_ZYGOTE_START_COUNTER(64)
-CREATE_ZYGOTE_START_COUNTER(32)
 
-static bool ensure_daemon_created(bool is_64bit) {
-  struct rezygiskd_status *status = is_64bit ? &status64 : &status32;
-  if (status->daemon_pid != -1) {
-    LOGI("ReZygiskd%s already running", is_64bit ? "64" : "32");
-
-    return status->daemon_running;
+static bool ensure_daemon_created(void) {
+  if (status64.daemon_pid != -1) {
+    LOGI("ReZygiskd64 already running");
+    return status64.daemon_running;
   }
 
   pid_t pid = fork();
   if (pid < 0) {
-    PLOGE("create ReZygiskd%s", is_64bit ? "64" : "32");
-
+    PLOGE("create ReZygiskd64");
     return false;
   }
 
   if (pid == 0) {
-    char daemon_name[PATH_MAX] = "./bin/zygiskd";
-    strcat(daemon_name, is_64bit ? "64" : "32");
-
+    const char *daemon_name = "./bin/zygiskd64";
     execl(daemon_name, daemon_name, NULL);
-
-    PLOGE("exec ReZygiskd%s failed", is_64bit ? "64" : "32");
-
+    PLOGE("exec ReZygiskd64 failed");
     exit(1);
   }
 
-  status->supported = true;
-  status->daemon_pid = pid;
-  status->daemon_running = true;
-
+  status64.supported = true;
+  status64.daemon_pid = pid;
+  status64.daemon_running = true;
   return true;
 }
 
@@ -498,58 +489,24 @@ static bool ensure_daemon_created(bool is_64bit) {
 
 #define APP_PROCESS "/system/bin/app_process"
 #define APP_PROCESS_64 APP_PROCESS "64"
-#define APP_PROCESS_32 APP_PROCESS "32"
 
-#define PRE_INJECT(abi, is_64)                                        \
-  if (strcmp(program, APP_PROCESS_ ## abi) == 0) {                    \
-    tracer = "./bin/zygisk-ptrace" # abi;                             \
-    is_tango = false;                                                 \
-                                                                      \
-    if (should_stop_inject ## abi()) {                                \
-      LOGW("Zygote" # abi " restart too much times, stop injecting"); \
-                                                                      \
-      tracing_state = STOPPING;                                       \
-      monitor_stop_reason = "Zygote crashed";                         \
-      ptrace(PTRACE_INTERRUPT, 1, 0, 0);                              \
-                                                                      \
-      break;                                                          \
-    }                                                                 \
-                                                                      \
-    if (!ensure_daemon_created(is_64)) {                              \
-      LOGW("ReZygiskd " #abi "-bit not running, stop injecting");     \
-                                                                      \
-      tracing_state = STOPPING;                                       \
-      monitor_stop_reason = "ReZygiskd not running";                  \
-      ptrace(PTRACE_INTERRUPT, 1, 0, 0);                              \
-                                                                      \
-      break;                                                          \
-    }                                                                 \
-  }
-
-#define PRE_INJECT_TANGO                                           \
-  if (strcmp(program, "/system_ext/bin/tango_translator") == 0) {  \
-    tracer = "./bin/zygisk-ptrace32";                              \
-    is_tango = true;                                               \
-                                                                   \
-    if (should_stop_inject32()) {                                  \
-      LOGW("Tango restart too many times, stop injecting");        \
-                                                                   \
-      tracing_state = STOPPING;                                    \
-      monitor_stop_reason = "Zygote crashed";                      \
-      ptrace(PTRACE_INTERRUPT, 1, 0, 0);                           \
-                                                                   \
-      break;                                                       \
-    }                                                              \
-                                                                   \
-    if (!ensure_daemon_created(false)) {                           \
-      LOGW("ReZygiskd 32-bit not running, stop injecting");        \
-                                                                   \
-      tracing_state = STOPPING;                                    \
-      monitor_stop_reason = "ReZygiskd not running";               \
-      ptrace(PTRACE_INTERRUPT, 1, 0, 0);                           \
-                                                                   \
-      break;                                                       \
-    }                                                              \
+#define PRE_INJECT_64                                                   \
+  if (strcmp(program, APP_PROCESS_64) == 0) {                            \
+    tracer = "./bin/zygisk-ptrace64";                                    \
+    if (should_stop_inject64()) {                                        \
+      LOGW("64-bit Zygote restarted too many times; stop injecting");   \
+      tracing_state = STOPPING;                                          \
+      monitor_stop_reason = "Zygote crashed";                            \
+      ptrace(PTRACE_INTERRUPT, 1, 0, 0);                                 \
+      break;                                                             \
+    }                                                                    \
+    if (!ensure_daemon_created()) {                                      \
+      LOGW("ReZygiskd64 not running; stop injecting");                   \
+      tracing_state = STOPPING;                                          \
+      monitor_stop_reason = "ReZygiskd not running";                     \
+      ptrace(PTRACE_INTERRUPT, 1, 0, 0);                                 \
+      break;                                                             \
+    }                                                                    \
   }
 
 int sigchld_signal_fd;
@@ -669,7 +626,6 @@ void sigchld_listener_callback() {
       }
 
       CHECK_DAEMON_EXIT(64)
-      CHECK_DAEMON_EXIT(32)
 
       pid_t state = 0;
       for (size_t i = 0; i < sigchld_process_count; i++) {
@@ -720,8 +676,6 @@ void sigchld_listener_callback() {
           LOGV("%d program %s", pid, program);
 
           const char *tracer = NULL;
-          bool is_tango = false;
-
           do {
             if (tracing_state != TRACING) {
               LOGD("Stopped injecting %d because status is not set to tracing", pid);
@@ -729,12 +683,10 @@ void sigchld_listener_callback() {
               break;
             }
 
-            PRE_INJECT(64, true)
-            PRE_INJECT(32, false)
-            PRE_INJECT_TANGO
+            PRE_INJECT_64
 
             if (tracer != NULL) {
-              LOGD("Stopping %d (program: %s, tracer: %s, tango: %s)", pid, program, tracer, is_tango ? "yes" : "no");
+              LOGD("Stopping %d (program: %s, tracer: %s)", pid, program, tracer);
 
               kill(pid, SIGSTOP);
               ptrace(PTRACE_CONT, pid, 0, 0);
@@ -757,22 +709,13 @@ void sigchld_listener_callback() {
                   char pid_str[32];
                   sprintf(pid_str, "%d", pid);
 
-                  LOGI("exec tracer command: %s trace %s --restart%s", tracer, pid_str, is_tango ? " --tango" : "");
+                  LOGI("exec tracer command: %s trace %s", tracer, pid_str);
 
                   /* INFO: Only restart companions if it's not the first time */
-                  if ((strcmp(program, APP_PROCESS_64) == 0 && count_zygote64 > 1) || ((strcmp(program, APP_PROCESS_32) == 0 || is_tango) && count_zygote32 > 1)) {
-                    if (is_tango) {
-                      execl(tracer, basename(tracer), "trace", pid_str, "--restart", "--tango", NULL);
-                    } else {
-                      execl(tracer, basename(tracer), "trace", pid_str, "--restart", NULL);
-                    }
-                  } else {
-                    if (is_tango) {
-                      execl(tracer, basename(tracer), "trace", pid_str, "--tango", NULL);
-                    } else {
-                      execl(tracer, basename(tracer), "trace", pid_str, NULL);
-                    }
-                  }
+                  if (count_zygote64 > 1)
+                    execl(tracer, basename(tracer), "trace", pid_str, "--restart", NULL);
+                  else
+                    execl(tracer, basename(tracer), "trace", pid_str, NULL);
 
                   PLOGE("exec");
 

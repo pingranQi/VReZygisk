@@ -62,12 +62,11 @@ else
   ui_print "- Device sdk: $API"
 fi
 
-# check architecture
-if [ "$ARCH" != "arm" ] && [ "$ARCH" != "arm64" ] && [ "$ARCH" != "x86" ] && [ "$ARCH" != "x64" ]; then
-  abort "! Unsupported platform: $ARCH"
-else
-  ui_print "- Device platform: $ARCH"
+# check architecture: this package contains arm64-v8a binaries only.
+if [ "$ARCH" != "arm64" ]; then
+  abort "! ReZygisk supports arm64 devices only (detected: $ARCH)"
 fi
+ui_print "- Device platform: arm64"
 
 ui_print "- Extracting verify.sh"
 unzip -o "$ZIPFILE" 'verify.sh' -d "$TMPDIR" >&2
@@ -109,11 +108,6 @@ mv "$TMPDIR/sepolicy.rule" "$MODPATH"
 
 mkdir "$MODPATH/bin"
 mkdir "$MODPATH/lib64"
-
-# This build intentionally supports arm64 devices only.
-if [ "$ARCH" != "arm64" ]; then
-  abort "! ReZygisk arm64-only build: unsupported installer architecture $ARCH"
-fi
 
 CPU_ABIS="$(getprop ro.product.cpu.abilist)"
 case ",$CPU_ABIS," in
