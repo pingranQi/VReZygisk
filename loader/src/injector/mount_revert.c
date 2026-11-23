@@ -21,6 +21,7 @@ struct mount_entry {
   char target[PATH_MAX];
   char fs_type[64];
   char source[PATH_MAX];
+  bool module_overlay;
 };
 
 static void decode_mount_field(char *field) {
@@ -72,6 +73,8 @@ static bool is_root_mount(const struct mount_entry *entry) {
     return true;
 
   /* Metamodule overlays commonly report a generic "overlay" source. */
+  if (entry->module_overlay) return true;
+
   if (strcmp(entry->fs_type, "overlay") == 0 &&
       (strstr(entry->root, "/adb/modules/") != NULL ||
        strstr(entry->source, "/data/adb/") != NULL))
@@ -105,6 +108,9 @@ static bool read_mount_entry(char *line, struct mount_entry *entry) {
 
   if (!separator) return false;
 
+  entry->module_overlay =
+      strstr(line, "/data/adb/modules") != NULL ||
+      strstr(line, "/debug_ramdisk") != NULL;
   *separator = '\0';
   if (sscanf(line, "%u %u %63s %4095s %4095s %255s",
              &id, &parent, device, root, target, options) != 6)
@@ -150,6 +156,14 @@ static int find_deepest_candidate(struct mount_entry *selected,
       free(line);
       fclose(fp);
       return -1;
+    }
+
+    /* A generic overlay source may still expose its module lowerdir only
+       through mount options, not through the source field. */
+    if (strcmp(current.fs_type, "overlay") == 0 &&
+        is_protected_resource_target(current.target)) {
+      *protected_resource = true;
+      continue;
     }
 
     if (!is_root_mount(&current)) continue;

@@ -715,6 +715,10 @@ bool umount_root(struct root_impl impl) {
     if (strcmp(mount.source, source_name) == 0 || (impl.impl == Magisk && strcmp(mount.source, "worker") == 0)) should_unmount = true;
     if (strncmp(mount.target, "/data/adb/modules", strlen("/data/adb/modules")) == 0) should_unmount = true;
     if (strncmp(mount.root, "/adb/modules/", strlen("/adb/modules/")) == 0) should_unmount = true;
+    if (strcmp(mount.type, "overlay") == 0 &&
+        (strstr(mount.fs_option, "/data/adb/modules") != NULL ||
+         strstr(mount.fs_option, "/debug_ramdisk") != NULL))
+      should_unmount = true;
 
     if (!should_unmount) continue;
 
