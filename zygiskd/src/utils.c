@@ -816,6 +816,61 @@ static bool umount_root(struct root_impl impl) {
   return all_unmounted;
 }
 
+/*
+ * Processes that must retain Android's original storage view.
+ *
+ * The UID passed here is the UID from specialize arguments (before mapping
+ * isolated-service UIDs back to their owning app UID).
+ */
+static bool process_name_is(const char *process, const char *package) {
+  size_t len = strlen(package);
+  return strncmp(process, package, len) == 0 &&
+         (process[len] == '\\0' || process[len] == ':');
+}
+
+bool should_preserve_mount_namespace(uid_t uid, const char *process) {
+  static const char *const protected_packages[] = {
+    "com.android.documentsui",
+    "com.google.android.documentsui",
+    "com.android.externalstorage",
+    "com.google.android.providers.media.module",
+    "com.android.providers.media",
+    "com.google.android.documentsui"
+  };
+
+  if (process == NULL || process[0] == '\\0') {
+    LOGW("Unknown target process; preserving original mount namespace");
+    return true;
+  }
+
+  /* Isolated services must retain the namespace and storage mounts inherited
+   * from Android. Android reserves appId 90000+ for isolated UIDs. */
+  unsigned int app_id = (unsigned int)uid % 100000u;
+  if (app_id >= 90000u) {
+    LOGI("Preserving mount namespace for isolated process %s (uid=%u)",
+         process, (unsigned int)uid);
+    return true;
+  }
+
+  for (size_t i = 0; i < sizeof(protected_packages) / sizeof(protected_packages[0]); i++) {
+    if (process_name_is(process, protected_packages[i])) {
+      LOGI("Preserving mount namespace for Android storage process %s (uid=%u)",
+           process, (unsigned int)uid);
+      return true;
+    }
+  }
+
+  /* Android system and core service UIDs are not safe to classify as ordinary
+   * app targets. Fail closed rather than cleaning an unknown system process. */
+  if (app_id < 10000u) {
+    LOGW("Unknown system process %s (uid=%u); preserving mount namespace",
+         process, (unsigned int)uid);
+    return true;
+  }
+
+  return false;
+}
+
 int save_mns_fd(int pid, enum MountNamespaceState mns_state, struct root_impl impl) {
   static int clean_namespace_fd = -1;
   static int mounted_namespace_fd = -1;
