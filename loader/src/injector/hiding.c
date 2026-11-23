@@ -108,9 +108,8 @@ static bool get_mapping_size(const struct hide_target *target,
   }
 
   const uintptr_t span = target->end - target->start;
-  if (span > (uintptr_t)SIZE_MAX) return false;
-
   const size_t size = (size_t)span;
+  if ((uintptr_t)size != span) return false;
   if (size == 0 || (target->start % page_size) != 0 ||
       (size % page_size) != 0) {
     return false;
@@ -123,6 +122,10 @@ static bool get_mapping_size(const struct hide_target *target,
 static bool hide_one_mapping(const struct hide_target *target,
                              size_t page_size) {
   size_t size = 0;
+  if (target == NULL) {
+    LOGW("anonymous-memory: skip null mapping target");
+    return false;
+  }
   if (!get_mapping_size(target, page_size, &size)) {
     LOGW("anonymous-memory: skip invalid mapping range %p-%p",
          (void *)target->start, (void *)target->end);
