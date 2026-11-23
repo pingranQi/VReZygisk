@@ -83,6 +83,12 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
   }
 
   void *libc_return_addr = find_module_return_addr(map, "libc.so");
+  if (!libc_return_addr) {
+    LOGE("Failed to locate libc return address for remote entry");
+    free_maps(local_map);
+    free_maps(map);
+    return false;
+  }
   uintptr_t remote_base = 0, injector_entry = 0;
   size_t remote_size = 0;
 
@@ -96,7 +102,6 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
   }
 
   free_maps(local_map);
-  free_maps(map);
 
   long args[3] = {
     (long)remote_base,
@@ -115,12 +120,18 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
   if (!injector_ok) {
     LOGE("injector entry faulted at %p", (void *)regs.REG_IP);
 
+    if (!remote_csoloader_unmap(pid, &regs, map, remote_base, remote_size))
+      LOGE("Remote bootstrap image could not be reclaimed after entry failure");
+
+    free_maps(map);
     backup.REG_IP = (long)libc_init_target;
-    set_regs(pid, &backup);
+    if (!set_regs(pid, &backup))
+      LOGE("Failed to restore registers after remote entry failure");
 
     return false;
   }
 
+  free_maps(map);
   backup.REG_IP = (long)libc_init_target;
   if (!set_regs(pid, &backup)) return false;
 
