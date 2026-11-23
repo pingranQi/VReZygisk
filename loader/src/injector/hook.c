@@ -1109,11 +1109,6 @@ static bool load_modules_only(void) {
     return true;
   }
 
-  if (ms.modules_count == 0) {
-    free_modules(&ms);
-    return true;
-  }
-
   zygisk_modules = (struct rezygisk_module *)calloc(ms.modules_count, sizeof(struct rezygisk_module));
   if (!zygisk_modules) {
     LOGE("Failed to allocate memory for modules");
