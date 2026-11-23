@@ -26,7 +26,6 @@ jobs:
             exit 1
           fi
           test -f loader/src/external/csoloader/include/csoloader.h
-          test -f loader/src/external/plti/include/plti.h
 
       - name: Setup NDK_PATH
         run: echo "NDK_PATH=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
