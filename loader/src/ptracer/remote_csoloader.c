@@ -288,6 +288,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   ElfW(Addr) symtab_vaddr = 0;
   ElfW(Addr) strtab_vaddr = 0;
   ElfW(Addr) gnu_hash_vaddr = 0;
+  ElfW(Addr) sysv_hash_vaddr = 0;
   ElfW(Addr) rel_vaddr = 0;
   ElfW(Addr) rela_vaddr = 0;
   ElfW(Addr) jmprel_vaddr = 0;
@@ -328,6 +329,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       case DT_PLTRELSZ:  jmprel_sz = (size_t)dyn[i].d_un.d_val; break;
       case DT_PLTREL:    out->pltrel_type = (int)dyn[i].d_un.d_val; break;
       case DT_GNU_HASH:  gnu_hash_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
+      case DT_HASH:      sysv_hash_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
       case DT_NEEDED: {
         if (needed_str_offsets && needed_i < needed_count)
           needed_str_offsets[needed_i++] = (size_t)dyn[i].d_un.d_val;
@@ -422,6 +424,16 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
 
   out->nsyms = 0;
 
+  if (sysv_hash_vaddr) {
+    off_t hash_off = 0;
+    uint32_t hash_header[2];
+    if (vaddr_to_offset(phdr, eh->e_phnum, sysv_hash_vaddr, &hash_off) &&
+        read_loop_offset(fd, hash_header, sizeof(hash_header), hash_off) &&
+        hash_header[1] > 0) {
+      out->nsyms = hash_header[1];
+    }
+  }
+
   if (gnu_hash_vaddr) {
     off_t gnu_hash_off = 0;
 
@@ -512,9 +524,11 @@ static bool find_dynsym_value(int fd, const struct elf_dyn_info *info, const cha
 #ifdef __LP64__
   #define ELF_R_TYPE ELF64_R_TYPE
   #define ELF_R_SYM ELF64_R_SYM
+  #define ELF_ST_BIND ELF64_ST_BIND
 #else
   #define ELF_R_TYPE ELF32_R_TYPE
   #define ELF_R_SYM ELF32_R_SYM
+  #define ELF_ST_BIND ELF32_ST_BIND
 #endif
 
 /* INFO: Resolve a symbol address - either local or from DT_NEEDED libraries. */
@@ -524,7 +538,10 @@ static bool resolve_symbol_addr(int fd, const struct elf_dyn_info *info,
                                 size_t sym_idx, uintptr_t *out_addr) {
   ElfW(Sym) sym;
 
-  if (!read_loop_offset(fd, &sym, sizeof(sym), info->symtab_off + (off_t)(sym_idx * info->syment)))
+  if (!info || !out_addr || info->syment != sizeof(ElfW(Sym)) ||
+      info->nsyms == 0 || sym_idx >= info->nsyms ||
+      sym_idx > (size_t)INT64_MAX / info->syment ||
+      !read_loop_offset(fd, &sym, sizeof(sym), info->symtab_off + (off_t)(sym_idx * info->syment)))
     return false;
 
   /* INFO: Defined symbol - use load_bias + value */
@@ -538,7 +555,7 @@ static bool resolve_symbol_addr(int fd, const struct elf_dyn_info *info,
   if (sym.st_name == 0 || sym.st_name >= info->strsz) return false;
 
   const char *name = &info->strtab[sym.st_name];
-  if (!name || !*name) return false;
+  if (!*name || !memchr(name, '\0', info->strsz - sym.st_name)) return false;
 
   /* TODO: In CSOLoader, they're optional. Since it's broken to solve those *ATM*, just bypass. */
   if (strcmp(name, "__register_frame") == 0 || strcmp(name, "__deregister_frame") == 0) {
@@ -580,8 +597,13 @@ static bool resolve_symbol_addr(int fd, const struct elf_dyn_info *info,
     }
   }
 
-  LOGE("Failed to resolve external symbol %s", name);
+  if (ELF_ST_BIND(sym.st_info) == STB_WEAK) {
+    LOGD("Unresolved weak symbol %s; using zero", name);
+    *out_addr = 0;
+    return true;
+  }
 
+  LOGE("Failed to resolve external symbol %s", name);
   return false;
 }
 
