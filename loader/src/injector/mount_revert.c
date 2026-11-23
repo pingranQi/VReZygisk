@@ -205,6 +205,10 @@ static bool inspect_mount_fds(const struct mount_entry *mount) {
     if (length < 0) continue;
     target[length] = 0;
 
+    /* readlink(2) appends this marker for an unlinked but still-open file. */
+    char *deleted = strstr(target, " (deleted)");
+    if (deleted) *deleted = 0;
+
     if (is_root_artifact_fd_path(target)) {
       if (close(fd) == -1) {
         PLOGE("close root artifact FD");
