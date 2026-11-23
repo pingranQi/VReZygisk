@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <sys/types.h>
 #include <string.h>
 
 #include <linux/un.h>
@@ -314,7 +316,7 @@ void rezygiskd_zygote_restart() {
   close(fd);
 }
 
-bool rezygiskd_update_mns(enum mount_namespace_state nms_state, char *buf, size_t buf_size) {
+bool rezygiskd_update_mns(enum mount_namespace_state nms_state, uid_t uid, const char *process, char *buf, size_t buf_size) {
   int fd = rezygiskd_connect(1);
   if (fd == -1) return false;
 
