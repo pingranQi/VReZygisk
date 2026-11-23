@@ -996,8 +996,10 @@ bool umount_root(struct root_impl impl) {
   }
 
   /* Detach leaves first; a parent detach must never swallow an unprocessed child. */
-  qsort(targets_to_unmount, num_targets, sizeof(*targets_to_unmount),
-        compare_mount_target_depth);
+  if (num_targets > 1) {
+    qsort(targets_to_unmount, num_targets, sizeof(*targets_to_unmount),
+          compare_mount_target_depth);
+  }
 
   bool all_unmounted = true;
   for (size_t i = 0; i < num_targets; i++) {
