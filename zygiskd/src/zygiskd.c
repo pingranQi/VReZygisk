@@ -672,9 +672,9 @@ void zygiskd_start(char *restrict argv[]) {
         }
 
         if ((enum MountNamespaceState)mns_state == Clean)
-          save_mns_fd(pid, Mounted, impl);
+          save_mns_fd(pid, (uid_t)target_uid, Mounted, impl);
 
-        int ns_fd = save_mns_fd(pid, (enum MountNamespaceState)mns_state, impl);
+        int ns_fd = save_mns_fd(pid, (uid_t)target_uid, (enum MountNamespaceState)mns_state, impl);
         if (ns_fd == -1) {
           LOGE("Failed to save mount namespace fd for pid %d: %s", pid, strerror(errno));
 
