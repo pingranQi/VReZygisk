@@ -314,35 +314,6 @@ void rezygiskd_zygote_restart() {
   close(fd);
 }
 
-bool rezygiskd_update_mns(enum mount_namespace_state nms_state, char *buf, size_t buf_size) {
-  int fd = rezygiskd_connect(1);
-  if (fd == -1) return false;
-
-  safe_write(write_uint8_t(fd, (uint8_t)UpdateMountNamespace), "UpdateMountNamespace action", return false);
-  safe_write(write_uint32_t(fd, (uint32_t)getpid()), "pid", return false);
-  safe_write(write_uint8_t(fd, (uint8_t)nms_state), "mount namespace state", return false);
-
-  uint32_t target_pid = 0;
-  safe_read(read_uint32_t(fd, &target_pid), "target pid", return false);
-
-  uint32_t target_fd = 0;
-  safe_read(read_uint32_t(fd, &target_fd), "target fd", return false);
-
-  if (target_fd == 0) {
-    LOGE("Failed to get target fd");
-
-    close(fd);
-
-    return false;
-  }
-
-  snprintf(buf, buf_size, "/proc/%u/fd/%u", target_pid, target_fd);
-
-  close(fd);
-
-  return true;
-}
-
 bool rezygiskd_remove_module(size_t index) {
   int fd = rezygiskd_connect(1);
   if (fd == -1) return false;
