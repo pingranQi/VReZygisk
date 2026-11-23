@@ -387,6 +387,15 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
     }
   }
 
+  /* Reject partial or unsupported dynamic relocation descriptions. */
+  if ((rel_vaddr == 0) != (rel_sz == 0) ||
+      (rela_vaddr == 0) != (rela_sz == 0) ||
+      (jmprel_vaddr == 0) != (jmprel_sz == 0) ||
+      (jmprel_sz && out->pltrel_type != DT_REL && out->pltrel_type != DT_RELA)) {
+    LOGE("Inconsistent dynamic relocation metadata");
+    goto cleanup;
+  }
+
   /* INFO: Validate required entries */
   if (!syment) syment = sizeof(ElfW(Sym));
 
@@ -531,6 +540,16 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
         }
       }
     }
+  }
+
+  /* Validate the entire dynamic symbol table after deriving its bound from DT_HASH/GNU_HASH. */
+  off_t checked_symtab_off = 0;
+  if (out->nsyms == 0 || out->nsyms > SIZE_MAX / sizeof(ElfW(Sym)) ||
+      !vaddr_to_offset(phdr, eh->e_phnum, symtab_vaddr,
+                       out->nsyms * sizeof(ElfW(Sym)), &checked_symtab_off) ||
+      checked_symtab_off != out->symtab_off) {
+    LOGE("Invalid or unbounded dynamic symbol table");
+    goto cleanup;
   }
 
   success = true;
