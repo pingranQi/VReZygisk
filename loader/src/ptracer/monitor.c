@@ -441,7 +441,6 @@ void rezygiskd_listener_stop() {
   }
 
 CREATE_ZYGOTE_START_COUNTER(64)
-CREATE_ZYGOTE_START_COUNTER(32)
 
 static bool ensure_daemon_created(bool is_64bit) {
   struct rezygiskd_status *status = is_64bit ? &status64 : &status32;
@@ -498,7 +497,6 @@ static bool ensure_daemon_created(bool is_64bit) {
 
 #define APP_PROCESS "/system/bin/app_process"
 #define APP_PROCESS_64 APP_PROCESS "64"
-#define APP_PROCESS_32 APP_PROCESS "32"
 
 #define PRE_INJECT(abi, is_64)                                        \
   if (strcmp(program, APP_PROCESS_ ## abi) == 0) {                    \
@@ -669,7 +667,6 @@ void sigchld_listener_callback() {
       }
 
       CHECK_DAEMON_EXIT(64)
-      CHECK_DAEMON_EXIT(32)
 
       pid_t state = 0;
       for (size_t i = 0; i < sigchld_process_count; i++) {
@@ -730,8 +727,6 @@ void sigchld_listener_callback() {
             }
 
             PRE_INJECT(64, true)
-            PRE_INJECT(32, false)
-            PRE_INJECT_TANGO
 
             if (tracer != NULL) {
               LOGD("Stopping %d (program: %s, tracer: %s, tango: %s)", pid, program, tracer, is_tango ? "yes" : "no");
@@ -760,7 +755,7 @@ void sigchld_listener_callback() {
                   LOGI("exec tracer command: %s trace %s --restart%s", tracer, pid_str, is_tango ? " --tango" : "");
 
                   /* INFO: Only restart companions if it's not the first time */
-                  if ((strcmp(program, APP_PROCESS_64) == 0 && count_zygote64 > 1) || ((strcmp(program, APP_PROCESS_32) == 0 || is_tango) && count_zygote32 > 1)) {
+                  if (strcmp(program, APP_PROCESS_64) == 0 && count_zygote64 > 1) {
                     if (is_tango) {
                       execl(tracer, basename(tracer), "trace", pid_str, "--restart", "--tango", NULL);
                     } else {
