@@ -296,11 +296,16 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   }
 
   struct stat st;
+  off_t checked_dyn_off = 0;
   if (!dyn_phdr || dyn_phdr->p_filesz == 0 ||
+      dyn_phdr->p_filesz > SIZE_MAX ||
       dyn_phdr->p_filesz % sizeof(ElfW(Dyn)) != 0 ||
       fstat(fd, &st) != 0 ||
       dyn_phdr->p_offset > (ElfW(Off))st.st_size ||
-      dyn_phdr->p_filesz > (ElfW(Xword))((ElfW(Off))st.st_size - dyn_phdr->p_offset)) {
+      dyn_phdr->p_filesz > (ElfW(Xword))((ElfW(Off))st.st_size - dyn_phdr->p_offset) ||
+      !vaddr_to_offset(phdr, eh->e_phnum, dyn_phdr->p_vaddr,
+                       (size_t)dyn_phdr->p_filesz, &checked_dyn_off) ||
+      checked_dyn_off != (off_t)dyn_phdr->p_offset) {
     LOGE("Missing or out-of-bounds PT_DYNAMIC");
     return false;
   }
@@ -478,6 +483,14 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
     goto cleanup;
   }
   out->strtab[strsz] = '\0';
+
+  for (size_t i = 0; i < needed_count; i++) {
+    size_t off = needed_str_offsets[i];
+    if (off >= strsz || !memchr(out->strtab + off, '\0', strsz - off)) {
+      LOGE("Invalid or unterminated DT_NEEDED string offset");
+      goto cleanup;
+    }
+  }
 
   if (syment != sizeof(ElfW(Sym)) ||
       (rel_sz && rel_sz % sizeof(ElfW(Rel)) != 0) ||
