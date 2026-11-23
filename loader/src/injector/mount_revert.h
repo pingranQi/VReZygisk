@@ -7,4 +7,7 @@
  * mount namespace. False means use the cached clean namespace fallback. */
 bool revert_root_mounts(void);
 
+/* Close inherited proc mount descriptors and refresh the current mountinfo view. */
+void refresh_mountinfo_fds(bool webview_zygote);
+
 #endif

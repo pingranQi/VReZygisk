@@ -7,6 +7,9 @@
 #include <strings.h>
 #include <errno.h>
 #include <limits.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #include <sched.h>
 #include <sys/mount.h>
@@ -18,6 +21,7 @@
 #define MAX_REVERT_MOUNTS 128
 
 struct mount_entry {
+  unsigned int id;
   char root[PATH_MAX];
   char target[PATH_MAX];
   char fs_type[64];
@@ -117,6 +121,8 @@ static bool read_mount_entry(char *line, struct mount_entry *entry) {
              &id, &parent, device, root, target, options) != 6)
     return false;
 
+  entry->id = id;
+
   if (sscanf(separator + 3, "%63s %4095s",
              entry->fs_type, entry->source) != 2)
     return false;
@@ -131,6 +137,161 @@ static bool read_mount_entry(char *line, struct mount_entry *entry) {
   decode_mount_field(entry->target);
   decode_mount_field(entry->source);
   return true;
+}
+
+ 
+static bool is_mountinfo_fd_path(const char *path) {
+  if (strncmp(path, "/proc/", 6) != 0) return false;
+  size_t len = strlen(path);
+  return (len >= 10 && strcmp(path + len - 10, "/mountinfo") == 0) ||
+         (len >= 7 && strcmp(path + len - 7, "/mounts") == 0);
+}
+
+static bool is_root_artifact_fd_path(const char *path) {
+  return path_is_or_below(path, "/data/adb") ||
+         path_is_or_below(path, "/debug_ramdisk") ||
+         path_is_or_below(path, "/sbin/.magisk") ||
+         strstr(path, "/data/adb/modules/") != NULL;
+}
+
+static bool read_fd_mount_id(int fd, unsigned int *mount_id) {
+  char path[64], line[256];
+  snprintf(path, sizeof(path), "/proc/self/fdinfo/%d", fd);
+  FILE *fp = fopen(path, "r");
+  if (!fp) return false;
+
+  bool found = false;
+  while (fgets(line, sizeof(line), fp)) {
+    unsigned int value;
+    if (sscanf(line, "mnt_id:\\t%u", &value) == 1 ||
+        sscanf(line, "mnt_id: %u", &value) == 1) {
+      *mount_id = value;
+      found = true;
+      break;
+    }
+  }
+
+  fclose(fp);
+  return found;
+}
+
+/*
+ * Examine descriptors against the exact mount ID, not merely their pathname.
+ * Close only descriptors whose resolved path unambiguously names root storage.
+ * An unknown descriptor pinned to the candidate mount forces namespace fallback.
+ */
+static bool inspect_mount_fds(const struct mount_entry *mount) {
+  DIR *dir = opendir("/proc/self/fd");
+  if (!dir) {
+    PLOGE("open /proc/self/fd for mount FD inspection");
+    return false;
+  }
+
+  int dirfd_value = dirfd(dir);
+  struct dirent *entry;
+  bool safe = true;
+
+  while ((entry = readdir(dir))) {
+    char *end = NULL;
+    long value = strtol(entry->d_name, &end, 10);
+    if (!entry->d_name[0] || !end || *end || value < 0 ||
+        value > INT_MAX || value == dirfd_value)
+      continue;
+
+    int fd = (int)value;
+    char target[PATH_MAX];
+    ssize_t length = readlinkat(dirfd_value, entry->d_name,
+                                target, sizeof(target) - 1);
+    if (length < 0) continue;
+    target[length] = '\\0';
+
+    if (is_root_artifact_fd_path(target)) {
+      if (close(fd) == -1) {
+        PLOGE("close root artifact FD");
+        safe = false;
+      } else {
+        LOGW("Closed root artifact FD %d -> %s", fd, target);
+      }
+      continue;
+    }
+
+    unsigned int fd_mount_id = 0;
+    if (!read_fd_mount_id(fd, &fd_mount_id)) continue;
+    if (fd_mount_id != mount->id) continue;
+
+    LOGW("FD %d (%s) pins candidate mount id %u at %s",
+         fd, target, mount->id, mount->target);
+    safe = false;
+  }
+
+  closedir(dir);
+  return safe;
+}
+
+/*
+ * Bionic does not maintain a global libc mountinfo cache. The stale state of
+ * concern is an inherited open procfs descriptor. Close those descriptors and
+ * force a fresh open/read after mount namespace changes.
+ */
+void refresh_mountinfo_fds(bool webview_zygote) {
+  DIR *dir = opendir("/proc/self/fd");
+  if (dir) {
+    int dirfd_value = dirfd(dir);
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+      char *end = NULL;
+      long value = strtol(entry->d_name, &end, 10);
+      if (!entry->d_name[0] || !end || *end || value < 0 ||
+          value > INT_MAX || value == dirfd_value)
+        continue;
+
+      char target[PATH_MAX];
+      ssize_t length = readlinkat(dirfd_value, entry->d_name,
+                                  target, sizeof(target) - 1);
+      if (length < 0) continue;
+      target[length] = '\\0';
+      if (is_mountinfo_fd_path(target)) {
+        LOGD("Closing inherited proc mount descriptor %d -> %s",
+             (int)value, target);
+        close((int)value);
+      }
+    }
+    closedir(dir);
+  } else {
+    PLOGE("open /proc/self/fd while refreshing mountinfo");
+  }
+
+  int fd = open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
+  if (fd >= 0) {
+    char buffer[4096];
+    (void)read(fd, buffer, sizeof(buffer));
+    close(fd);
+  } else {
+    PLOGE("reopen /proc/self/mountinfo after namespace change");
+  }
+
+  if (webview_zygote) {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) {
+      PLOGE("open WebView Zygote maps");
+      return;
+    }
+
+    char line[PATH_MAX + 256];
+    while (fgets(line, sizeof(line), maps)) {
+      if (strstr(line, "/data/adb/") ||
+          strstr(line, "/debug_ramdisk/") ||
+          strstr(line, "/sbin/.magisk/")) {
+        /*
+         * Do not munmap inherited mappings here: ART, linker and WebView may
+         * still hold relocations/function pointers into them. Report the
+         * mapping for explicit review instead of risking a Zygote crash.
+         */
+        LOGW("WebView Zygote retains root-backed mapping: %s", line);
+      }
+    }
+    fclose(maps);
+  }
 }
 
 /* 1 = candidate found, 0 = none, -1 = mountinfo is unsafe to act on. */
@@ -224,11 +385,17 @@ bool revert_root_mounts(void) {
     state = find_deepest_candidate(&selected, &protected_resource);
     if (state == 0) {
       LOGI("Root/module mounts detached from private process namespace");
+      refresh_mountinfo_fds(false);
       return true;
     }
 
     if (state < 0 || protected_resource) {
       LOGW("Encountered protected or unreadable mount during revert");
+      return false;
+    }
+
+    if (!inspect_mount_fds(&selected)) {
+      LOGW("Candidate mount has unknown or unclosable FD references; use clean namespace fallback");
       return false;
     }
 
