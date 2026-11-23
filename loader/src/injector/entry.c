@@ -8,7 +8,7 @@
 #include "ptrace_clear.h"
 
 __attribute__((visibility("default")))
-void entry(void *addr, size_t size, int tango_flag) {
+int entry(void *addr, size_t size, int tango_flag) {
   LOGD("ReZygisk%s library injected, version %s", tango_flag ? " [TANGO]" : "", ZKSU_VERSION);
 
   start_addr = addr;
@@ -18,11 +18,17 @@ void entry(void *addr, size_t size, int tango_flag) {
   if (stat("/data/adb/modules/rezygisk/lib" LP_SELECT("", "64") "/libzygisk.so", &self_stat) != 0) {
     PLOGE("Failed to stat self library");
 
-    return;
+    return -1;
   }
 
   self_dev = self_stat.st_dev;
   self_ino = self_stat.st_ino;
+
+  if (!rezygiskd_zygote_injected()) {
+    LOGE("ReZygiskd is not running; refusing to install hooks");
+
+    return -2;
+  }
 
   LOGD("start plt hooking");
   hook_functions();
@@ -34,11 +40,6 @@ void entry(void *addr, size_t size, int tango_flag) {
     perform_ptrace_message_clear();
   }
 
-  if (!rezygiskd_zygote_injected()) {
-    LOGE("ReZygiskd is not running");
-
-    return;
-  }
-
   LOGD("Zygisk library execution done, addr: %p, size: %zu", addr, size);
+  return 0;
 }
