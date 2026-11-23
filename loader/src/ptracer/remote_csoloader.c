@@ -374,6 +374,21 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       case DT_RELASZ:    rela_sz = (size_t)dyn[i].d_un.d_val; break;
       case DT_JMPREL:    jmprel_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
       case DT_PLTRELSZ:  jmprel_sz = (size_t)dyn[i].d_un.d_val; break;
+#ifdef DT_RELR
+       case DT_RELR:
+       case DT_RELRSZ:
+       case DT_RELRENT:
+         LOGE("DT_RELR relocations are not supported by remote CSOLoader");
+         goto cleanup;
+#endif
+#ifdef DT_ANDROID_REL
+       case DT_ANDROID_REL:
+       case DT_ANDROID_RELSZ:
+       case DT_ANDROID_RELA:
+       case DT_ANDROID_RELASZ:
+         LOGE("Android packed relocations are not supported by remote CSOLoader");
+         goto cleanup;
+#endif
       case DT_PLTREL:    out->pltrel_type = (int)dyn[i].d_un.d_val; break;
       case DT_GNU_HASH:  gnu_hash_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
       case DT_HASH:      sysv_hash_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
