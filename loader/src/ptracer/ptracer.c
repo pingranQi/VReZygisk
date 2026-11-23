@@ -18,7 +18,7 @@
 
 #include "remote_csoloader.h"
 
-bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, uintptr_t libc_init_got_slot, bool is_tango) {
+bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, uintptr_t libc_init_got_slot) {
   LOGI("injecting %s to zygote %d via GOT hook", lib_path, pid);
 
   uintptr_t break_addr = (uintptr_t)((intptr_t)(-0x0F & ~1) | (intptr_t)(libc_init_target & 1));
@@ -106,7 +106,7 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
   long args[3] = {
     (long)remote_base,
     (long)remote_size,
-    is_tango ? 1 : 0
+    0
   };
   uintptr_t entry_status = remote_call(pid, &regs, injector_entry,
                                          (uintptr_t)libc_return_addr, args, 3);
@@ -157,7 +157,7 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
     return false;                             \
   }
 
-bool trace_zygote(int pid, bool tango_flag) {
+bool trace_zygote(int pid) {
   LOGI("start tracing %d (tracer %d)", pid, getpid());
 
   /* INFO: Set value 0 to make compiler happy. */
@@ -166,7 +166,7 @@ bool trace_zygote(int pid, bool tango_flag) {
   struct kernel_version version = parse_kversion();
   if (version.major > 3 || (version.major == 3 && version.minor >= 8)) {
     if (ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_EXITKILL | PTRACE_O_TRACESECCOMP) == -1) {
-      PLOGE("seize for tango");
+      PLOGE("seize with EXITKILL and SECCOMP tracing");
 
       return false;
     }
@@ -201,7 +201,7 @@ bool trace_zygote(int pid, bool tango_flag) {
 
   if (STOPPED_WITH(SIGSTOP, PTRACE_EVENT_STOP)) {
     char *lib_path = "/data/adb/modules/rezygisk/lib64/libzygisk.so";
-    if (!inject_on_main(pid, lib_path, libc_init_resolved, libc_init_got_slot, tango_flag)) {
+    if (!inject_on_main(pid, lib_path, libc_init_resolved, libc_init_got_slot)) {
       LOGE("failed to inject");
 
       return false;
