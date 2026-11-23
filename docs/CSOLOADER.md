@@ -20,14 +20,14 @@ git submodule update --init --recursive loader/src/external/csoloader
 Inspect the current pin:
 
 ```sh
-scripts/update-csoloader.sh status
+sh scripts/update-csoloader.sh status
 ```
 
 To evaluate a newer upstream revision, fetch and detach the submodule at that
 revision:
 
 ```sh
-scripts/update-csoloader.sh update <tag-or-commit>
+sh scripts/update-csoloader.sh update <tag-or-commit>
 git diff --submodule=log -- .gitmodules loader/src/external/csoloader
 ```
 
