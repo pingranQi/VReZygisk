@@ -125,6 +125,11 @@ static bool compute_load_layout(int fd, size_t page_size, ElfW(Ehdr) *eh,
   size_t load_count = 0;
 
   for (int i = 0; i < eh->e_phnum; i++) {
+    if (phdr[i].p_type == PT_TLS) {
+      LOGE("Remote CSOLoader does not implement ELF TLS; rejecting image");
+      free(phdr);
+      return false;
+    }
     if (phdr[i].p_type != PT_LOAD) continue;
 
     load_count++;
@@ -567,10 +572,12 @@ static bool find_dynsym_value(int fd, const struct elf_dyn_info *info, const cha
   #define ELF_R_TYPE ELF64_R_TYPE
   #define ELF_R_SYM ELF64_R_SYM
   #define ELF_ST_BIND ELF64_ST_BIND
+  #define ELF_ST_TYPE ELF64_ST_TYPE
 #else
   #define ELF_R_TYPE ELF32_R_TYPE
   #define ELF_R_SYM ELF32_R_SYM
   #define ELF_ST_BIND ELF32_ST_BIND
+  #define ELF_ST_TYPE ELF32_ST_TYPE
 #endif
 
 /* INFO: Resolve a symbol address - either local or from DT_NEEDED libraries. */
@@ -585,6 +592,14 @@ static bool resolve_symbol_addr(int fd, const struct elf_dyn_info *info,
       sym_idx > (size_t)INT64_MAX / info->syment ||
       !read_loop_offset(fd, &sym, sizeof(sym), info->symtab_off + (off_t)(sym_idx * info->syment)))
     return false;
+
+  /* IFUNC symbols require executing their resolver; never treat st_value as final. */
+#ifdef STT_GNU_IFUNC
+  if (ELF_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
+    LOGE("Remote CSOLoader does not implement GNU IFUNC resolvers");
+    return false;
+  }
+#endif
 
   /* INFO: Defined symbol - use load_bias + value */
   if (sym.st_shndx != SHN_UNDEF) {
@@ -670,6 +685,11 @@ static bool apply_rela_section(int pid, int fd, const struct elf_dyn_info *info,
 
     unsigned type = (unsigned)ELF_R_TYPE(r.r_info);
     unsigned sym = (unsigned)ELF_R_SYM(r.r_info);
+    if ((uintptr_t)r.r_offset > UINTPTR_MAX - load_bias ||
+        !vaddr_range_in_load_segment(phdr, phnum, r.r_offset, sizeof(ElfW(Addr)), true)) {
+      LOGE("RELA target is outside a writable PT_LOAD segment");
+      return false;
+    }
     uintptr_t target = (uintptr_t)load_bias + (uintptr_t)r.r_offset;
     ElfW(Addr) value = 0;
 
@@ -730,6 +750,11 @@ static bool apply_rel_section(int pid, int fd, const struct elf_dyn_info *info,
 
     unsigned type = (unsigned)ELF_R_TYPE(r.r_info);
     unsigned sym = (unsigned)ELF_R_SYM(r.r_info);
+    if ((uintptr_t)r.r_offset > UINTPTR_MAX - load_bias ||
+        !vaddr_range_in_load_segment(phdr, phnum, r.r_offset, sizeof(ElfW(Addr)), true)) {
+      LOGE("REL target is outside a writable PT_LOAD segment");
+      return false;
+    }
     uintptr_t target = (uintptr_t)load_bias + (uintptr_t)r.r_offset;
     ElfW(Addr) addend = 0;
     ElfW(Addr) value = 0;
@@ -796,16 +821,17 @@ static bool apply_rel_section(int pid, int fd, const struct elf_dyn_info *info,
 
 static bool apply_relocations(int pid, int fd, const struct elf_dyn_info *info,
                               struct maps_info *local_map, struct maps_info *remote_map,
-                              const char *const *needed_paths, uintptr_t load_bias) {
+                              const char *const *needed_paths, const ElfW(Phdr) *phdr,
+                              int phnum, uintptr_t load_bias) {
   /* INFO: Process RELA section */
   if (info->rela_sz && info->rela_off) {
-    if (!apply_rela_section(pid, fd, info, local_map, remote_map, needed_paths, load_bias, info->rela_off, info->rela_sz))
+    if (!apply_rela_section(pid, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->rela_off, info->rela_sz))
       return false;
   }
 
   /* INFO: Process REL section */
   if (info->rel_sz && info->rel_off) {
-    if (!apply_rel_section(pid, fd, info, local_map, remote_map, needed_paths, load_bias, info->rel_off, info->rel_sz))
+    if (!apply_rel_section(pid, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->rel_off, info->rel_sz))
       return false;
   }
 
@@ -1231,7 +1257,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   }
 
   /* INFO: Apply all relocations */
-  if (!apply_relocations(pid, fd, &dinfo, local_map, remote_map, needed_paths, load_bias)) {
+  if (!apply_relocations(pid, fd, &dinfo, local_map, remote_map, needed_paths, phdr, eh.e_phnum, load_bias)) {
     LOGE("Failed to apply relocations");
 
     free((void *)needed_paths);
