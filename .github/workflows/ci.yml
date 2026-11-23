@@ -18,6 +18,16 @@ jobs:
           submodules: "recursive"
           fetch-depth: 0
 
+      - name: Verify pinned submodules
+        run: |
+          git submodule status --recursive
+          if git submodule status --recursive | grep -Eq '^[+-U]'; then
+            echo "A submodule is uninitialized, modified, or conflicted" >&2
+            exit 1
+          fi
+          test -f loader/src/external/csoloader/include/csoloader.h
+          test -f loader/src/external/plti/include/plti.h
+
       - name: Setup NDK_PATH
         run: echo "NDK_PATH=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
 
