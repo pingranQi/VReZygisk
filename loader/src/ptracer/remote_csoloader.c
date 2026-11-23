@@ -77,6 +77,11 @@ static bool compute_load_layout(int fd, size_t page_size, ElfW(Ehdr) *eh,
 
   if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 ||
       eh->e_ident[EI_VERSION] != EV_CURRENT ||
+#ifdef __LP64__
+      eh->e_ident[EI_CLASS] != ELFCLASS64 ||
+#else
+      eh->e_ident[EI_CLASS] != ELFCLASS32 ||
+#endif
       eh->e_version != EV_CURRENT ||
       eh->e_ident[EI_DATA] != ELFDATA2LSB ||
       eh->e_ehsize != sizeof(*eh) ||
@@ -95,11 +100,6 @@ static bool compute_load_layout(int fd, size_t page_size, ElfW(Ehdr) *eh,
 #elif defined(__i386__)
   if (eh->e_machine != EM_386) return false;
 #endif
-
-  if ((uint64_t)eh->e_phnum > SIZE_MAX / sizeof(ElfW(Phdr))) {
-    LOGE("Program header count overflow");
-    return false;
-  }
 
   size_t phdr_sz = (size_t)eh->e_phnum * sizeof(ElfW(Phdr));
   if (eh->e_phoff > (ElfW(Off))st.st_size ||
@@ -157,7 +157,7 @@ static bool compute_load_layout(int fd, size_t page_size, ElfW(Ehdr) *eh,
 
   lo = (ElfW(Addr))page_start((uintptr_t)lo, page_size);
   uintptr_t aligned_hi = page_end((uintptr_t)hi, page_size);
-  if (aligned_hi == 0 || aligned_hi <= lo || aligned_hi - lo > SIZE_MAX) {
+  if (aligned_hi == 0 || aligned_hi <= lo) {
     LOGE("PT_LOAD mapping size overflow");
     free(phdr);
     return false;
@@ -936,6 +936,15 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   }
  #endif
 
+  if (remote_base < (uintptr_t)min_vaddr ||
+      map_size > UINTPTR_MAX - remote_base) {
+    LOGE("Remote image address range overflow");
+    REMOTE_CLEANUP_MAPPING();
+    free(phdr);
+    close(fd);
+    return false;
+  }
+
   uintptr_t load_bias = remote_base - (uintptr_t)min_vaddr;
 
   /* INFO: Track segments for later protection finalization */
@@ -951,10 +960,26 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   for (int i = 0; i < eh.e_phnum; i++) {
     if (phdr[i].p_type != PT_LOAD) continue;
 
+    if ((uintptr_t)phdr[i].p_vaddr > UINTPTR_MAX - load_bias ||
+        (uintptr_t)phdr[i].p_memsz > UINTPTR_MAX - ((uintptr_t)phdr[i].p_vaddr + load_bias)) {
+      LOGE("PT_LOAD address overflow for phdr %d", i);
+      REMOTE_CLEANUP_MAPPING();
+      free(phdr);
+      close(fd);
+      return false;
+    }
+
     uintptr_t seg_start = (uintptr_t)phdr[i].p_vaddr + load_bias;
     uintptr_t seg_page = page_start(seg_start, page_size);
     uintptr_t seg_end = (uintptr_t)phdr[i].p_vaddr + (uintptr_t)phdr[i].p_memsz + load_bias;
     uintptr_t seg_page_end = page_end(seg_end, page_size);
+    if (seg_page_end == 0 || seg_page_end <= seg_page) {
+      LOGE("Invalid PT_LOAD page range for phdr %d", i);
+      REMOTE_CLEANUP_MAPPING();
+      free(phdr);
+      close(fd);
+      return false;
+    }
     size_t seg_page_len = (size_t)(seg_page_end - seg_page);
 
     bool is_writable = (phdr[i].p_flags & PF_W) != 0;
@@ -1189,7 +1214,36 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
     return false;
   }
 
+  if ((uintptr_t)entry_value > UINTPTR_MAX - load_bias) {
+    LOGE("Entry point address overflow");
+    free((void *)needed_paths);
+    elf_dyn_info_destroy(&dinfo);
+    REMOTE_CLEANUP_MAPPING();
+    free(phdr);
+    close(fd);
+    return false;
+  }
+
   uintptr_t remote_entry = (uintptr_t)load_bias + (uintptr_t)entry_value;
+  bool entry_is_executable = false;
+  for (int i = 0; i < eh.e_phnum; i++) {
+    if (phdr[i].p_type != PT_LOAD || !(phdr[i].p_flags & PF_X)) continue;
+    uintptr_t start = (uintptr_t)phdr[i].p_vaddr;
+    uintptr_t end = start + (uintptr_t)phdr[i].p_memsz;
+    if ((uintptr_t)entry_value >= start && (uintptr_t)entry_value < end) {
+      entry_is_executable = true;
+      break;
+    }
+  }
+  if (!entry_is_executable) {
+    LOGE("Resolved entry point is outside executable PT_LOAD segments");
+    free((void *)needed_paths);
+    elf_dyn_info_destroy(&dinfo);
+    REMOTE_CLEANUP_MAPPING();
+    free(phdr);
+    close(fd);
+    return false;
+  }
 
   free((void *)needed_paths);
   elf_dyn_info_destroy(&dinfo);
