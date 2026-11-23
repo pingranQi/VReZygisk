@@ -9,6 +9,26 @@ build; builds must not fetch a moving upstream branch.
 - Public API: `include/csoloader.h`
 - Integration: `loader/src/injector/hook.c` and `module.h`
 
+## Loader backend behavior
+
+There are two separate loading paths and they must not be conflated:
+
+- Modules loaded inside the injected `libzygisk.so` process first use CSOLoader.
+  If CSOLoader rejects an image, the injector retries it with bionic
+  `dlopen(RTLD_NOW | RTLD_LOCAL)`. The matching release operation is
+  `csoloader_unload()` for CSOLoader images and `dlclose()` for bionic
+  handles.
+- The ptracer's bootstrap ELF mapper is a separate implementation. It currently
+  rejects PT_TLS images and GNU IFUNC symbols rather than pretending that
+  `st_value` is the resolved IFUNC address. IRELATIVE and TLS relocation
+  families are not implemented there. Such images cannot be made safe merely
+  by the in-process `dlopen()` fallback because the bootstrap mapper runs
+  before that loader exists in the target.
+
+Do not claim complete TLS/IFUNC support for the ptracer mapper. Extending it
+requires correct target-thread TLS setup and execution of resolver functions
+inside the target process, with rollback and constructor ordering tested.
+
 ## Updating the dependency
 
 Initialize the pinned revision:
@@ -51,9 +71,11 @@ Before advancing the pinned revision, validate at least:
   PT_DYNAMIC termination, and all dynamic-table ranges.
 - REL/RELA and PLT relocation tables, symbol bounds, weak/undefined symbols,
   Android relocation variants, and architecture-specific relocation types.
-- GNU IFUNC and IRELATIVE resolver execution order and resolver failure paths.
+- GNU IFUNC and IRELATIVE resolver execution order and resolver failure paths
+  (currently unsupported by the ptracer bootstrap mapper and must be rejected).
 - TLS module allocation, per-thread block initialization, thread-exit cleanup,
-  module-id reuse/generation handling, and deinit after all images are gone.
+  module-id reuse/generation handling, and deinit after all images are gone
+  (PT_TLS is currently rejected by the ptracer bootstrap mapper).
 - Constructor/destructor ordering, partial-load rollback, unload failure, and
   abandon semantics.
 - Android API-level and ABI matrix on real bionic runtimes.
