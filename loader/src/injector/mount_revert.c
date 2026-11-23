@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <errno.h>
 #include <limits.h>
 
@@ -51,12 +52,12 @@ static bool path_is_or_below(const char *path, const char *prefix) {
 }
 
 static bool is_root_source(const char *source) {
-  return strcmp(source, "magisk") == 0 ||
-         strcmp(source, "worker") == 0 ||
-         strcmp(source, "KSU") == 0 ||
-         strcmp(source, "KernelSU") == 0 ||
-         strcmp(source, "KernelSU Next") == 0 ||
-         strcmp(source, "APatch") == 0;
+  return strcasecmp(source, "magisk") == 0 ||
+         strcasecmp(source, "worker") == 0 ||
+         strcasecmp(source, "KSU") == 0 ||
+         strcasecmp(source, "KernelSU") == 0 ||
+         strcasecmp(source, "KernelSU Next") == 0 ||
+         strcasecmp(source, "APatch") == 0;
 }
 
 static bool is_root_mount(const struct mount_entry *entry) {
@@ -91,7 +92,7 @@ static bool is_protected_resource_target(const char *target) {
     "/vendor/etc/fonts", "/apex/com.android.art"
   };
 
-  if (strcmp(target, "/product") == 0) return true;
+  if (path_is_or_below(target, "/product")) return true;
 
   for (size_t i = 0; i < sizeof(protected_paths) / sizeof(protected_paths[0]); i++) {
     if (path_is_or_below(target, protected_paths[i])) return true;

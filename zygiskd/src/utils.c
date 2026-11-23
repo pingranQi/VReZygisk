@@ -676,7 +676,10 @@ static bool is_protected_resource_target(const char *target) {
     "/vendor/etc/fonts", "/apex/com.android.art"
   };
 
-  if (strcmp(target, "/product") == 0) return true;
+  size_t product_len = strlen("/product");
+  if (strncmp(target, "/product", product_len) == 0 &&
+      (target[product_len] == '\0' || target[product_len] == '/'))
+    return true;
 
   for (size_t i = 0; i < sizeof(protected_paths) / sizeof(protected_paths[0]); i++) {
     size_t len = strlen(protected_paths[i]);
