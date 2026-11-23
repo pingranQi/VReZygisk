@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
+#include <sched.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -193,40 +195,186 @@ static void jni_hook_list_add(const char *class_name, JNINativeMethod *methods, 
   jni_hook_list_count++;
 }
 
-static bool update_mnt_ns(enum mount_namespace_state mns_state, bool dry_run) {
-  char ns_path[PATH_MAX];
-  if (!rezygiskd_update_mns(mns_state, ns_path, sizeof(ns_path))) {
-    PLOGE("Failed to update mount namespace");
+/*
+ * Revert root-manager mounts in this app's own mount namespace.
+ *
+ * We first unshare the namespace and make propagation private. This prevents
+ * MNT_DETACH from propagating back into Zygote or sibling processes that may
+ * still share the inherited mount namespace.
+ */
+#define RZ_MOUNTINFO_LINE_MAX (PATH_MAX * 4)
+#define RZ_MAX_MOUNTS 512
 
+static char *rz_mountinfo_unescape(const char *value) {
+  size_t len = strlen(value);
+  char *out = malloc(len + 1);
+  if (!out) return NULL;
+
+  size_t j = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (value[i] == '\\' && i + 3 < len &&
+        value[i + 1] >= '0' && value[i + 1] <= '7' &&
+        value[i + 2] >= '0' && value[i + 2] <= '7' &&
+        value[i + 3] >= '0' && value[i + 3] <= '7') {
+      out[j++] = (char)(((value[i + 1] - '0') << 6) |
+                        ((value[i + 2] - '0') << 3) |
+                        (value[i + 3] - '0'));
+      i += 3;
+    } else {
+      out[j++] = value[i];
+    }
+  }
+  out[j] = '\0';
+  return out;
+}
+
+static bool rz_path_has_prefix(const char *path, const char *prefix) {
+  size_t len = strlen(prefix);
+  return strncmp(path, prefix, len) == 0 &&
+         (path[len] == '\0' || path[len] == '/');
+}
+
+static bool rz_is_root_mount(const char *root, const char *target,
+                             const char *source, const char *super_options) {
+  /* Root manager mount source tags used by Magisk, KernelSU and APatch. */
+  static const char *const source_tags[] = {
+    "magisk", "worker", "KSU", "KernelSU", "YukiSU",
+    "APatch", "apatch", "YukiZygisk"
+  };
+
+  for (size_t i = 0; i < sizeof(source_tags) / sizeof(source_tags[0]); i++) {
+    if (strcmp(source, source_tags[i]) == 0) return true;
+  }
+
+  /* Module bind mounts may retain the original filesystem as their source. */
+  if (rz_path_has_prefix(root, "/adb/modules") ||
+      rz_path_has_prefix(root, "/apatch/modules") ||
+      rz_path_has_prefix(root, "/data/adb/modules") ||
+      rz_path_has_prefix(target, "/data/adb/modules")) {
+    return true;
+  }
+
+  if (super_options &&
+      (strstr(super_options, "/adb/modules") ||
+       strstr(super_options, "/data/adb/modules") ||
+       strstr(super_options, "/apatch/modules"))) {
+    return true;
+  }
+
+  return false;
+}
+
+/* Returns the mountpoint when a mountinfo record is valid and selected. */
+static char *rz_parse_mountinfo_line(char *line) {
+  char *save = NULL;
+  char *fields[8] = {0};
+  char *token;
+  size_t index = 0;
+  char *root;
+  char *target;
+  char *source = NULL;
+  char *super_options = NULL;
+  bool separator_seen = false;
+
+  for (token = strtok_r(line, " ", &save);
+       token != NULL;
+       token = strtok_r(NULL, " ", &save)) {
+    if (!separator_seen && strcmp(token, "-") == 0) {
+      separator_seen = true;
+      /* The next fields are fstype, source, and super options. */
+      (void)strtok_r(NULL, " ", &save);
+      source = strtok_r(NULL, " ", &save);
+      super_options = strtok_r(NULL, " ", &save);
+      break;
+    }
+
+    if (index < sizeof(fields) / sizeof(fields[0]))
+      fields[index] = token;
+    index++;
+  }
+
+  /* mountinfo: id parent major:minor root mountpoint options ... */
+  if (!separator_seen || index < 6 || !fields[3] || !fields[4] ||
+      !source || !super_options) {
+    return NULL;
+  }
+
+  root = fields[3];
+  target = fields[4];
+  if (!rz_is_root_mount(root, target, source, super_options))
+    return NULL;
+
+  return rz_mountinfo_unescape(target);
+}
+
+static bool rz_revert_root_mounts(void) {
+  FILE *fp = NULL;
+  char *line = NULL;
+  size_t line_capacity = 0;
+  char *targets[RZ_MAX_MOUNTS] = {0};
+  size_t target_count = 0;
+  bool success = true;
+
+  /*
+   * Never detach mounts in a namespace shared with Zygote. unshare() creates
+   * a per-process copy; MS_PRIVATE prevents mount propagation to its peers.
+   */
+  if (unshare(CLONE_NEWNS) == -1) {
+    PLOGE("Failed to unshare app mount namespace");
     return false;
   }
 
-  if (dry_run) return true;
-
-  int updated_ns = open(ns_path, O_RDONLY);
-  if (updated_ns == -1) {
-    PLOGE("Failed to open mount namespace [%s]", ns_path);
-
+  if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == -1) {
+    PLOGE("Failed to make app mount namespace private");
     return false;
   }
 
-  char *mns_state_str = "unknown";
-  if (mns_state == Clean) mns_state_str = "clean";
-  if (mns_state == Mounted) mns_state_str = "mounted";
-
-  LOGD("set mount namespace to [%s] fd=[%d]: %s", ns_path, updated_ns, mns_state_str);
-
-  if (setns(updated_ns, CLONE_NEWNS) == -1) {
-    PLOGE("Failed to set mount namespace [%s]", ns_path);
-
-    close(updated_ns);
-
+  fp = fopen("/proc/self/mountinfo", "re");
+  if (!fp) {
+    PLOGE("Failed to open /proc/self/mountinfo");
     return false;
   }
 
-  close(updated_ns);
+  while (getline(&line, &line_capacity, fp) != -1) {
+    char *target;
+    char *newline = strchr(line, '\n');
+    if (newline) *newline = '\0';
 
-  return true;
+    target = rz_parse_mountinfo_line(line);
+    if (!target) continue;
+
+    if (target_count == RZ_MAX_MOUNTS) {
+      LOGW("Mount cleanup limit reached (%d); remaining entries skipped",
+           RZ_MAX_MOUNTS);
+      free(target);
+      success = false;
+      break;
+    }
+
+    targets[target_count++] = target;
+  }
+
+  if (ferror(fp)) {
+    PLOGE("Failed while reading /proc/self/mountinfo");
+    success = false;
+  }
+
+  free(line);
+  fclose(fp);
+
+  /* Children/overmounts first, matching YukiZygisk's reverse traversal. */
+  for (size_t i = target_count; i > 0; i--) {
+    const char *target = targets[i - 1];
+    if (umount2(target, MNT_DETACH) == -1) {
+      LOGW("Failed to detach root mount %s: %s", target, strerror(errno));
+      success = false;
+    } else {
+      LOGD("Detached root mount %s", target);
+    }
+    free(targets[i - 1]);
+  }
+
+  return success;
 }
 
 /* INFO: Hook function declarations */
@@ -1234,22 +1382,6 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   }
 
   ctx->info_flags = rezygiskd_get_process_flags(uid, ctx->process);
-  /* INFO: To ensure we are really using a clean mount namespace, we use
-              the first process it as reference for clean mount namespace,
-              before it even does something, so that it will be clean yet
-              with expected mounts.
-
-           To avoid duplication, we will bypass this update_mnt_ns if we
-             are going to execute it later, as the app will be in the
-             denylist.
-  */
-  if ((ctx->info_flags & PROCESS_IS_FIRST_STARTED) == PROCESS_IS_FIRST_STARTED &&
-      (ctx->info_flags & PROCESS_ON_DENYLIST) == 0 &&
-      (ctx->info_flags & PROCESS_IS_MANAGER) == 0
-  ) {
-    update_mnt_ns(Clean, true);
-  }
-
   if ((ctx->info_flags & PROCESS_IS_MANAGER) == PROCESS_IS_MANAGER) {
     LOGD("Manager process detected. Notifying that Zygisk has been enabled.");
 
@@ -1282,24 +1414,15 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   bool in_denylist = (ctx->info_flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST;
   if (in_denylist) {
     FLAG_SET(ctx, DO_REVERT_UNMOUNT);
-    update_mnt_ns(Clean, false);
+    rz_revert_root_mounts();
   }
 
-  /* INFO: Executed after setns to ensure a module can update the mounts of an
-              application without worrying about it being overwritten by setns.
-  */
+  /* Run module pre-specialize callbacks after the DenyList cleanup. */
   rz_run_modules_pre(ctx);
 
-  /* INFO: The modules may request that although the process is NOT in
-              the DenyList, it has its mount namespace switched to the clean
-              one.
-
-              So to ensure this behavior happens, we must also check after the
-              modules are loaded and executed, so that the modules can have
-              the chance to request it.
-  */
+  /* Modules may request selective mount cleanup even outside DenyList. */
   if (!in_denylist && FLAG_GET(ctx, DO_REVERT_UNMOUNT))
-    update_mnt_ns(Clean, false);
+    rz_revert_root_mounts();
 }
 
 static void rz_app_specialize_post(struct zygisk_context *ctx) {
