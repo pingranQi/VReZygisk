@@ -10,6 +10,7 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <elf.h>
@@ -33,7 +34,13 @@ static uintptr_t page_start(uintptr_t addr, size_t page_size) {
 }
 
 static uintptr_t page_end(uintptr_t addr, size_t page_size) {
+  if (page_size == 0 || addr > UINTPTR_MAX - (page_size - 1)) return 0;
   return ALIGN_DOWN(addr + page_size - 1, page_size);
+}
+
+static bool remote_syscall_failed(long result) {
+  /* Linux raw syscalls return -errno in the range [-4095, -1]. */
+  return result < 0 && result >= -4095;
 }
 
 static long remote_mmap_offset_arg(off_t file_offset, size_t page_size) {
@@ -51,62 +58,114 @@ static long remote_mmap_offset_arg(off_t file_offset, size_t page_size) {
 static bool compute_load_layout(int fd, size_t page_size, ElfW(Ehdr) *eh,
                                 ElfW(Phdr) **out_phdr, ElfW(Addr) *out_min_vaddr,
                                 size_t *out_map_size) {
-  if (!read_loop_offset(fd, eh, sizeof(*eh), 0)) {
-    LOGE("Failed to read ELF header");
-
+  struct stat st;
+  if (!eh || !out_phdr || !out_min_vaddr || !out_map_size ||
+      page_size == 0 || (page_size & (page_size - 1)) != 0 ||
+      fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(*eh)) {
+    LOGE("Invalid ELF input or page size");
     return false;
   }
 
-  if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0) {
-    LOGE("Invalid ELF magic");
+  *out_phdr = NULL;
+  *out_min_vaddr = 0;
+  *out_map_size = 0;
 
+  if (!read_loop_offset(fd, eh, sizeof(*eh), 0)) {
+    LOGE("Failed to read ELF header");
+    return false;
+  }
+
+  if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 ||
+      eh->e_ident[EI_VERSION] != EV_CURRENT ||
+      eh->e_version != EV_CURRENT ||
+      eh->e_ident[EI_DATA] != ELFDATA2LSB ||
+      eh->e_ehsize != sizeof(*eh) ||
+      eh->e_phentsize != sizeof(ElfW(Phdr)) ||
+      eh->e_phnum == 0 || eh->e_type != ET_DYN) {
+    LOGE("Unsupported or malformed ELF header");
+    return false;
+  }
+
+#if defined(__aarch64__)
+  if (eh->e_machine != EM_AARCH64) return false;
+#elif defined(__arm__)
+  if (eh->e_machine != EM_ARM) return false;
+#elif defined(__x86_64__)
+  if (eh->e_machine != EM_X86_64) return false;
+#elif defined(__i386__)
+  if (eh->e_machine != EM_386) return false;
+#endif
+
+  if ((uint64_t)eh->e_phnum > SIZE_MAX / sizeof(ElfW(Phdr))) {
+    LOGE("Program header count overflow");
     return false;
   }
 
   size_t phdr_sz = (size_t)eh->e_phnum * sizeof(ElfW(Phdr));
-  ElfW(Phdr) *phdr = (ElfW(Phdr) *)malloc(phdr_sz);
+  if (eh->e_phoff > (ElfW(Off))st.st_size ||
+      phdr_sz > (size_t)((ElfW(Off))st.st_size - eh->e_phoff)) {
+    LOGE("Program header table exceeds file bounds");
+    return false;
+  }
+
+  ElfW(Phdr) *phdr = (ElfW(Phdr) *)calloc(eh->e_phnum, sizeof(ElfW(Phdr)));
   if (!phdr) {
     LOGE("Failed to allocate memory for program headers");
-
     return false;
   }
 
   if (!read_loop_offset(fd, phdr, phdr_sz, (off_t)eh->e_phoff)) {
     LOGE("Failed to read program headers");
-
     free(phdr);
-
     return false;
   }
 
-  /* INFO: Find min/max vaddr across all PT_LOAD segments */
   ElfW(Addr) lo = (ElfW(Addr))UINTPTR_MAX;
   ElfW(Addr) hi = 0;
+  size_t load_count = 0;
 
   for (int i = 0; i < eh->e_phnum; i++) {
     if (phdr[i].p_type != PT_LOAD) continue;
+
+    load_count++;
+    if (phdr[i].p_filesz > phdr[i].p_memsz ||
+        phdr[i].p_offset > (ElfW(Off))st.st_size ||
+        phdr[i].p_filesz > (ElfW(Xword))((ElfW(Off))st.st_size - phdr[i].p_offset) ||
+        phdr[i].p_vaddr > UINTPTR_MAX - phdr[i].p_memsz ||
+        (phdr[i].p_align > 1 &&
+         ((phdr[i].p_align & (phdr[i].p_align - 1)) != 0 ||
+          (phdr[i].p_vaddr % phdr[i].p_align) != (phdr[i].p_offset % phdr[i].p_align))) ||
+        ((phdr[i].p_vaddr - phdr[i].p_offset) & (page_size - 1)) != 0) {
+      LOGE("Invalid PT_LOAD segment %d", i);
+      free(phdr);
+      return false;
+    }
+
+    if (phdr[i].p_memsz == 0) continue;
     if (phdr[i].p_vaddr < lo) lo = phdr[i].p_vaddr;
 
     ElfW(Addr) end = phdr[i].p_vaddr + phdr[i].p_memsz;
     if (end > hi) hi = end;
   }
 
-  if (hi <= lo) {
-    LOGE("Invalid PT_LOAD segments");
-
+  /* The fixed-size protection table below must never silently drop segments. */
+  if (load_count == 0 || load_count > 64 || hi <= lo) {
+    LOGE("Invalid PT_LOAD layout (count=%zu)", load_count);
     free(phdr);
-
     return false;
   }
 
-  /* INFO: Page-align the address range */
   lo = (ElfW(Addr))page_start((uintptr_t)lo, page_size);
-  hi = (ElfW(Addr))page_end((uintptr_t)hi, page_size);
+  uintptr_t aligned_hi = page_end((uintptr_t)hi, page_size);
+  if (aligned_hi == 0 || aligned_hi <= lo || aligned_hi - lo > SIZE_MAX) {
+    LOGE("PT_LOAD mapping size overflow");
+    free(phdr);
+    return false;
+  }
 
   *out_min_vaddr = lo;
-  *out_map_size = (size_t)(hi - lo);
+  *out_map_size = (size_t)(aligned_hi - lo);
   *out_phdr = phdr;
-
   return true;
 }
 
@@ -116,12 +175,17 @@ static bool vaddr_to_offset(const ElfW(Phdr) *phdr, int phnum, ElfW(Addr) vaddr,
     if (phdr[i].p_type != PT_LOAD) continue;
 
     ElfW(Addr) seg_start = phdr[i].p_vaddr;
+    if (phdr[i].p_vaddr > UINTPTR_MAX - phdr[i].p_filesz) continue;
     ElfW(Addr) seg_end = phdr[i].p_vaddr + phdr[i].p_filesz;
 
     if (vaddr < seg_start || vaddr >= seg_end) continue;
 
-    *out_off = (off_t)phdr[i].p_offset + (off_t)(vaddr - seg_start);
+    ElfW(Addr) delta = vaddr - seg_start;
+    if (phdr[i].p_offset > (ElfW(Off))INT64_MAX ||
+        delta > (ElfW(Addr))(INT64_MAX - (int64_t)phdr[i].p_offset))
+      return false;
 
+    *out_off = (off_t)(phdr[i].p_offset + delta);
     return true;
   }
 
@@ -801,8 +865,8 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   args[4] = -1;
   args[5] = 0;
 
-  uintptr_t remote_base = (uintptr_t)remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
-  if (!remote_base || remote_base == (uintptr_t)MAP_FAILED) {
+  long remote_base_result = remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
+  if (remote_syscall_failed(remote_base_result)) {
     LOGE("remote mmap reserve failed: %p", (void *)remote_base);
 
 
@@ -814,20 +878,28 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
     return false;
   }
+  uintptr_t remote_base = (uintptr_t)remote_base_result;
+
+#define REMOTE_CLEANUP_MAPPING() do {                                      \
+  if (remote_fd >= 0) {                                                    \
+    args[0] = remote_fd;                                                   \
+    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);         \
+    remote_fd = -1;                                                        \
+  }                                                                        \
+  if (remote_base != 0) {                                                  \
+    args[0] = (long)remote_base;                                           \
+    args[1] = (long)map_size;                                              \
+    remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2);        \
+    remote_base = 0;                                                       \
+  }                                                                        \
+} while (0)
 
 #ifdef __LP64__
   if (remote_base < min_addr) {
     LOGE("remote mmap reserve returned low base %p (< %p)", (void *)remote_base, (void *)min_addr);
 
 
-    args[0] = (long)remote_base;
-    args[1] = (long)map_size;
-
-    remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2);
-
-    args[0] = remote_fd;
-
-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+    REMOTE_CLEANUP_MAPPING();
 
     free(phdr);
     close(fd);
@@ -875,14 +947,12 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
         args[4] = remote_fd;
         args[5] = remote_mmap_offset_arg(file_page_offset, page_size);
 
-        uintptr_t seg_map = (uintptr_t)remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
-        if (!seg_map || seg_map == (uintptr_t)MAP_FAILED) {
+        long seg_map_result = remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
+        if (remote_syscall_failed(seg_map_result)) {
           LOGE("remote mmap writable file-backed segment failed for phdr %d", i);
 
 
-          args[0] = remote_fd;
-
-          remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+          REMOTE_CLEANUP_MAPPING();
           free(phdr);
           close(fd);
 
@@ -897,6 +967,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
             LOGE("Failed to zero tail for phdr %d", i);
 
             if (zeros) free(zeros);
+            REMOTE_CLEANUP_MAPPING();
             free(phdr);
             close(fd);
 
@@ -916,14 +987,12 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
         args[4] = -1;
         args[5] = 0;
 
-        uintptr_t bss_map = (uintptr_t)remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
-        if (!bss_map || bss_map == (uintptr_t)MAP_FAILED) {
+        long bss_map_result = remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
+        if (remote_syscall_failed(bss_map_result)) {
           LOGE("remote mmap bss segment failed for phdr %d", i);
 
 
-          args[0] = remote_fd;
-
-          remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+          REMOTE_CLEANUP_MAPPING();
           free(phdr);
           close(fd);
 
@@ -946,14 +1015,12 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
         args[4] = remote_fd;
         args[5] = remote_mmap_offset_arg(file_page_offset, page_size);
 
-        uintptr_t seg_map = (uintptr_t)remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
-        if (!seg_map || seg_map == (uintptr_t)MAP_FAILED) {
+        long seg_map_result = remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
+        if (remote_syscall_failed(seg_map_result)) {
           LOGE("remote mmap file-backed segment failed for phdr %d", i);
 
 
-          args[0] = remote_fd;
-
-          remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+          REMOTE_CLEANUP_MAPPING();
           free(phdr);
           close(fd);
 
@@ -970,14 +1037,12 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
         args[4] = -1;
         args[5] = 0;
 
-        uintptr_t bss_map = (uintptr_t)remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
-        if (!bss_map || bss_map == (uintptr_t)MAP_FAILED) {
+        long bss_map_result = remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
+        if (remote_syscall_failed(bss_map_result)) {
           LOGE("remote mmap bss segment failed for phdr %d", i);
 
 
-          args[0] = remote_fd;
-
-          remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+          REMOTE_CLEANUP_MAPPING();
           free(phdr);
           close(fd);
 
@@ -1003,13 +1068,14 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
 
   args[0] = remote_fd;
-
   remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+  remote_fd = -1;
 
   struct elf_dyn_info dinfo;
   if (!elf_load_dyn_info(fd, &eh, phdr, &dinfo)) {
     LOGE("Failed to load ELF dynamic info");
 
+    REMOTE_CLEANUP_MAPPING();
     free(phdr);
     close(fd);
 
@@ -1023,6 +1089,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
       LOGE("Failed to allocate memory for needed paths");
 
       elf_dyn_info_destroy(&dinfo);
+      REMOTE_CLEANUP_MAPPING();
       free(phdr);
       close(fd);
 
@@ -1045,6 +1112,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
     free((void *)needed_paths);
     elf_dyn_info_destroy(&dinfo);
+    REMOTE_CLEANUP_MAPPING();
     free(phdr);
     close(fd);
 
@@ -1063,10 +1131,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
       LOGE("Failed to set final protections for segment at %p: %ld", (void *)segs[i].addr, mp_ret);
 
 
-      args[0] = (long)remote_base;
-      args[1] = (long)map_size;
-
-      remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2);
+      REMOTE_CLEANUP_MAPPING();
 
       free((void *)needed_paths);
       elf_dyn_info_destroy(&dinfo);
@@ -1083,6 +1148,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
     free((void *)needed_paths);
     elf_dyn_info_destroy(&dinfo);
+    REMOTE_CLEANUP_MAPPING();
     free(phdr);
     close(fd);
 
@@ -1099,6 +1165,8 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   *out_base = remote_base;
   *out_total_size = map_size;
   *out_entry = remote_entry;
+
+#undef REMOTE_CLEANUP_MAPPING
 
   LOGI("remote mapped %s at %p (size %zu), entry %p", lib_path, (void *)remote_base, map_size, (void *)remote_entry);
 
