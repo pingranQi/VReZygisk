@@ -102,7 +102,8 @@ static bool is_protected_resource_target(const char *target) {
   };
 
   /* Never detach the namespace root or the system root mount itself. */
-  if (strcmp(target, "/") == 0 || strcmp(target, "/system") == 0)
+  if (strcmp(target, "/") == 0 || strcmp(target, "/system") == 0 ||
+      strcmp(target, "/system_ext") == 0 || strcmp(target, "/vendor") == 0)
     return true;
 
   if (path_is_or_below(target, "/product")) return true;
@@ -406,6 +407,16 @@ static bool validate_mount_subtree(const struct mount_entry *selected) {
     if (descendant < 0) {
       LOGW("Mount parent graph is cyclic or malformed near mount ID %u",
            mounts[i].id);
+      safe = false;
+      break;
+    }
+
+    bool target_is_nested =
+        path_is_or_below(mounts[i].target, selected->target);
+    if ((descendant == 1 && !target_is_nested) ||
+        (descendant == 0 && target_is_nested)) {
+      LOGW("Mount path/parent chain disagreement: candidate=%s child=%s parent_id=%u",
+           selected->target, mounts[i].target, mounts[i].parent);
       safe = false;
       break;
     }
