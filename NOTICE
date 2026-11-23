@@ -3,3 +3,12 @@ Copyright (C) 2026 The PerformanC Organization
 
 This product is licensed under the GNU Affero General Public License v3.0 or later.
 See LICENSE file for the full license text.
+
+Revert-only mount handling in loader/src/injector/unmount.c and the shared
+mount-trace selection model are adapted from VexZygisk and informed by the
+corresponding implementations in OnyxZygisk, NyaZygisk, and YukiZygisk.
+See the upstream project repositories for their respective notices and licenses:
+- https://github.com/LxyaoX/VexZygisk
+- https://github.com/OnyxZygisk/OnyxZygisk
+- https://github.com/HSSkyBoy/NyaZygisk
+- https://github.com/Rouyashiki/YukiZygisk
