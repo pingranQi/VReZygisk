@@ -108,25 +108,37 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
     (long)remote_size,
     is_tango ? 1 : 0
   };
-  remote_call(pid, &regs, injector_entry, (uintptr_t)libc_return_addr, args, 3);
+  uintptr_t entry_status = remote_call(pid, &regs, injector_entry,
+                                         (uintptr_t)libc_return_addr, args, 3);
 
-  bool injector_ok = false;
+  bool injector_returned = false;
   #if defined(__arm__)
-    injector_ok = (((uintptr_t)regs.REG_IP & ~1u) == ((uintptr_t)libc_return_addr & ~1u));
+    injector_returned = (((uintptr_t)regs.REG_IP & ~1u) == ((uintptr_t)libc_return_addr & ~1u));
   #else
-    injector_ok = ((uintptr_t)regs.REG_IP == (uintptr_t)libc_return_addr);
+    injector_returned = ((uintptr_t)regs.REG_IP == (uintptr_t)libc_return_addr);
   #endif
 
-  if (!injector_ok) {
-    LOGE("injector entry faulted at %p", (void *)regs.REG_IP);
+  if (!injector_returned) {
+    /* The entry may have installed some hooks before faulting. Keep its image
+       mapped rather than creating dangling callbacks into unmapped memory. */
+    LOGE("injector entry faulted at %p; retaining bootstrap image", (void *)regs.REG_IP);
+    free_maps(map);
+    backup.REG_IP = (long)libc_init_target;
+    if (!set_regs(pid, &backup))
+      LOGE("Failed to restore registers after remote entry fault");
 
+    return false;
+  }
+
+  if (entry_status != 0) {
+    LOGE("injector entry rejected bootstrap with status %" PRIuPTR, entry_status);
     if (!remote_csoloader_unmap(pid, &regs, map, remote_base, remote_size))
-      LOGE("Remote bootstrap image could not be reclaimed after entry failure");
+      LOGE("Remote bootstrap image could not be reclaimed after clean entry rejection");
 
     free_maps(map);
     backup.REG_IP = (long)libc_init_target;
     if (!set_regs(pid, &backup))
-      LOGE("Failed to restore registers after remote entry failure");
+      LOGE("Failed to restore registers after remote entry rejection");
 
     return false;
   }
