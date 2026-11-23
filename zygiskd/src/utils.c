@@ -835,6 +835,7 @@ bool should_preserve_mount_namespace(uid_t uid, const char *process) {
     "com.android.externalstorage",
     "com.google.android.providers.media.module",
     "com.android.providers.media",
+    "com.android.providers.media.module",
     "com.google.android.documentsui"
   };
 
@@ -855,6 +856,25 @@ bool should_preserve_mount_namespace(uid_t uid, const char *process) {
   for (size_t i = 0; i < sizeof(protected_packages) / sizeof(protected_packages[0]); i++) {
     if (process_name_is(process, protected_packages[i])) {
       LOGI("Preserving mount namespace for Android storage process %s (uid=%u)",
+           process, (unsigned int)uid);
+      return true;
+    }
+  }
+
+  /*
+   * OEM/system packages commonly have app-range UIDs too. Treat platform
+   * namespaces as system processes unless explicitly handled above; this is
+   * intentionally conservative because their storage-provider role cannot
+   * be inferred reliably from UID alone.
+   */
+  static const char *const system_prefixes[] = {
+    "com.android.", "com.google.android.", "com.samsung.android.",
+    "com.miui.", "com.oplus.", "com.coloros.", "com.huawei.",
+    "com.oneplus.", "com.motorola."
+  };
+  for (size_t i = 0; i < sizeof(system_prefixes) / sizeof(system_prefixes[0]); i++) {
+    if (strncmp(process, system_prefixes[i], strlen(system_prefixes[i])) == 0) {
+      LOGW("Unclassified platform process %s (uid=%u); preserving mount namespace",
            process, (unsigned int)uid);
       return true;
     }
