@@ -891,12 +891,47 @@ bool should_preserve_mount_namespace(uid_t uid, const char *process) {
   return false;
 }
 
-int save_mns_fd(int pid, enum MountNamespaceState mns_state, struct root_impl impl) {
-  static int clean_namespace_fd = -1;
-  static int mounted_namespace_fd = -1;
+/*
+ * Android creates mount namespaces with per-application storage/APK views.
+ * A single process-wide Clean/Mounted fd is therefore not reusable by other
+ * app UIDs (notably when their WebView provider or APK mount differs).
+ *
+ * Cache one namespace fd per full UID and namespace state. The daemon handles
+ * requests serially, so this list needs no additional locking.
+ */
+struct mns_cache_entry {
+  uid_t uid;
+  enum MountNamespaceState state;
+  int fd;
+  struct mns_cache_entry *next;
+};
 
-  if (mns_state == Clean && clean_namespace_fd != -1) return clean_namespace_fd;
-  if (mns_state == Mounted && mounted_namespace_fd != -1) return mounted_namespace_fd;
+static struct mns_cache_entry *mns_cache;
+
+static int find_cached_mns_fd(uid_t uid, enum MountNamespaceState state) {
+  for (struct mns_cache_entry *entry = mns_cache; entry != NULL; entry = entry->next) {
+    if (entry->uid == uid && entry->state == state) return entry->fd;
+  }
+  return -1;
+}
+
+static void cache_mns_fd(uid_t uid, enum MountNamespaceState state, int fd) {
+  struct mns_cache_entry *entry = malloc(sizeof(*entry));
+  if (entry == NULL) {
+    LOGE("Failed to allocate mount namespace cache entry: %s", strerror(errno));
+    return;
+  }
+
+  entry->uid = uid;
+  entry->state = state;
+  entry->fd = fd;
+  entry->next = mns_cache;
+  mns_cache = entry;
+}
+
+int save_mns_fd(int pid, uid_t uid, enum MountNamespaceState mns_state, struct root_impl impl) {
+  int cached_fd = find_cached_mns_fd(uid, mns_state);
+  if (cached_fd != -1) return cached_fd;
 
   int sockets[2];
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == -1) {
@@ -1037,8 +1072,7 @@ int save_mns_fd(int pid, enum MountNamespaceState mns_state, struct root_impl im
     return -1;
   }
 
-  if (mns_state == Clean) clean_namespace_fd = ns_fd;
-  else if (mns_state == Mounted) mounted_namespace_fd = ns_fd;
+  cache_mns_fd(uid, mns_state, ns_fd);
 
   return ns_fd;
 }
