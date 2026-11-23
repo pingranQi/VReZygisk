@@ -163,8 +163,8 @@ static bool read_fd_mount_id(int fd, unsigned int *mount_id) {
   bool found = false;
   while (fgets(line, sizeof(line), fp)) {
     unsigned int value;
-    if (sscanf(line, "mnt_id:\\t%u", &value) == 1 ||
-        sscanf(line, "mnt_id: %u", &value) == 1) {
+    if (strncmp(line, "mnt_id:", 7) == 0 &&
+        sscanf(line + 7, "%u", &value) == 1) {
       *mount_id = value;
       found = true;
       break;
@@ -203,7 +203,7 @@ static bool inspect_mount_fds(const struct mount_entry *mount) {
     ssize_t length = readlinkat(dirfd_value, entry->d_name,
                                 target, sizeof(target) - 1);
     if (length < 0) continue;
-    target[length] = '\\0';
+    target[length] = 0;
 
     if (is_root_artifact_fd_path(target)) {
       if (close(fd) == -1) {
@@ -249,7 +249,7 @@ void refresh_mountinfo_fds(bool webview_zygote) {
       ssize_t length = readlinkat(dirfd_value, entry->d_name,
                                   target, sizeof(target) - 1);
       if (length < 0) continue;
-      target[length] = '\\0';
+      target[length] = 0;
       if (is_mountinfo_fd_path(target)) {
         LOGD("Closing inherited proc mount descriptor %d -> %s",
              (int)value, target);
