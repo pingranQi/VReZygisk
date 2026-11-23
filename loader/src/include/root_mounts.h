@@ -7,6 +7,7 @@
 
 #define MOUNT_SOURCE_LOOP "/dev/block/loop"
 #define ROOT_MODULES_DIR "/data/adb/modules"
+#define ROOT_ADB_DIR "/data/adb"
 #define ROOT_MODULES_ROOT "/adb/modules"
 #define MOUNT_FIELD_MAX 4096
 #define MOUNT_TYPE_MAX 128
@@ -56,6 +57,7 @@ static inline bool mount_carries_root_trace(const char *root, const char *target
                                             const char *source, const char *loop_source) {
   if (mount_path_at_or_under(root, ROOT_MODULES_ROOT)) return true;
   if (mount_path_at_or_under(target, ROOT_MODULES_DIR)) return true;
+  if (mount_path_at_or_under(target, ROOT_ADB_DIR)) return true;
   for (size_t i = 0; i < ROOT_SOURCE_COUNT; i++) {
     if (strcmp(source, kRootSources[i]) == 0) return true;
   }
