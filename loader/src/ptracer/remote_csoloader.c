@@ -675,7 +675,7 @@ static bool read_remote_addr(int pid, uintptr_t addr, ElfW(Addr) *out) {
 /* INFO: Process RELA-format relocations from a given offset/size. */
 static bool apply_rela_section(int pid, int fd, const struct elf_dyn_info *info,
                                struct maps_info *local_map, struct maps_info *remote_map,
-                               const char *const *needed_paths, uintptr_t load_bias,
+                               const char *const *needed_paths, const ElfW(Phdr) *phdr, int phnum, uintptr_t load_bias,
                                off_t rela_off, size_t rela_sz) {
   size_t count = rela_sz / sizeof(ElfW(Rela));
 
@@ -740,7 +740,7 @@ static bool apply_rela_section(int pid, int fd, const struct elf_dyn_info *info,
 /* INFO: Process REL-format relocations from a given offset/size. */
 static bool apply_rel_section(int pid, int fd, const struct elf_dyn_info *info,
                               struct maps_info *local_map, struct maps_info *remote_map,
-                              const char *const *needed_paths, uintptr_t load_bias,
+                              const char *const *needed_paths, const ElfW(Phdr) *phdr, int phnum, uintptr_t load_bias,
                               off_t rel_off, size_t rel_sz) {
   size_t count = rel_sz / sizeof(ElfW(Rel));
 
