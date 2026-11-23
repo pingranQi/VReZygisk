@@ -18,8 +18,7 @@ enum DaemonSocketAction {
   RequestCompanionSocket = 4,
   GetModuleDir           = 5,
   ZygoteRestart          = 6,
-  UpdateMountNamespace   = 7,
-  RemoveModule           = 8
+  RemoveModule           = 7
 };
 
 enum ProcessFlags: uint32_t {
@@ -37,11 +36,6 @@ enum RootImplState {
   TooOld,
   Inexistent,
   Abnormal
-};
-
-enum MountNamespaceState {
-  Clean,
-  Mounted
 };
 
 #endif /* CONSTANTS_H */
