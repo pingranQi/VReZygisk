@@ -4,6 +4,10 @@
 
 #include "remote_csoloader.h"
 
+#if !defined(__aarch64__)
+#error "ReZygisk remote CSOLoader supports AArch64 only"
+#endif
+
 #include <stdlib.h>
 #include <inttypes.h>
 #include <string.h>
