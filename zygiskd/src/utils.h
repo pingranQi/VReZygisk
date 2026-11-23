@@ -59,8 +59,6 @@
 #define read_func_def(type)               \
   ssize_t read_## type(int fd, type *val)
 
-bool switch_mount_namespace(pid_t pid);
-
 void get_property(const char *name, char *restrict output);
 
 void set_socket_create_context(const char *restrict context);
@@ -94,7 +92,5 @@ bool check_unix_socket(int fd, bool block);
 int non_blocking_execv(const char *restrict file, char *const argv[]);
 
 void stringify_root_impl_name(struct root_impl impl, char *restrict output);
-
-int save_mns_fd(int pid, enum MountNamespaceState mns_state, struct root_impl impl);
 
 #endif /* UTILS_H */
