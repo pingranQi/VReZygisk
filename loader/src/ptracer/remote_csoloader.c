@@ -584,7 +584,11 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
 
 cleanup:
   free(dyn);
-  if (!success) free(needed_str_offsets);
+  if (!success) {
+    free(out->strtab);
+    out->strtab = NULL;
+    free(needed_str_offsets);
+  }
 
   return success;
 }
