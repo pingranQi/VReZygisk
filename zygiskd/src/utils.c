@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
+#include <strings.h>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -485,21 +487,20 @@ void stringify_root_impl_name(struct root_impl impl, char *restrict output) {
   }
 }
 
+/*
+ * Mountinfo parsing and filtering.
+ *
+ * mountinfo uses octal escapes for whitespace and backslashes.  Tokenizing
+ * the raw line and decoding the path fields afterwards avoids the fragile
+ * sscanf/%n parsing used by the previous implementation.
+ */
 struct mountinfo {
   unsigned int id;
   unsigned int parent;
-  dev_t device;
   char *root;
   char *target;
-  char *vfs_option;
-  struct {
-      unsigned int shared;
-      unsigned int master;
-      unsigned int propagate_from;
-  } optional;
   char *type;
   char *source;
-  char *fs_option;
 };
 
 struct mountinfos {
@@ -507,230 +508,307 @@ struct mountinfos {
   size_t length;
 };
 
-char *strndup(const char *restrict str, size_t length) {
-  char *restrict copy = malloc(length + 1);
+static char *mount_strdup(const char *str) {
+  size_t len = strlen(str);
+  char *copy = malloc(len + 1);
   if (copy == NULL) return NULL;
-
-  memcpy(copy, str, length);
-  copy[length] = '\0';
-
+  memcpy(copy, str, len + 1);
   return copy;
 }
 
-void free_mounts(struct mountinfos *restrict mounts) {
+static void mountinfo_decode(char *value) {
+  char *readp = value;
+  char *writep = value;
+
+  while (*readp != '\0') {
+    if (readp[0] == '\\' &&
+        readp[1] >= '0' && readp[1] <= '7' &&
+        readp[2] >= '0' && readp[2] <= '7' &&
+        readp[3] >= '0' && readp[3] <= '7') {
+      unsigned int decoded =
+          (unsigned int)(readp[1] - '0') * 64u +
+          (unsigned int)(readp[2] - '0') * 8u +
+          (unsigned int)(readp[3] - '0');
+      *writep++ = (char)decoded;
+      readp += 4;
+    } else {
+      *writep++ = *readp++;
+    }
+  }
+  *writep = '\0';
+}
+
+static void free_mounts(struct mountinfos *mounts) {
+  if (mounts == NULL) return;
+
   for (size_t i = 0; i < mounts->length; i++) {
     free(mounts->mounts[i].root);
     free(mounts->mounts[i].target);
-    free(mounts->mounts[i].vfs_option);
     free(mounts->mounts[i].type);
     free(mounts->mounts[i].source);
-    free(mounts->mounts[i].fs_option);
   }
 
   free(mounts->mounts);
+  mounts->mounts = NULL;
+  mounts->length = 0;
 }
 
-bool parse_mountinfo(const char *restrict pid, struct mountinfos *restrict mounts) {
+static bool parse_mount_id(const char *token, unsigned int *value) {
+  char *end = NULL;
+  errno = 0;
+  unsigned long parsed = strtoul(token, &end, 10);
+  if (errno != 0 || end == token || *end != '\0' || parsed > UINT_MAX)
+    return false;
+
+  *value = (unsigned int)parsed;
+  return true;
+}
+
+static bool parse_mountinfo(const char *pid, struct mountinfos *mounts) {
   char path[PATH_MAX];
-  snprintf(path, PATH_MAX, "/proc/%s/mountinfo", pid);
-
-  FILE *mountinfo = fopen(path, "r");
-  if (mountinfo == NULL) {
-    LOGE("fopen: %s", strerror(errno));
-
+  int path_len = snprintf(path, sizeof(path), "/proc/%s/mountinfo", pid);
+  if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
+    LOGE("mountinfo path is too long");
     return false;
   }
 
-  char line[PATH_MAX];
-  size_t i = 0;
+  FILE *file = fopen(path, "r");
+  if (file == NULL) {
+    LOGE("Failed to open %s: %s", path, strerror(errno));
+    return false;
+  }
 
   mounts->mounts = NULL;
   mounts->length = 0;
 
-  while (fgets(line, sizeof(line), mountinfo) != NULL) {
-    int root_start = 0, root_end = 0;
-    int target_start = 0, target_end = 0;
-    int vfs_option_start = 0, vfs_option_end = 0;
-    int type_start = 0, type_end = 0;
-    int source_start = 0, source_end = 0;
-    int fs_option_start = 0, fs_option_end = 0;
-    int optional_start = 0, optional_end = 0;
-    unsigned int id, parent, maj, min;
-    sscanf(line,
-      "%u "           /* INFO: id */
-      "%u "           /* INFO: parent id */
-      "%u:%u "        /* INFO: maj:min */
-      "%n%*s%n "      /* INFO: mountroot */
-      "%n%*s%n "      /* INFO:target */
-      "%n%*s%n"       /* INFO: vfs options (fs-independent) */
-      "%n%*[^-]%n - " /* INFO: optional fields */
-      "%n%*s%n "      /* INFO: FS type */
-      "%n%*s%n "      /* INFO: source */
-      "%n%*s%n",      /* INFO: fs options (fs specific) */
-      &id, &parent, &maj, &min, &root_start, &root_end, &target_start,
-      &target_end, &vfs_option_start, &vfs_option_end,
-      &optional_start, &optional_end, &type_start, &type_end,
-      &source_start, &source_end, &fs_option_start, &fs_option_end);
+  char *line = NULL;
+  size_t line_capacity = 0;
+  ssize_t line_len;
+  bool success = true;
 
-    struct mountinfo *tmp_mounts = (struct mountinfo *)realloc(mounts->mounts, (i + 1) * sizeof(struct mountinfo));
-    if (!tmp_mounts) {
-      LOGE("Failed to allocate memory for mounts->mounts");
+  while ((line_len = getline(&line, &line_capacity, file)) != -1) {
+    (void)line_len;
 
-      goto cleanup_mount_allocs;
-    }
-    mounts->mounts = tmp_mounts;
+    char *tokens[128];
+    size_t token_count = 0;
+    char *saveptr = NULL;
 
-    unsigned int shared = 0;
-    unsigned int master = 0;
-    unsigned int propagate_from = 0;
-    if (strstr(line + optional_start, "shared:")) {
-      shared = (unsigned int)atoi(strstr(line + optional_start, "shared:") + 7);
+    for (char *token = strtok_r(line, " \t\r\n", &saveptr);
+         token != NULL;
+         token = strtok_r(NULL, " \t\r\n", &saveptr)) {
+      if (token_count >= sizeof(tokens) / sizeof(tokens[0])) {
+        LOGE("Too many fields in mountinfo entry");
+        success = false;
+        break;
+      }
+      tokens[token_count++] = token;
     }
 
-    if (strstr(line + optional_start, "master:")) {
-      master = (unsigned int)atoi(strstr(line + optional_start, "master:") + 7);
+    if (!success) break;
+    if (token_count < 10) {
+      LOGE("Malformed mountinfo entry: too few fields");
+      success = false;
+      break;
     }
 
-    if (strstr(line + optional_start, "propagate_from:")) {
-      propagate_from = (unsigned int)atoi(strstr(line + optional_start, "propagate_from:") + 15);
+    size_t separator = 6;
+    while (separator < token_count && strcmp(tokens[separator], "-") != 0)
+      separator++;
+
+    if (separator >= token_count || separator + 3 >= token_count) {
+      LOGE("Malformed mountinfo entry: missing separator or filesystem fields");
+      success = false;
+      break;
     }
 
-    mounts->mounts[i].id = id;
-    mounts->mounts[i].parent = parent;
-    mounts->mounts[i].device = (dev_t)(makedev(maj, min));
-    mounts->mounts[i].root = strndup(line + root_start, (size_t)(root_end - root_start));
-    if (mounts->mounts[i].root == NULL) {
-      LOGE("Failed to allocate memory for root");
-
-      goto cleanup_mount_allocs;
-    }
-    mounts->mounts[i].target = strndup(line + target_start, (size_t)(target_end - target_start));
-    if (mounts->mounts[i].target == NULL) {
-      LOGE("Failed to allocate memory for target");
-
-      goto cleanup_root;
-    }
-    mounts->mounts[i].vfs_option = strndup(line + vfs_option_start, (size_t)(vfs_option_end - vfs_option_start));
-    if (mounts->mounts[i].vfs_option == NULL) {
-      LOGE("Failed to allocate memory for vfs_option");
-
-      goto cleanup_target;
-    }
-    mounts->mounts[i].optional.shared = shared;
-    mounts->mounts[i].optional.master = master;
-    mounts->mounts[i].optional.propagate_from = propagate_from;
-    mounts->mounts[i].type = strndup(line + type_start, (size_t)(type_end - type_start));
-    if (mounts->mounts[i].type == NULL) {
-      LOGE("Failed to allocate memory for type");
-
-      goto cleanup_vfs_option;
-    }
-    mounts->mounts[i].source = strndup(line + source_start, (size_t)(source_end - source_start));
-    if (mounts->mounts[i].source == NULL) {
-      LOGE("Failed to allocate memory for source");
-
-      goto cleanup_type;
-    }
-    mounts->mounts[i].fs_option = strndup(line + fs_option_start, (size_t)(fs_option_end - fs_option_start));
-    if (mounts->mounts[i].fs_option == NULL) {
-      LOGE("Failed to allocate memory for fs_option");
-
-      goto cleanup_source;
+    struct mountinfo mount = {0};
+    if (!parse_mount_id(tokens[0], &mount.id) ||
+        !parse_mount_id(tokens[1], &mount.parent)) {
+      LOGE("Malformed mountinfo entry: invalid mount id");
+      success = false;
+      break;
     }
 
-    i++;
+    mountinfo_decode(tokens[3]);
+    mountinfo_decode(tokens[4]);
+    mountinfo_decode(tokens[separator + 2]);
 
-    continue;
+    mount.root = mount_strdup(tokens[3]);
+    mount.target = mount_strdup(tokens[4]);
+    mount.type = mount_strdup(tokens[separator + 1]);
+    mount.source = mount_strdup(tokens[separator + 2]);
 
-    cleanup_source:
-      free(mounts->mounts[i].source);
-    cleanup_type:
-      free(mounts->mounts[i].type);
-    cleanup_vfs_option:
-      free(mounts->mounts[i].vfs_option);
-    cleanup_target:
-      free(mounts->mounts[i].target);
-    cleanup_root:
-      free(mounts->mounts[i].root);
-    cleanup_mount_allocs:
-      fclose(mountinfo);
+    if (mount.root == NULL || mount.target == NULL ||
+        mount.type == NULL || mount.source == NULL) {
+      LOGE("Failed to allocate mountinfo entry");
+      free(mount.root);
+      free(mount.target);
+      free(mount.type);
+      free(mount.source);
+      success = false;
+      break;
+    }
 
-      mounts->length = i;
-      free_mounts(mounts);
+    if (mounts->length == SIZE_MAX / sizeof(struct mountinfo)) {
+      LOGE("Too many mountinfo entries");
+      free(mount.root);
+      free(mount.target);
+      free(mount.type);
+      free(mount.source);
+      success = false;
+      break;
+    }
 
-      return false;
+    struct mountinfo *new_mounts = realloc(
+        mounts->mounts, (mounts->length + 1) * sizeof(struct mountinfo));
+    if (new_mounts == NULL) {
+      LOGE("Failed to grow mountinfo array");
+      free(mount.root);
+      free(mount.target);
+      free(mount.type);
+      free(mount.source);
+      success = false;
+      break;
+    }
+
+    mounts->mounts = new_mounts;
+    mounts->mounts[mounts->length++] = mount;
   }
 
-  fclose(mountinfo);
+  if (ferror(file)) {
+    LOGE("Failed while reading %s: %s", path, strerror(errno));
+    success = false;
+  }
 
-  mounts->length = i;
+  free(line);
+  fclose(file);
 
-  return true;
+  if (!success) free_mounts(mounts);
+  return success;
 }
 
-bool umount_root(struct root_impl impl) {
-  /* INFO: We are already in the target pid mount namespace, so actually,
-             when we use self here, we meant its pid.
-  */
-  struct mountinfos mounts;
-  if (!parse_mountinfo("self", &mounts)) {
-    LOGE("Failed to parse mountinfo");
+static bool path_matches(const char *path, const char *prefix) {
+  size_t len = strlen(prefix);
+  return strncmp(path, prefix, len) == 0 &&
+         (path[len] == '\0' || path[len] == '/');
+}
 
+static bool is_root_manager_source(const char *source) {
+  static const char *const sources[] = {
+    "magisk", "worker", "KSU", "ksu", "KernelSU",
+    "KernelSU-Next", "APatch", "apatch"
+  };
+
+  for (size_t i = 0; i < sizeof(sources) / sizeof(sources[0]); i++) {
+    if (strcasecmp(source, sources[i]) == 0) return true;
+  }
+
+  return false;
+}
+
+static bool is_root_module_mount(const struct mountinfo *mount) {
+  /* Explicit module mount paths are reliable even when source is "overlay". */
+  if (path_matches(mount->root, "/adb/modules") ||
+      path_matches(mount->root, "/data/adb/modules") ||
+      path_matches(mount->target, "/data/adb/modules") ||
+      path_matches(mount->source, "/data/adb/modules") ||
+      strstr(mount->source, "/adb/modules/") != NULL) {
+    return true;
+  }
+
+  /*
+   * Manager-specific source names are intentionally exact matches.  Generic
+   * sources such as "overlay", "tmpfs" and "none" are not sufficient evidence
+   * by themselves: unmounting those indiscriminately can break Android.
+   */
+  return is_root_manager_source(mount->source);
+}
+
+static size_t mount_path_depth(const char *path) {
+  size_t depth = 0;
+  for (const char *p = path; *p != '\0'; p++) {
+    if (*p == '/') depth++;
+  }
+  return depth;
+}
+
+static int compare_mount_targets(const void *lhs, const void *rhs) {
+  const struct mountinfo *const *a =
+      (const struct mountinfo *const *)lhs;
+  const struct mountinfo *const *b =
+      (const struct mountinfo *const *)rhs;
+
+  size_t depth_a = mount_path_depth((*a)->target);
+  size_t depth_b = mount_path_depth((*b)->target);
+  if (depth_a != depth_b) return depth_a < depth_b ? 1 : -1;
+
+  /* Newer mount IDs are generally stacked above older mounts at one target. */
+  if ((*a)->id == (*b)->id) return 0;
+  return (*a)->id < (*b)->id ? 1 : -1;
+}
+
+static bool umount_root(struct root_impl impl) {
+  /*
+   * The caller has already switched into a private clone of the target PID's
+   * mount namespace.  Only manager/module mounts are detached here.
+   */
+  struct mountinfos mounts = {0};
+  if (!parse_mountinfo("self", &mounts)) {
+    LOGE("Failed to parse mountinfo; refusing partial cleanup");
     return false;
   }
 
-  const char *source_name = "magisk";
-  if (impl.impl == KernelSU) source_name = "KSU";
-  else if (impl.impl == APatch) source_name = "APatch";
+  char impl_name[32] = {0};
+  stringify_root_impl_name(impl, impl_name);
+  LOGI("[%s] Scanning target mount namespace", impl_name);
 
-  LOGI("[%s] Unmounting root", source_name);
-
-  char **targets_to_unmount = NULL;
-  size_t num_targets = 0;
+  struct mountinfo **selected = NULL;
+  size_t selected_count = 0;
 
   for (size_t i = 0; i < mounts.length; i++) {
-    struct mountinfo mount = mounts.mounts[i];
+    struct mountinfo *mount = &mounts.mounts[i];
+    if (!is_root_module_mount(mount)) continue;
 
-    bool should_unmount = false;
-    if (strcmp(mount.source, source_name) == 0 || (impl.impl == Magisk && strcmp(mount.source, "worker") == 0)) should_unmount = true;
-    if (strncmp(mount.target, "/data/adb/modules", strlen("/data/adb/modules")) == 0) should_unmount = true;
-    if (strncmp(mount.root, "/adb/modules/", strlen("/adb/modules/")) == 0) should_unmount = true;
-
-    if (!should_unmount) continue;
-
-    char **tmp_targets = realloc(targets_to_unmount, (num_targets + 1) * sizeof(char*));
-    if (tmp_targets == NULL) {
-      LOGE("[%s] Failed to allocate memory for targets_to_unmount", source_name);
-
-      free(targets_to_unmount);
-
+    struct mountinfo **new_selected = realloc(
+        selected, (selected_count + 1) * sizeof(struct mountinfo *));
+    if (new_selected == NULL) {
+      LOGE("[%s] Failed to allocate mount selection", impl_name);
+      free(selected);
       free_mounts(&mounts);
-
       return false;
     }
-    targets_to_unmount = tmp_targets;
 
-    num_targets++;
-
-    targets_to_unmount[num_targets - 1] = mount.target;
+    selected = new_selected;
+    selected[selected_count++] = mount;
+    LOGD("[%s] Selected mount id=%u target=%s source=%s root=%s",
+         impl_name, mount->id, mount->target, mount->source, mount->root);
   }
 
-  for (size_t i = num_targets; i > 0; i--) {
-    const char *target = targets_to_unmount[i - 1];
-    if (umount2(target, MNT_DETACH) == -1) {
-      LOGE("[%s] Failed to unmount %s: %s", source_name, target, strerror(errno));
+  qsort(selected, selected_count, sizeof(struct mountinfo *),
+        compare_mount_targets);
 
+  bool all_unmounted = true;
+  for (size_t i = 0; i < selected_count; i++) {
+    const struct mountinfo *mount = selected[i];
+
+    if (umount2(mount->target, MNT_DETACH) == -1) {
+      if (errno == EINVAL || errno == ENOENT) {
+        LOGW("[%s] Mount already detached: %s", impl_name, mount->target);
+        continue;
+      }
+
+      LOGE("[%s] Failed to unmount %s (id=%u): %s",
+           impl_name, mount->target, mount->id, strerror(errno));
+      all_unmounted = false;
       continue;
     }
 
-    LOGI("[%s] Unmounted %s", source_name, target);
+    LOGI("[%s] Unmounted %s (id=%u)", impl_name, mount->target, mount->id);
   }
 
-  free(targets_to_unmount);
-
+  free(selected);
   free_mounts(&mounts);
-
-  return true;
+  return all_unmounted;
 }
 
 int save_mns_fd(int pid, enum MountNamespaceState mns_state, struct root_impl impl) {
@@ -773,7 +851,28 @@ int save_mns_fd(int pid, enum MountNamespaceState mns_state, struct root_impl im
     }
 
     if (mns_state == Clean) {
-      unshare(CLONE_NEWNS);
+      /*
+       * Clone the target namespace and sever propagation before touching any
+       * mount.  This keeps cleanup scoped to the namespace fd handed to the
+       * specializing app process.
+       */
+      if (unshare(CLONE_NEWNS) == -1) {
+        LOGE("Failed to create private mount namespace: %s", strerror(errno));
+
+        if (write_uint8_t(socket_child, 0) == -1)
+          LOGE("Failed to write to socket_child: %s", strerror(errno));
+
+        goto finalize_mns_fork;
+      }
+
+      if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == -1) {
+        LOGE("Failed to make mount propagation private: %s", strerror(errno));
+
+        if (write_uint8_t(socket_child, 0) == -1)
+          LOGE("Failed to write to socket_child: %s", strerror(errno));
+
+        goto finalize_mns_fork;
+      }
 
       if (!umount_root(impl)) {
         LOGE("Failed to umount root");
