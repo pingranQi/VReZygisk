@@ -825,7 +825,7 @@ static bool umount_root(struct root_impl impl) {
 static bool process_name_is(const char *process, const char *package) {
   size_t len = strlen(package);
   return strncmp(process, package, len) == 0 &&
-         (process[len] == '\\0' || process[len] == ':');
+         (process[len] == '\0' || process[len] == ':');
 }
 
 bool should_preserve_mount_namespace(uid_t uid, const char *process) {
@@ -838,7 +838,7 @@ bool should_preserve_mount_namespace(uid_t uid, const char *process) {
     "com.google.android.documentsui"
   };
 
-  if (process == NULL || process[0] == '\\0') {
+  if (process == NULL || process[0] == '\0') {
     LOGW("Unknown target process; preserving original mount namespace");
     return true;
   }
