@@ -642,9 +642,34 @@ void zygiskd_start(char *restrict argv[]) {
         ret = read_uint8_t(client_fd, &mns_state);
         ASSURE_SIZE_READ("UpdateMountNamespace", "mns_state", ret, sizeof(mns_state), break);
 
+        uint32_t target_uid = 0;
+        ret = read_uint32_t(client_fd, &target_uid);
+        ASSURE_SIZE_READ("UpdateMountNamespace", "uid", ret, sizeof(target_uid), break);
+
+        char target_process[PROCESS_NAME_MAX_LEN];
+        ret = read_string(client_fd, target_process, sizeof(target_process));
+        if (ret == -1) {
+          LOGE("Failed reading target process name for mount namespace update");
+          break;
+        }
+
         uint32_t our_pid = (uint32_t)getpid();
         ret = write_uint32_t(client_fd, our_pid);
         ASSURE_SIZE_WRITE("UpdateMountNamespace", "our_pid", ret, sizeof(our_pid), break);
+
+        /*
+         * Classify using specialize metadata supplied by the zygote hook.
+         * /proc/<pid>/cmdline is not reliable at this point: the child has
+         * not completed specialization and may still look like a zygote.
+         */
+        if ((enum MountNamespaceState)mns_state == Clean &&
+            should_preserve_mount_namespace((uid_t)target_uid, target_process)) {
+          uint32_t skip_namespace = UINT32_MAX;
+          ret = write_uint32_t(client_fd, skip_namespace);
+          ASSURE_SIZE_WRITE("UpdateMountNamespace", "skip namespace", ret,
+                            sizeof(skip_namespace), break);
+          break;
+        }
 
         if ((enum MountNamespaceState)mns_state == Clean)
           save_mns_fd(pid, Mounted, impl);
