@@ -23,6 +23,7 @@
 #include "hook.h"
 #include "misc.h"
 #include "module.h"
+#include "mount_revert.h"
 
 #include "art_method.h"
 #include "cpp_strings.h"
@@ -1282,7 +1283,14 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   bool in_denylist = (ctx->info_flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST;
   if (in_denylist) {
     FLAG_SET(ctx, DO_REVERT_UNMOUNT);
-    update_mnt_ns(Clean, false);
+
+    /* Prefer a private per-process mount copy and detach only root/module
+       mounts. Keep the cached clean namespace as a conservative fallback. */
+    if (!revert_root_mounts()) {
+      LOGW("Mount revert is unsafe or incomplete; switching to cached clean namespace");
+      if (!update_mnt_ns(Clean, false))
+        LOGE("Both per-process mount revert and clean namespace fallback failed");
+    }
   }
 
   /* INFO: Executed after setns to ensure a module can update the mounts of an
@@ -1298,8 +1306,13 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
               modules are loaded and executed, so that the modules can have
               the chance to request it.
   */
-  if (!in_denylist && FLAG_GET(ctx, DO_REVERT_UNMOUNT))
-    update_mnt_ns(Clean, false);
+  if (!in_denylist && FLAG_GET(ctx, DO_REVERT_UNMOUNT)) {
+    if (!revert_root_mounts()) {
+      LOGW("Requested mount revert requires clean namespace fallback");
+      if (!update_mnt_ns(Clean, false))
+        LOGE("Requested mount revert and clean namespace fallback failed");
+    }
+  }
 }
 
 static void rz_app_specialize_post(struct zygisk_context *ctx) {

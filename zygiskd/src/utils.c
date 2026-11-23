@@ -668,6 +668,26 @@ bool parse_mountinfo(const char *restrict pid, struct mountinfos *restrict mount
   return true;
 }
 
+static bool is_protected_resource_target(const char *target) {
+  static const char *const protected_paths[] = {
+    "/system/fonts", "/system/framework",
+    "/system_ext/fonts", "/system_ext/framework",
+    "/product/fonts", "/product/framework",
+    "/vendor/etc/fonts", "/apex/com.android.art"
+  };
+
+  if (strcmp(target, "/product") == 0) return true;
+
+  for (size_t i = 0; i < sizeof(protected_paths) / sizeof(protected_paths[0]); i++) {
+    size_t len = strlen(protected_paths[i]);
+    if (strncmp(target, protected_paths[i], len) == 0 &&
+        (target[len] == '\0' || target[len] == '/'))
+      return true;
+  }
+
+  return false;
+}
+
 bool umount_root(struct root_impl impl) {
   /* INFO: We are already in the target pid mount namespace, so actually,
              when we use self here, we meant its pid.
@@ -697,6 +717,14 @@ bool umount_root(struct root_impl impl) {
     if (strncmp(mount.root, "/adb/modules/", strlen("/adb/modules/")) == 0) should_unmount = true;
 
     if (!should_unmount) continue;
+
+    /* Resource overlays can be pre-opened by Zygote/WebView. Keep them
+       mounted in the cached namespace rather than tearing their backing
+       mount out from under framework/font resource resolution. */
+    if (is_protected_resource_target(mount.target)) {
+      LOGW("[%s] Keeping protected resource overlay at %s", source_name, mount.target);
+      continue;
+    }
 
     char **tmp_targets = realloc(targets_to_unmount, (num_targets + 1) * sizeof(char*));
     if (tmp_targets == NULL) {
