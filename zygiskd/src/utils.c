@@ -714,6 +714,11 @@ bool parse_mountinfo(const char *restrict pid, struct mountinfos *restrict mount
     goto fail;
   }
 
+  if (count == 0) {
+    LOGE("Mountinfo is empty; refusing clean namespace cache");
+    goto fail;
+  }
+
   free(line);
   fclose(mountinfo);
   mounts->length = count;
