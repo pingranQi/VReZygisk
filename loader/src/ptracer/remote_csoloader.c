@@ -944,6 +944,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
     return false;
   }
   uintptr_t remote_base = (uintptr_t)remote_base_result;
+  bool remote_mapping_active = true;
 
 #define REMOTE_CLEANUP_MAPPING() do {                                      \
   if (remote_fd >= 0) {                                                    \
@@ -951,11 +952,11 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
     remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);         \
     remote_fd = -1;                                                        \
   }                                                                        \
-  if (remote_base != 0) {                                                  \
+  if (remote_mapping_active) {                                             \
     args[0] = (long)remote_base;                                           \
     args[1] = (long)map_size;                                              \
     remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2);        \
-    remote_base = 0;                                                       \
+    remote_mapping_active = false;                                         \
   }                                                                        \
 } while (0)
 
