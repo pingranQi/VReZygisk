@@ -170,7 +170,31 @@ static bool compute_load_layout(int fd, size_t page_size, ElfW(Ehdr) *eh,
 }
 
 /* INFO: Convert a virtual address to file offset using PT_LOAD segment mapping. */
-static bool vaddr_to_offset(const ElfW(Phdr) *phdr, int phnum, ElfW(Addr) vaddr, off_t *out_off) {
+static bool vaddr_range_in_load_segment(const ElfW(Phdr) *phdr, int phnum,
+                                          ElfW(Addr) vaddr, size_t length,
+                                          bool require_write) {
+  if (!phdr || length == 0 || (uintmax_t)length > UINTPTR_MAX ||
+      (uintptr_t)vaddr > UINTPTR_MAX - length)
+    return false;
+
+  uintptr_t end = (uintptr_t)vaddr + length;
+  for (int i = 0; i < phnum; i++) {
+    if (phdr[i].p_type != PT_LOAD) continue;
+    if (require_write && !(phdr[i].p_flags & PF_W)) continue;
+    if ((uintptr_t)phdr[i].p_vaddr > UINTPTR_MAX - (uintptr_t)phdr[i].p_memsz) continue;
+
+    uintptr_t seg_start = (uintptr_t)phdr[i].p_vaddr;
+    uintptr_t seg_end = seg_start + (uintptr_t)phdr[i].p_memsz;
+    if ((uintptr_t)vaddr >= seg_start && end <= seg_end) return true;
+  }
+  return false;
+}
+
+/* Validate the complete requested range, not only its first byte. */
+static bool vaddr_to_offset(const ElfW(Phdr) *phdr, int phnum, ElfW(Addr) vaddr,
+                            size_t length, off_t *out_off) {
+  if (!phdr || !out_off || length == 0) return false;
+
   for (int i = 0; i < phnum; i++) {
     if (phdr[i].p_type != PT_LOAD) continue;
 
@@ -179,18 +203,21 @@ static bool vaddr_to_offset(const ElfW(Phdr) *phdr, int phnum, ElfW(Addr) vaddr,
     ElfW(Addr) seg_end = phdr[i].p_vaddr + phdr[i].p_filesz;
 
     if (vaddr < seg_start || vaddr >= seg_end) continue;
-
     ElfW(Addr) delta = vaddr - seg_start;
-    if (phdr[i].p_offset > (ElfW(Off))INT64_MAX ||
+    if ((uintmax_t)length > (uintmax_t)(seg_end - vaddr) ||
+        phdr[i].p_offset > (ElfW(Off))INT64_MAX ||
         delta > (ElfW(Addr))(INT64_MAX - (int64_t)phdr[i].p_offset))
       return false;
 
-    *out_off = (off_t)(phdr[i].p_offset + delta);
+    ElfW(Off) file_off = phdr[i].p_offset + delta;
+    if ((uintmax_t)length > (uintmax_t)(INT64_MAX - (int64_t)file_off))
+      return false;
+
+    *out_off = (off_t)file_off;
     return true;
   }
 
-  LOGE("Failed to find vaddr to offset mapping for vaddr: 0x%" PRIxPTR, (uintptr_t)vaddr);
-
+  LOGE("Failed to map full vaddr range: 0x%" PRIxPTR " + %zu", (uintptr_t)vaddr, length);
   return false;
 }
 
@@ -365,8 +392,8 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   }
 
   /* INFO: Convert virtual addresses to file offsets */
-  if (!vaddr_to_offset(phdr, eh->e_phnum, symtab_vaddr, &out->symtab_off) ||
-      !vaddr_to_offset(phdr, eh->e_phnum, strtab_vaddr, &out->strtab_off)) {
+  if (!vaddr_to_offset(phdr, eh->e_phnum, symtab_vaddr, sizeof(ElfW(Sym)), &out->symtab_off) ||
+      !vaddr_to_offset(phdr, eh->e_phnum, strtab_vaddr, strsz, &out->strtab_off)) {
     LOGE("Failed vaddr_to_offset for symtab/strtab");
 
     goto cleanup;
@@ -374,7 +401,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
 
   /* INFO: Convert relocation table virtual addresses to file offsets */
   if (rel_vaddr && rel_sz) {
-    if (!vaddr_to_offset(phdr, eh->e_phnum, rel_vaddr, &out->rel_off)) {
+    if (!vaddr_to_offset(phdr, eh->e_phnum, rel_vaddr, rel_sz, &out->rel_off)) {
       LOGE("Failed vaddr_to_offset for DT_REL");
 
       goto cleanup;
@@ -383,7 +410,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   }
 
   if (rela_vaddr && rela_sz) {
-    if (!vaddr_to_offset(phdr, eh->e_phnum, rela_vaddr, &out->rela_off)) {
+    if (!vaddr_to_offset(phdr, eh->e_phnum, rela_vaddr, rela_sz, &out->rela_off)) {
       LOGE("Failed vaddr_to_offset for DT_RELA");
 
       goto cleanup;
@@ -392,7 +419,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   }
 
   if (jmprel_vaddr && jmprel_sz) {
-    if (!vaddr_to_offset(phdr, eh->e_phnum, jmprel_vaddr, &out->jmprel_off)) {
+    if (!vaddr_to_offset(phdr, eh->e_phnum, jmprel_vaddr, jmprel_sz, &out->jmprel_off)) {
       LOGE("Failed vaddr_to_offset for DT_JMPREL");
 
       goto cleanup;
@@ -442,7 +469,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   if (sysv_hash_vaddr) {
     off_t hash_off = 0;
     uint32_t hash_header[2];
-    if (vaddr_to_offset(phdr, eh->e_phnum, sysv_hash_vaddr, &hash_off) &&
+    if (vaddr_to_offset(phdr, eh->e_phnum, sysv_hash_vaddr, sizeof(uint32_t) * 2, &hash_off) &&
         read_loop_offset(fd, hash_header, sizeof(hash_header), hash_off) &&
         hash_header[1] > 0) {
       out->nsyms = hash_header[1];
@@ -452,7 +479,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   if (gnu_hash_vaddr) {
     off_t gnu_hash_off = 0;
 
-    if (vaddr_to_offset(phdr, eh->e_phnum, gnu_hash_vaddr, &gnu_hash_off)) {
+    if (vaddr_to_offset(phdr, eh->e_phnum, gnu_hash_vaddr, sizeof(uint32_t) * 4, &gnu_hash_off)) {
       uint32_t header[4];
 
       if (read_loop_offset(fd, header, sizeof(header), gnu_hash_off)) {
