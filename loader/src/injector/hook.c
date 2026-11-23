@@ -1306,7 +1306,7 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
               the chance to request it.
   */
   if (!in_denylist && FLAG_GET(ctx, DO_REVERT_UNMOUNT))
-    update_mnt_ns(Clean, false);
+    update_mnt_ns(Clean, target_uid, ctx->process, false);
 }
 
 static void rz_app_specialize_post(struct zygisk_context *ctx) {
