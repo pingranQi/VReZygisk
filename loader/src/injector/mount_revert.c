@@ -232,7 +232,26 @@ static bool inspect_mount_fds(const struct mount_entry *mount) {
     char target[PATH_MAX];
     ssize_t length = readlinkat(dirfd_value, entry->d_name,
                                 target, sizeof(target) - 1);
-    if (length < 0) continue;
+    if (length < 0) {
+      /* A concurrently closed FD is harmless; any other unresolved FD is
+         ambiguous and must not be ignored during a destructive detach. */
+      if (errno != ENOENT && errno != EBADF) {
+        unsigned int unresolved_mount_id = 0;
+        if (!read_fd_mount_id(fd, &unresolved_mount_id) ||
+            unresolved_mount_id == mount->id) {
+          LOGW("Cannot resolve FD %d while checking mount %u",
+               fd, mount->id);
+          safe = false;
+        }
+      }
+      continue;
+    }
+    if ((size_t)length >= sizeof(target) - 1) {
+      LOGW("FD %d target was truncated while checking mount %u",
+           fd, mount->id);
+      safe = false;
+      continue;
+    }
     target[length] = 0;
 
     /* readlink(2) appends this marker for an unlinked but still-open file. */
