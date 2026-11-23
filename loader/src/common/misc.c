@@ -229,6 +229,7 @@ static bool scan_maps_stream(FILE *fp, maps_visitor visit, void *userdata) {
   char *line = NULL;
   size_t capacity = 0;
   bool complete = true;
+  errno = 0;
 
   while (getline(&line, &capacity, fp) != -1) {
     struct map_entry entry;
@@ -287,7 +288,16 @@ bool scan_maps_safe(const char *pid, maps_visitor visit, void *userdata) {
   close(sockets[0]);
 
   int status = 0;
-  while (waitpid(child, &status, 0) == -1 && errno == EINTR) {}
+  pid_t waited;
+  do {
+    waited = waitpid(child, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+
+  if (waited == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    if (maps_fd != -1) close(maps_fd);
+    LOGE("anonymous-memory: maps reader child did not exit cleanly");
+    return false;
+  }
 
   if (maps_fd == -1) {
     LOGE("anonymous-memory: child could not provide /proc/%s/maps", pid);
