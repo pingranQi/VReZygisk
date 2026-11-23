@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
+#include <sched.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -23,6 +25,7 @@
 #include "hook.h"
 #include "misc.h"
 #include "module.h"
+#include "unmount.h"
 
 #include "art_method.h"
 #include "cpp_strings.h"
@@ -1282,7 +1285,13 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   bool in_denylist = (ctx->info_flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST;
   if (in_denylist) {
     FLAG_SET(ctx, DO_REVERT_UNMOUNT);
-    update_mnt_ns(Clean, false);
+
+    /* Revert only inside this app's private mount tree. If the marker opts
+       out, namespace isolation fails, or any selected trace remains, use the
+       daemon's cached clean namespace as the all-or-nothing fallback. */
+    if (!revert_mode_enabled() || unshare(CLONE_NEWNS) == -1 || !revert_root_traces_here()) {
+      update_mnt_ns(Clean, false);
+    }
   }
 
   /* INFO: Executed after setns to ensure a module can update the mounts of an
