@@ -561,18 +561,13 @@ bool parse_mountinfo(const char *restrict pid, struct mountinfos *restrict mount
     return false;
   }
 
-  char line[PATH_MAX];
+  char *line = NULL;
+  size_t line_capacity = 0;
   size_t count = 0;
   mounts->mounts = NULL;
   mounts->length = 0;
 
-  while (fgets(line, sizeof(line), mountinfo) != NULL) {
-    /* A truncated mountinfo line cannot be used for destructive decisions. */
-    if (!strchr(line, '\n') && !feof(mountinfo)) {
-      LOGE("Mountinfo line exceeds parser buffer");
-      goto fail;
-    }
-
+  while (getline(&line, &line_capacity, mountinfo) != -1) {
     int root_start = 0, root_end = 0;
     int target_start = 0, target_end = 0;
     int vfs_option_start = 0, vfs_option_end = 0;
@@ -719,11 +714,13 @@ bool parse_mountinfo(const char *restrict pid, struct mountinfos *restrict mount
     goto fail;
   }
 
+  free(line);
   fclose(mountinfo);
   mounts->length = count;
   return true;
 
 fail:
+  free(line);
   fclose(mountinfo);
   mounts->length = count;
   free_mounts(mounts);
