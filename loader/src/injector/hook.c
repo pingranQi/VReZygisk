@@ -1242,6 +1242,7 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
              m->lib.lib_path ? m->lib.lib_path : "(unknown)");
         csoloader_pinned = true;
         all_cso_modules_unloaded = false;
+        should_unmap_zygisk = false;
         continue;
       }
     } else if (m->loader_backend == MODULE_LOADER_SYSTEM) {
@@ -1255,6 +1256,7 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
         const char *error = dlerror();
         LOGE("Failed to dlclose system-linker module: %s",
              error ? error : "invalid handle");
+        should_unmap_zygisk = false;
         continue;
       }
       m->system_handle = NULL;
