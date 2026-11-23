@@ -521,8 +521,8 @@ static void mountinfo_decode(char *value) {
   char *writep = value;
 
   while (*readp != '\0') {
-    if (readp[0] == '\\' &&
-        readp[1] >= '0' && readp[1] <= '7' &&
+    if (readp[0] == '\\' && readp[1] != '\0' && readp[2] != '\0' &&
+        readp[3] != '\0' && readp[1] >= '0' && readp[1] <= '7' &&
         readp[2] >= '0' && readp[2] <= '7' &&
         readp[3] >= '0' && readp[3] <= '7') {
       unsigned int decoded =
@@ -780,7 +780,7 @@ static bool umount_root(struct root_impl impl) {
 
     selected = new_selected;
     selected[selected_count++] = mount;
-    LOGD("[%s] Selected mount id=%u target=%s source=%s root=%s",
+    LOGI("[%s] Selected mount id=%u target=%s source=%s root=%s",
          impl_name, mount->id, mount->target, mount->source, mount->root);
   }
 
