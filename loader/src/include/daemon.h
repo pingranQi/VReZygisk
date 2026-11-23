@@ -13,7 +13,6 @@ enum rezygiskd_actions {
   RequestCompanionSocket,
   GetModuleDir,
   ZygoteRestart,
-  UpdateMountNamespace,
   RemoveModule
 };
 
@@ -34,11 +33,6 @@ struct rezygisk_info {
   enum root_impl root_impl;
   pid_t pid;
   bool running;
-};
-
-enum mount_namespace_state {
-  Clean,
-  Mounted
 };
 
 #define TMP_PATH "/data/adb/rezygisk"
@@ -64,8 +58,6 @@ int rezygiskd_connect_companion(size_t index);
 int rezygiskd_get_module_dir(size_t index);
 
 void rezygiskd_zygote_restart();
-
-bool rezygiskd_update_mns(enum mount_namespace_state nms_state, char *buf, size_t buf_size);
 
 bool rezygiskd_remove_module(size_t index);
 
