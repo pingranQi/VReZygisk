@@ -220,7 +220,16 @@ static bool inspect_mount_fds(const struct mount_entry *mount) {
     }
 
     unsigned int fd_mount_id = 0;
-    if (!read_fd_mount_id(fd, &fd_mount_id)) continue;
+    if (!read_fd_mount_id(fd, &fd_mount_id)) {
+      /* If fdinfo is unavailable, a pathname under the candidate mount is
+         enough to classify the descriptor as an unresolved reference. */
+      if (path_is_or_below(target, mount->target)) {
+        LOGW("Cannot read mount ID for FD %d under candidate mount %s",
+             fd, mount->target);
+        safe = false;
+      }
+      continue;
+    }
     if (fd_mount_id != mount->id) continue;
 
     LOGW("FD %d (%s) pins candidate mount id %u at %s",
