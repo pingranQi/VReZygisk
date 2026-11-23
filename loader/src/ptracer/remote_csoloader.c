@@ -22,6 +22,10 @@
 
 #include "socket_utils.h"
 
+#ifndef STT_GNU_IFUNC
+  #define STT_GNU_IFUNC 10
+#endif
+
 #ifndef ALIGN_DOWN
   #define ALIGN_DOWN(x, a) ((x) & ~((a)-1))
 #endif
@@ -645,12 +649,10 @@ static bool resolve_symbol_addr(int fd, const struct elf_dyn_info *info,
     return false;
 
   /* IFUNC symbols require executing their resolver; never treat st_value as final. */
-#ifdef STT_GNU_IFUNC
-  if (ELF_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
+if (ELF_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
     LOGE("Remote CSOLoader does not implement GNU IFUNC resolvers");
     return false;
   }
-#endif
 
   /* INFO: Defined symbol - use load_bias + value */
   if (sym.st_shndx != SHN_UNDEF) {
