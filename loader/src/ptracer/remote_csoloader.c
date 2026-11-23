@@ -626,13 +626,9 @@ static bool find_dynsym_value(int fd, const struct elf_dyn_info *info, const cha
 #ifdef __LP64__
   #define ELF_R_TYPE ELF64_R_TYPE
   #define ELF_R_SYM ELF64_R_SYM
-  #define ELF_ST_BIND ELF64_ST_BIND
-  #define ELF_ST_TYPE ELF64_ST_TYPE
 #else
   #define ELF_R_TYPE ELF32_R_TYPE
   #define ELF_R_SYM ELF32_R_SYM
-  #define ELF_ST_BIND ELF32_ST_BIND
-  #define ELF_ST_TYPE ELF32_ST_TYPE
 #endif
 
 /* INFO: Resolve a symbol address - either local or from DT_NEEDED libraries. */
