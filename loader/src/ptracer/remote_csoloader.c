@@ -384,6 +384,11 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   }
 
   /* INFO: Read string table into memory */
+  if (strsz == 0 || strsz == SIZE_MAX) {
+    LOGE("Invalid DT_STRSZ");
+    goto cleanup;
+  }
+
   out->strtab = (char *)malloc(strsz + 1);
   if (!out->strtab) {
     LOGE("Failed to allocate memory for string table");
@@ -400,6 +405,15 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
     goto cleanup;
   }
   out->strtab[strsz] = '\0';
+
+  if (syment != sizeof(ElfW(Sym)) ||
+      (rel_sz && rel_sz % sizeof(ElfW(Rel)) != 0) ||
+      (rela_sz && rela_sz % sizeof(ElfW(Rela)) != 0) ||
+      (jmprel_sz && out->pltrel_type == DT_REL && jmprel_sz % sizeof(ElfW(Rel)) != 0) ||
+      (jmprel_sz && out->pltrel_type == DT_RELA && jmprel_sz % sizeof(ElfW(Rela)) != 0)) {
+    LOGE("Invalid dynamic symbol or relocation table size");
+    goto cleanup;
+  }
 
   out->syment = syment;
   out->strsz = strsz;
@@ -471,18 +485,22 @@ cleanup:
 
 /* INFO: Look up a symbol by name in the dynamic symbol table. */
 static bool find_dynsym_value(int fd, const struct elf_dyn_info *info, const char *sym_name, ElfW(Addr) *out_value) {
+  if (!info || !sym_name || !out_value || info->syment != sizeof(ElfW(Sym))) return false;
+
   for (size_t i = 0; i < info->nsyms; i++) {
     ElfW(Sym) sym;
-    if (!read_loop_offset(fd, &sym, sizeof(sym), info->symtab_off + (off_t)(i * info->syment)))
+    if (i > (size_t)INT64_MAX / info->syment ||
+        !read_loop_offset(fd, &sym, sizeof(sym), info->symtab_off + (off_t)(i * info->syment)))
       break;
 
     if (sym.st_name == 0 || sym.st_name >= info->strsz) continue;
 
     const char *name = &info->strtab[sym.st_name];
-    if (strcmp(name, sym_name) != 0 || sym.st_shndx == SHN_UNDEF) continue;
+    if (!memchr(name, '\0', info->strsz - sym.st_name) ||
+        strcmp(name, sym_name) != 0 || sym.st_shndx == SHN_UNDEF || sym.st_value == 0)
+      continue;
 
     *out_value = sym.st_value;
-
     return true;
   }
 
@@ -749,6 +767,16 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
                                              struct maps_info *remote_map, struct maps_info *local_map,
                                              const char *lib_path, uintptr_t *out_base,
                                              size_t *out_total_size, uintptr_t *out_entry) {
+  if (pid <= 0 || !regs || !remote_map || !local_map || !lib_path ||
+      !out_base || !out_total_size || !out_entry) {
+    LOGE("Invalid arguments to remote CSOLoader");
+    return false;
+  }
+
+  *out_base = 0;
+  *out_total_size = 0;
+  *out_entry = 0;
+
   struct user_regs_struct regs_saved = *regs;
 
   long page_size_long = sysconf(_SC_PAGESIZE);
@@ -867,7 +895,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
   long remote_base_result = remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
   if (remote_syscall_failed(remote_base_result)) {
-    LOGE("remote mmap reserve failed: %p", (void *)remote_base);
+    LOGE("remote mmap reserve failed: %ld", remote_base_result);
 
 
     args[0] = remote_fd;
@@ -1102,6 +1130,12 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
       if (off >= dinfo.strsz) continue;
 
       const char *soname = &dinfo.strtab[off];
+      size_t remaining = dinfo.strsz - off;
+      if (!memchr(soname, '\0', remaining)) {
+        LOGE("DT_NEEDED string is not terminated within DT_STRSZ");
+        continue;
+      }
+
       needed_paths[i] = find_remote_module_path(remote_map, soname);
     }
   }
