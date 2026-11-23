@@ -202,7 +202,6 @@ static void jni_hook_list_add(const char *class_name, JNINativeMethod *methods, 
  * MNT_DETACH from propagating back into Zygote or sibling processes that may
  * still share the inherited mount namespace.
  */
-#define RZ_MOUNTINFO_LINE_MAX (PATH_MAX * 4)
 #define RZ_MAX_MOUNTS 512
 
 static char *rz_mountinfo_unescape(const char *value) {
@@ -329,7 +328,7 @@ static bool rz_revert_root_mounts(void) {
     return false;
   }
 
-  fp = fopen("/proc/self/mountinfo", "re");
+  fp = fopen("/proc/self/mountinfo", "r");
   if (!fp) {
     PLOGE("Failed to open /proc/self/mountinfo");
     return false;
