@@ -109,13 +109,11 @@ enum rezygisk_options {
   */
   FORCE_DENYLIST_UNMOUNT = 0,
 
-  /* INFO: Once set, ReZygisk will dlclose your library from the process, this is assured to
-             happen after post...Specialize, but not at a specific moment due to different
-             implementations.
-
-           You should not use this option if you leave references in the process such as hooks,
-             which will try to execute uninitialized memory.
-  */
+  /* INFO: Once set, ReZygisk unloads the module after post...Specialize.
+             CSOLoader-backed images use csoloader_unload(); system-linker-backed
+             images use dlclose(). The handle is never passed across backends.
+             Do not use this option if hooks or other process references can still
+             execute code from the module. */
   DLCLOSE_MODULE_LIBRARY = 1
 };
 
