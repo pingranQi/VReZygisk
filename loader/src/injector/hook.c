@@ -1109,6 +1109,11 @@ static bool load_modules_only(void) {
     return true;
   }
 
+  if (ms.modules_count == 0) {
+    free_modules(&ms);
+    return true;
+  }
+
   zygisk_modules = (struct rezygisk_module *)calloc(ms.modules_count, sizeof(struct rezygisk_module));
   if (!zygisk_modules) {
     LOGE("Failed to allocate memory for modules");
@@ -1185,12 +1190,16 @@ static bool load_modules_only(void) {
     if (!entry) {
       LOGE("Failed to find entry point in module [%s]", lib_path);
       if (module->loader_backend == MODULE_LOADER_CSO) {
-        if (!csoloader_unload(&module->lib)) csoloader_pinned = true;
+        if (!csoloader_unload(&module->lib)) {
+          csoloader_pinned = true;
+          should_unmap_zygisk = false;
+        }
       } else if (module->loader_backend == MODULE_LOADER_SYSTEM) {
         if (dlclose(module->system_handle) != 0) {
           const char *error = dlerror();
           LOGE("Failed to close system-loaded module [%s]: %s",
                lib_path, error ? error : "unknown dlclose error");
+          should_unmap_zygisk = false;
         }
       }
       rezygiskd_remove_module(i);
