@@ -51,11 +51,6 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  if (switch_mount_namespace(1) == false) {
-    LOGE("Failed to switch mount namespace");
-
-    return 1;
-  }
   root_impls_setup();
   zygiskd_start(argv);
 
