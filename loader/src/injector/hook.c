@@ -1201,7 +1201,6 @@ static bool load_modules_only(void) {
       LOGE("Failed to find entry point in module [%s]", lib_path);
       release_unregistered_module(module, lib_path);
       rezygiskd_remove_module(i);
-      memset(module, 0, sizeof(*module));
       continue;
     }
 
