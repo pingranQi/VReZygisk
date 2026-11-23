@@ -1147,9 +1147,11 @@ static bool load_modules_only(void) {
       if (module->loader_backend == MODULE_LOADER_CSO) {
         if (!csoloader_unload(&module->lib)) csoloader_pinned = true;
       } else if (module->loader_backend == MODULE_LOADER_SYSTEM) {
-        if (dlclose(module->system_handle) != 0)
+        if (dlclose(module->system_handle) != 0) {
+          const char *error = dlerror();
           LOGE("Failed to close system-loaded module [%s]: %s", lib_path,
-               dlerror() ? dlerror() : "unknown dlclose error");
+               error ? error : "unknown dlclose error");
+        }
       }
       rezygiskd_remove_module(i);
       continue;
