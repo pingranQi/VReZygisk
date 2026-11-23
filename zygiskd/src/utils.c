@@ -750,11 +750,12 @@ bool umount_root(struct root_impl impl) {
     targets_to_unmount[num_targets - 1] = mount.target;
   }
 
+  bool all_unmounted = true;
   for (size_t i = num_targets; i > 0; i--) {
     const char *target = targets_to_unmount[i - 1];
     if (umount2(target, MNT_DETACH) == -1) {
       LOGE("[%s] Failed to unmount %s: %s", source_name, target, strerror(errno));
-
+      all_unmounted = false;
       continue;
     }
 
@@ -765,7 +766,7 @@ bool umount_root(struct root_impl impl) {
 
   free_mounts(&mounts);
 
-  return true;
+  return all_unmounted;
 }
 
 int save_mns_fd(int pid, enum MountNamespaceState mns_state, struct root_impl impl) {
@@ -808,7 +809,21 @@ int save_mns_fd(int pid, enum MountNamespaceState mns_state, struct root_impl im
     }
 
     if (mns_state == Clean) {
-      unshare(CLONE_NEWNS);
+      /* A cloned namespace may retain shared propagation. Make it private
+         before detaching anything, or unmount events can escape to Zygote. */
+      if (unshare(CLONE_NEWNS) == -1) {
+        LOGE("unshare mount namespace: %s", strerror(errno));
+        if (write_uint8_t(socket_child, 0) == -1)
+          LOGE("Failed to write to socket_child: %s", strerror(errno));
+        goto finalize_mns_fork;
+      }
+
+      if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == -1) {
+        LOGE("make clean namespace private: %s", strerror(errno));
+        if (write_uint8_t(socket_child, 0) == -1)
+          LOGE("Failed to write to socket_child: %s", strerror(errno));
+        goto finalize_mns_fork;
+      }
 
       if (!umount_root(impl)) {
         LOGE("Failed to umount root");
