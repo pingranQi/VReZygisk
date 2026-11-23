@@ -638,10 +638,6 @@ void zygiskd_start(char *restrict argv[]) {
         ssize_t ret = read_uint32_t(client_fd, (uint32_t *)&pid);
         ASSURE_SIZE_READ("UpdateMountNamespace", "pid", ret, sizeof(pid), break);
 
-        uint8_t mns_state = 0;
-        ret = read_uint8_t(client_fd, &mns_state);
-        ASSURE_SIZE_READ("UpdateMountNamespace", "mns_state", ret, sizeof(mns_state), break);
-
         uint32_t target_uid = 0;
         ret = read_uint32_t(client_fd, &target_uid);
         ASSURE_SIZE_READ("UpdateMountNamespace", "uid", ret, sizeof(target_uid), break);
@@ -652,6 +648,10 @@ void zygiskd_start(char *restrict argv[]) {
           LOGE("Failed reading target process name for mount namespace update");
           break;
         }
+
+        uint8_t mns_state = 0;
+        ret = read_uint8_t(client_fd, &mns_state);
+        ASSURE_SIZE_READ("UpdateMountNamespace", "mns_state", ret, sizeof(mns_state), break);
 
         uint32_t our_pid = (uint32_t)getpid();
         ret = write_uint32_t(client_fd, our_pid);
