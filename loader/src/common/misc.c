@@ -5,9 +5,17 @@
 #include <sys/sysmacros.h>
 #include <sys/utsname.h>
 #include <ctype.h>
+#include <errno.h>
+#include <string.h>
+
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "logging.h"
 #include "misc.h"
+#include "socket_utils.h"
 
 int parse_int(const char *str) {
   int val = 0;
@@ -179,3 +187,122 @@ void free_maps(struct maps_info *maps) {
   free(maps->maps);
   free(maps);
 }
+
+/* Parse one maps line. The path belongs to the caller's line buffer. */
+static bool parse_maps_line(char *line, struct map_entry *entry) {
+  line[strcspn(line, "\n")] = '\0';
+
+  uintptr_t start, end, offset;
+  unsigned int dev_major, dev_minor;
+  ino_t inode;
+  char perms[5] = { 0 };
+  int path_off = 0;
+
+  if (sscanf(line, "%" PRIxPTR "-%" PRIxPTR " %4s %" PRIxPTR " %x:%x %lu %n",
+             &start, &end, perms, &offset, &dev_major, &dev_minor, &inode, &path_off) != 7) {
+    return false;
+  }
+
+  int perms_bit = 0;
+  if (perms[0] == 'r') perms_bit |= PROT_READ;
+  if (perms[1] == 'w') perms_bit |= PROT_WRITE;
+  if (perms[2] == 'x') perms_bit |= PROT_EXEC;
+
+  while (isspace((unsigned char)line[path_off])) path_off++;
+
+  *entry = (struct map_entry) {
+    .start = start,
+    .end = end,
+    .perms = perms_bit,
+    .is_private = (perms[3] == 'p'),
+    .offset = offset,
+    .dev = makedev(dev_major, dev_minor),
+    .inode = inode,
+    .path = line + path_off
+  };
+
+  return true;
+}
+
+/* Walk a maps fd after it has been opened by the forked reader process. */
+static bool scan_maps_stream(FILE *fp, maps_visitor visit, void *userdata) {
+  char *line = NULL;
+  size_t capacity = 0;
+  bool complete = true;
+
+  while (getline(&line, &capacity, fp) != -1) {
+    struct map_entry entry;
+    if (!parse_maps_line(line, &entry)) continue;
+    if (!visit(&entry, userdata)) {
+      complete = false;
+      break;
+    }
+  }
+
+  if (ferror(fp) || (errno == ENOMEM)) complete = false;
+  free(line);
+
+  return complete;
+}
+
+/*
+ * Open /proc/<pid>/maps in a short-lived child and pass the fd with SCM_RIGHTS.
+ * The atime update therefore belongs to the child-side proc entry, not to the
+ * target process whose maps are being inspected.
+ */
+bool scan_maps_safe(const char *pid, maps_visitor visit, void *userdata) {
+  if (pid == NULL || visit == NULL) return false;
+
+  int sockets[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == -1) {
+    PLOGE("anonymous-memory: socketpair for maps");
+    return false;
+  }
+
+  pid_t child = fork();
+  if (child == -1) {
+    PLOGE("anonymous-memory: fork maps reader");
+    close(sockets[0]);
+    close(sockets[1]);
+    return false;
+  }
+
+  if (child == 0) {
+    close(sockets[0]);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%s/maps", pid);
+    int maps_fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (maps_fd != -1) {
+      (void)write_fd(sockets[1], maps_fd);
+      close(maps_fd);
+    }
+
+    close(sockets[1]);
+    _exit(0);
+  }
+
+  close(sockets[1]);
+  int maps_fd = read_fd(sockets[0]);
+  close(sockets[0]);
+
+  int status = 0;
+  while (waitpid(child, &status, 0) == -1 && errno == EINTR) {}
+
+  if (maps_fd == -1) {
+    LOGE("anonymous-memory: child could not provide /proc/%s/maps", pid);
+    return false;
+  }
+
+  FILE *fp = fdopen(maps_fd, "r");
+  if (fp == NULL) {
+    PLOGE("anonymous-memory: fdopen maps");
+    close(maps_fd);
+    return false;
+  }
+
+  bool ok = scan_maps_stream(fp, visit, userdata);
+  fclose(fp);
+  return ok;
+}
+
