@@ -1314,6 +1314,11 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
 static void rz_app_specialize_post(struct zygisk_context *ctx) {
   rz_run_modules_post(ctx);
 
+  /* Refresh bionic's cached mount-table line after the process-local revert. */
+  if (FLAG_GET(ctx, DO_REVERT_UNMOUNT) && !refresh_mount_line()) {
+    LOGW("Failed to refresh the process mount-table cache");
+  }
+
   /* INFO: Allow the process name string to be released */
   (*ctx->env)->ReleaseStringUTFChars(ctx->env, *ctx->args.app->nice_name, ctx->process);
   g_ctx = NULL;
