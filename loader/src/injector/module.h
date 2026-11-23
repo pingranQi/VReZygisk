@@ -109,13 +109,11 @@ enum rezygisk_options {
   */
   FORCE_DENYLIST_UNMOUNT = 0,
 
-  /* INFO: Once set, ReZygisk will dlclose your library from the process, this is assured to
-             happen after post...Specialize, but not at a specific moment due to different
-             implementations.
-
-           You should not use this option if you leave references in the process such as hooks,
-             which will try to execute uninitialized memory.
-  */
+  /* INFO: Once set, ReZygisk unloads the module after post...Specialize.
+             CSOLoader-backed images use csoloader_unload(); system-linker-backed
+             images use dlclose(). The handle is never passed across backends.
+             Do not use this option if hooks or other process references can still
+             execute code from the module. */
   DLCLOSE_MODULE_LIBRARY = 1
 };
 
@@ -150,11 +148,20 @@ struct rezygisk_api {
   uint32_t (*get_flags)();
 };
 
+enum module_loader_backend {
+  MODULE_LOADER_NONE = 0,
+  MODULE_LOADER_CSO,
+  MODULE_LOADER_SYSTEM
+};
+
 struct rezygisk_module {
   struct rezygisk_abi abi;
   struct rezygisk_api api;
 
+  /* Exactly one loader owns the image; never pass a system handle to CSOLoader. */
   struct csoloader lib;
+  void *system_handle;
+  enum module_loader_backend loader_backend;
 
   dev_t dev;
   ino_t ino;
@@ -183,7 +190,7 @@ static inline void rz_module_call_pre_app_specialize(struct rezygisk_module *m, 
   if (!m->abi.pre_app_specialize) {
     /* NOTE: Original Zygisk API expects all modules to have all specialize functions. Not
                doing so will cause a null pointer deference in Magisk's Zygisk. */
-    LOGW("Module [%s] doesn't have pre_app_specialize. Skipping it.", m->lib.img->elf);
+    LOGW("Module [%s] doesn't have pre_app_specialize. Skipping it.", (m->lib.img ? m->lib.img->elf : "system-linker module"));
 
     return;
   }
@@ -234,7 +241,7 @@ static inline void rz_module_call_post_app_specialize(struct rezygisk_module *m,
   if (!m->abi.post_app_specialize) {
     /* NOTE: Original Zygisk API expects all modules to have all specialize functions. Not
                doing so will cause a null pointer deference in Magisk's Zygisk. */
-    LOGW("Module [%s] doesn't have post_app_specialize. Skipping it.", m->lib.img->elf);
+    LOGW("Module [%s] doesn't have post_app_specialize. Skipping it.", (m->lib.img ? m->lib.img->elf : "system-linker module"));
 
     return;
   }
@@ -285,7 +292,7 @@ static inline void rz_module_call_pre_server_specialize(struct rezygisk_module *
   if (!m->abi.pre_server_specialize) {
     /* NOTE: Original Zygisk API expects all modules to have all specialize functions. Not
                doing so will cause a null pointer deference in Magisk's Zygisk. */
-    LOGW("Module [%s] doesn't have pre_server_specialize. Skipping it.", m->lib.img->elf);
+    LOGW("Module [%s] doesn't have pre_server_specialize. Skipping it.", (m->lib.img ? m->lib.img->elf : "system-linker module"));
 
     return;
   }
@@ -297,7 +304,7 @@ static inline void rz_module_call_post_server_specialize(struct rezygisk_module 
   if (!m->abi.post_server_specialize) {
     /* NOTE: Original Zygisk API expects all modules to have all specialize functions. Not
                doing so will cause a null pointer deference in Magisk's Zygisk. */
-    LOGW("Module [%s] doesn't have post_server_specialize. Skipping it.", m->lib.img->elf);
+    LOGW("Module [%s] doesn't have post_server_specialize. Skipping it.", (m->lib.img ? m->lib.img->elf : "system-linker module"));
 
     return;
   }

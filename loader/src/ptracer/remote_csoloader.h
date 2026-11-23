@@ -12,4 +12,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
                                              const char *lib_path, uintptr_t *out_base,
                                              size_t *out_total_size, uintptr_t *out_entry);
 
+bool remote_csoloader_unmap(int pid, struct user_regs_struct *regs,
+                            struct maps_info *remote_map, uintptr_t base, size_t size);
+
 #endif

@@ -143,6 +143,17 @@ size_t zygisk_module_length = 0;
 static bool should_unmap_zygisk = false;
 static bool enable_unloader = false;
 
+/* Process-wide CSOLoader state must outlive every abandoned custom image. */
+static bool csoloader_initialized = false;
+static bool csoloader_pinned = false;
+
+static void csoloader_deinit_if_safe(void) {
+  if (!csoloader_initialized || csoloader_pinned) return;
+  csoloader_deinit();
+  csoloader_initialized = false;
+  LOGD("CSOLoader global state deinitialized");
+}
+
 /* INFO: Helper function to add to PLT hook list */
 static bool plt_hook_list_add(const char *lib_path, const char *symbol, void *new_func, void **backup) {
   struct plt_hook_entry *new_plt_hook_list = realloc(plt_hook_list, (plt_hook_list_count + 1) * sizeof(struct plt_hook_entry));
@@ -324,7 +335,7 @@ DCL_HOOK_FUNC(int, pthread_attr_setstacksize, void *target, size_t size) {
   if (should_unmap_zygisk) {
     unhook_functions();
 
-    csoloader_deinit();
+    csoloader_deinit_if_safe();
 
     if (!should_unmap_zygisk) {
       LOGW("Failed to unmap libzygisk.so, skipping munmap");
@@ -1085,6 +1096,33 @@ static void rz_fork_post(struct zygisk_context *ctx __attribute__((unused))) {
   g_ctx = NULL;
 }
 
+static void release_unregistered_module(struct rezygisk_module *module, const char *lib_path) {
+  bool released = true;
+
+  if (module->loader_backend == MODULE_LOADER_CSO) {
+    released = csoloader_unload(&module->lib);
+    if (!released) {
+      csoloader_pinned = true;
+      LOGE("Retaining failed CSOLoader image for [%s]", lib_path);
+    }
+  } else if (module->loader_backend == MODULE_LOADER_SYSTEM) {
+    if (!module->system_handle || dlclose(module->system_handle) != 0) {
+      const char *error = dlerror();
+      LOGE("Failed to close system-loaded module [%s]: %s", lib_path,
+           error ? error : "invalid handle");
+      released = false;
+    }
+  }
+
+  if (!released) {
+    /* The image/handle must remain resident; libzygisk must not be unmapped. */
+    should_unmap_zygisk = false;
+    return;
+  }
+
+  memset(module, 0, sizeof(*module));
+}
+
 static bool load_modules_only(void) {
   struct zygisk_modules ms;
   if (!rezygiskd_read_modules(&ms)) {
@@ -1093,7 +1131,12 @@ static bool load_modules_only(void) {
     return false;
   }
 
-  zygisk_modules = (struct rezygisk_module *)malloc(ms.modules_count * sizeof(struct rezygisk_module));
+  if (ms.modules_count == 0) {
+    free_modules(&ms);
+    return true;
+  }
+
+  zygisk_modules = (struct rezygisk_module *)calloc(ms.modules_count, sizeof(struct rezygisk_module));
   if (!zygisk_modules) {
     LOGE("Failed to allocate memory for modules");
 
@@ -1104,52 +1147,71 @@ static bool load_modules_only(void) {
 
   for (size_t i = 0; i < ms.modules_count; i++) {
     const char *lib_path = ms.modules[i];
+    struct rezygisk_module *module = &zygisk_modules[zygisk_module_length];
+    memset(module, 0, sizeof(*module));
 
-    if (!csoloader_load(&zygisk_modules[zygisk_module_length].lib, lib_path)) {
-      LOGE("Failed to load module [%s]", lib_path);
+    /*
+     * Prefer CSOLoader, but do not make a module unavailable solely because
+     * the custom linker cannot handle a device-/module-specific ELF feature.
+     * A system handle is never stored in struct csoloader.
+     */
+    if (csoloader_load(&module->lib, lib_path)) {
+      module->loader_backend = MODULE_LOADER_CSO;
+      csoloader_initialized = true;
+    } else {
+      LOGW("CSOLoader rejected [%s]; retrying with the system linker", lib_path);
+      dlerror();
+      module->system_handle = dlopen(lib_path, RTLD_NOW | RTLD_LOCAL);
+      if (!module->system_handle) {
+        const char *error = dlerror();
+        LOGE("Both loaders failed for [%s]; system linker: %s",
+             lib_path, error ? error : "unknown dlopen error");
 
-      /* INFO: In case a module failed to load, update the list of available modules
-           in ReZygiskd to avoid a mismatch between the loaded modules in ReZygisk
-           Zygote library and the available modules in ReZygiskd. */
-      /* TODO: Update the list of modules for ReZygisk monitor, so that it can update
-                 for WebUI. That is simply cosmetic, though. */
-      rezygiskd_remove_module(i);
-
-      continue;
+        rezygiskd_remove_module(i);
+        continue;
+      }
+      module->loader_backend = MODULE_LOADER_SYSTEM;
     }
 
     struct stat st;
     if (stat(lib_path, &st) != 0) {
       PLOGE("Failed to stat module [%s]", lib_path);
-
-      csoloader_unload(&zygisk_modules[zygisk_module_length].lib);
-
+      release_unregistered_module(module, lib_path);
       rezygiskd_remove_module(i);
-
       continue;
     }
 
-    zygisk_modules[zygisk_module_length].dev = st.st_dev;
-    zygisk_modules[zygisk_module_length].ino = st.st_ino;
+    module->dev = st.st_dev;
+    module->ino = st.st_ino;
 
-    void *entry = csoloader_get_symbol(&zygisk_modules[zygisk_module_length].lib, "zygisk_module_entry");
+    void *entry = NULL;
+    if (module->loader_backend == MODULE_LOADER_CSO) {
+      entry = csoloader_get_symbol(&module->lib, "zygisk_module_entry");
+    } else {
+      dlerror();
+      entry = dlsym(module->system_handle, "zygisk_module_entry");
+      const char *error = dlerror();
+      if (error) {
+        LOGE("Failed to resolve zygisk_module_entry in [%s]: %s", lib_path, error);
+        entry = NULL;
+      }
+    }
+
     if (!entry) {
       LOGE("Failed to find entry point in module [%s]", lib_path);
-
-      csoloader_unload(&zygisk_modules[zygisk_module_length].lib);
-
+      release_unregistered_module(module, lib_path);
       rezygiskd_remove_module(i);
-
       continue;
     }
 
-    zygisk_modules[zygisk_module_length].api.register_module = rezygisk_module_register;
-    zygisk_modules[zygisk_module_length].api.impl = ENCODE_ID((void *)zygisk_module_length);
-    zygisk_modules[zygisk_module_length].zygisk_module_entry = (void (*)(void *, void *))entry;
+    module->api.register_module = rezygisk_module_register;
+    module->api.impl = ENCODE_ID((void *)zygisk_module_length);
+    module->zygisk_module_entry = (void (*)(void *, void *))entry;
 
-    LOGD("Loaded module [%s]. Entry: %p", lib_path, entry);
+    LOGD("Loaded module [%s] using %s linker. Entry: %p", lib_path,
+         module->loader_backend == MODULE_LOADER_CSO ? "CSO" : "system", entry);
 
-    zygisk_modules[zygisk_module_length].unload = false;
+    module->unload = false;
     zygisk_module_length++;
   }
 
@@ -1171,31 +1233,59 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
   FLAG_SET(ctx, POST_SPECIALIZE);
 
   size_t modules_unloaded = 0;
+  bool all_cso_modules_unloaded = true;
+  bool had_cso_module = false;
+
   for (size_t i = 0; i < zygisk_module_length; i++) {
     struct rezygisk_module *m = &zygisk_modules[i];
 
     if (FLAG_GET(ctx, APP_SPECIALIZE)) rz_module_call_post_app_specialize(m, ctx->args.app);
     else if (FLAG_GET(ctx, SERVER_FORK_AND_SPECIALIZE)) rz_module_call_post_server_specialize(m, ctx->args.server);
 
-    if (!m->unload) {
-      LOGD("Abandoning module library at %p", &m->lib);
+    if (m->loader_backend == MODULE_LOADER_CSO) {
+      had_cso_module = true;
+      if (!m->unload) {
+        LOGD("Abandoning CSOLoader image at %p", m->lib.img ? m->lib.img->header : NULL);
+        csoloader_pinned = true;
+        all_cso_modules_unloaded = false;
+        csoloader_abandon(&m->lib);
+        continue;
+      }
 
-      csoloader_abandon(&m->lib);
+      if (!csoloader_unload(&m->lib)) {
+        LOGE("Failed to unload CSOLoader module [%s]",
+             m->lib.lib_path ? m->lib.lib_path : "(unknown)");
+        csoloader_pinned = true;
+        all_cso_modules_unloaded = false;
+        should_unmap_zygisk = false;
+        continue;
+      }
+    } else if (m->loader_backend == MODULE_LOADER_SYSTEM) {
+      if (!m->unload) {
+        /* Intentional residency: keep the dlopen reference and its handle alive. */
+        LOGD("Keeping system-linker module resident: %p", m->system_handle);
+        continue;
+      }
 
-      continue;
+      if (!m->system_handle || dlclose(m->system_handle) != 0) {
+        const char *error = dlerror();
+        LOGE("Failed to dlclose system-linker module: %s",
+             error ? error : "invalid handle");
+        should_unmap_zygisk = false;
+        continue;
+      }
+      m->system_handle = NULL;
     }
 
-    if (!csoloader_unload(&m->lib)) {
-      LOGE("Failed to unload module library");
-
-      continue;
-    }
-
+    m->loader_backend = MODULE_LOADER_NONE;
     modules_unloaded++;
   }
 
   if (zygisk_module_length > 0)
     LOGD("Modules unloaded: %zu/%zu", modules_unloaded, zygisk_module_length);
+
+  if (had_cso_module && all_cso_modules_unloaded)
+    csoloader_deinit_if_safe();
 }
 
 static void rz_app_specialize_pre(struct zygisk_context *ctx) {
