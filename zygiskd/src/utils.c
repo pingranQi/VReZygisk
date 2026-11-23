@@ -768,6 +768,10 @@ static bool umount_root(struct root_impl impl) {
   for (size_t i = 0; i < mounts.length; i++) {
     struct mountinfo *mount = &mounts.mounts[i];
     if (!is_root_module_mount(mount)) continue;
+    if (strcmp(mount->target, "/") == 0) {
+      LOGW("[%s] Refusing to detach the namespace root mount", impl_name);
+      continue;
+    }
 
     struct mountinfo **new_selected = realloc(
         selected, (selected_count + 1) * sizeof(struct mountinfo *));
@@ -784,8 +788,9 @@ static bool umount_root(struct root_impl impl) {
          impl_name, mount->id, mount->target, mount->source, mount->root);
   }
 
-  qsort(selected, selected_count, sizeof(struct mountinfo *),
-        compare_mount_targets);
+  if (selected_count > 1)
+    qsort(selected, selected_count, sizeof(struct mountinfo *),
+          compare_mount_targets);
 
   bool all_unmounted = true;
   for (size_t i = 0; i < selected_count; i++) {
