@@ -175,11 +175,14 @@ static bool hide_one_mapping(const struct hide_target *target,
    * SELinux policy denies anonymous executable memory.
    */
   if (mprotect(copy, size, target->perms) == -1) {
+    const int protect_error = errno;
+
     if (source_needs_restore &&
         mprotect(address, size, target->perms) == -1) {
       PLOGE("restore the permissions of [%s] after preflight failure", path);
     }
 
+    errno = protect_error;
     PLOGE("set the permissions of the copy of [%s]", path);
     munmap(copy, size);
     return false;
@@ -190,11 +193,14 @@ static bool hide_one_mapping(const struct hide_target *target,
   }
 
   if (mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, address) == MAP_FAILED) {
+    const int remap_error = errno;
+
     if (source_needs_restore &&
         mprotect(address, size, target->perms) == -1) {
       PLOGE("restore the permissions of [%s] after replacement failure", path);
     }
 
+    errno = remap_error;
     PLOGE("move the copy of [%s] over the original", path);
     munmap(copy, size);
     return false;
