@@ -193,12 +193,19 @@ static void jni_hook_list_add(const char *class_name, JNINativeMethod *methods, 
   jni_hook_list_count++;
 }
 
-static bool update_mnt_ns(enum mount_namespace_state mns_state, bool dry_run) {
+static bool update_mnt_ns(enum mount_namespace_state mns_state, uid_t uid,
+                             const char *process, bool dry_run) {
   char ns_path[PATH_MAX];
-  if (!rezygiskd_update_mns(mns_state, ns_path, sizeof(ns_path))) {
+  if (!rezygiskd_update_mns(mns_state, uid, process, ns_path, sizeof(ns_path))) {
     PLOGE("Failed to update mount namespace");
 
     return false;
+  }
+
+  /* Empty path means the daemon deliberately preserved the target namespace. */
+  if (ns_path[0] == '\\0') {
+    LOGD("Keeping original mount namespace for [%s]", process ? process : "(unknown)");
+    return true;
   }
 
   if (dry_run) return true;
@@ -1205,7 +1212,7 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
              and even if so, it should not impact in detections, performance or
              any area.
   */
-  uid_t uid = *ctx->args.app->uid;
+  uid_t target_uid = *ctx->args.app->uid;\n  uid_t uid = target_uid;
   if (IS_ISOLATED_SERVICE(uid) && ctx->args.app->app_data_dir) {
     /* INFO: If the app is an isolated service, we use the UID of the
                app's process data directory, which is the UID of the
@@ -1247,7 +1254,7 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
       (ctx->info_flags & PROCESS_ON_DENYLIST) == 0 &&
       (ctx->info_flags & PROCESS_IS_MANAGER) == 0
   ) {
-    update_mnt_ns(Clean, true);
+    update_mnt_ns(Clean, target_uid, ctx->process, true);
   }
 
   if ((ctx->info_flags & PROCESS_IS_MANAGER) == PROCESS_IS_MANAGER) {
@@ -1282,7 +1289,7 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   bool in_denylist = (ctx->info_flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST;
   if (in_denylist) {
     FLAG_SET(ctx, DO_REVERT_UNMOUNT);
-    update_mnt_ns(Clean, false);
+    update_mnt_ns(Clean, target_uid, ctx->process, false);
   }
 
   /* INFO: Executed after setns to ensure a module can update the mounts of an
