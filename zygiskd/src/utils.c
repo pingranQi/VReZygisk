@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -530,24 +531,48 @@ void free_mounts(struct mountinfos *restrict mounts) {
   free(mounts->mounts);
 }
 
+static void decode_mountinfo_field(char *field) {
+  char *readp = field;
+  char *writep = field;
+
+  while (*readp) {
+    if (readp[0] == '\\' && readp[1] >= '0' && readp[1] <= '7' &&
+        readp[2] >= '0' && readp[2] <= '7' &&
+        readp[3] >= '0' && readp[3] <= '7') {
+      *writep++ = (char)(((readp[1] - '0') << 6) |
+                         ((readp[2] - '0') << 3) |
+                         (readp[3] - '0'));
+      readp += 4;
+    } else {
+      *writep++ = *readp++;
+    }
+  }
+
+  *writep = '\0';
+}
+
 bool parse_mountinfo(const char *restrict pid, struct mountinfos *restrict mounts) {
   char path[PATH_MAX];
-  snprintf(path, PATH_MAX, "/proc/%s/mountinfo", pid);
+  snprintf(path, sizeof(path), "/proc/%s/mountinfo", pid);
 
   FILE *mountinfo = fopen(path, "r");
   if (mountinfo == NULL) {
-    LOGE("fopen: %s", strerror(errno));
-
+    LOGE("fopen %s: %s", path, strerror(errno));
     return false;
   }
 
   char line[PATH_MAX];
-  size_t i = 0;
-
+  size_t count = 0;
   mounts->mounts = NULL;
   mounts->length = 0;
 
   while (fgets(line, sizeof(line), mountinfo) != NULL) {
+    /* A truncated mountinfo line cannot be used for destructive decisions. */
+    if (!strchr(line, '\n') && !feof(mountinfo)) {
+      LOGE("Mountinfo line exceeds parser buffer");
+      goto fail;
+    }
+
     int root_start = 0, root_end = 0;
     int target_start = 0, target_end = 0;
     int vfs_option_start = 0, vfs_option_end = 0;
@@ -555,117 +580,162 @@ bool parse_mountinfo(const char *restrict pid, struct mountinfos *restrict mount
     int source_start = 0, source_end = 0;
     int fs_option_start = 0, fs_option_end = 0;
     int optional_start = 0, optional_end = 0;
-    unsigned int id, parent, maj, min;
-    sscanf(line,
-      "%u "           /* INFO: id */
-      "%u "           /* INFO: parent id */
-      "%u:%u "        /* INFO: maj:min */
-      "%n%*s%n "      /* INFO: mountroot */
-      "%n%*s%n "      /* INFO:target */
-      "%n%*s%n"       /* INFO: vfs options (fs-independent) */
-      "%n%*[^-]%n - " /* INFO: optional fields */
-      "%n%*s%n "      /* INFO: FS type */
-      "%n%*s%n "      /* INFO: source */
-      "%n%*s%n",      /* INFO: fs options (fs specific) */
-      &id, &parent, &maj, &min, &root_start, &root_end, &target_start,
-      &target_end, &vfs_option_start, &vfs_option_end,
+    unsigned int id = 0, parent = 0, major = 0, minor = 0;
+
+    int parsed = sscanf(line,
+      "%u "           /* mount ID */
+      "%u "           /* parent ID */
+      "%u:%u "        /* major:minor */
+      "%n%*s%n "      /* root */
+      "%n%*s%n "      /* mountpoint */
+      "%n%*s%n"       /* VFS options */
+      "%n%*[^-]%n - " /* optional fields */
+      "%n%*s%n "      /* filesystem type */
+      "%n%*s%n "      /* mount source */
+      "%n%*s%n",     /* filesystem options */
+      &id, &parent, &major, &minor, &root_start, &root_end,
+      &target_start, &target_end, &vfs_option_start, &vfs_option_end,
       &optional_start, &optional_end, &type_start, &type_end,
       &source_start, &source_end, &fs_option_start, &fs_option_end);
 
-    struct mountinfo *tmp_mounts = (struct mountinfo *)realloc(mounts->mounts, (i + 1) * sizeof(struct mountinfo));
-    if (!tmp_mounts) {
-      LOGE("Failed to allocate memory for mounts->mounts");
-
-      goto cleanup_mount_allocs;
-    }
-    mounts->mounts = tmp_mounts;
-
-    unsigned int shared = 0;
-    unsigned int master = 0;
-    unsigned int propagate_from = 0;
-    if (strstr(line + optional_start, "shared:")) {
-      shared = (unsigned int)atoi(strstr(line + optional_start, "shared:") + 7);
-    }
-
-    if (strstr(line + optional_start, "master:")) {
-      master = (unsigned int)atoi(strstr(line + optional_start, "master:") + 7);
+    size_t line_length = strlen(line);
+    if (parsed != 4 ||
+        root_start < 0 || root_end <= root_start ||
+        target_start < root_end || target_end <= target_start ||
+        vfs_option_start < target_end || vfs_option_end <= vfs_option_start ||
+        optional_start < vfs_option_end || optional_end < optional_start ||
+        type_start < optional_end || type_end <= type_start ||
+        source_start < type_end || source_end <= source_start ||
+        fs_option_start < source_end || fs_option_end <= fs_option_start ||
+        (size_t)fs_option_end > line_length) {
+      LOGE("Malformed mountinfo entry; refusing namespace cleanup");
+      goto fail;
     }
 
-    if (strstr(line + optional_start, "propagate_from:")) {
-      propagate_from = (unsigned int)atoi(strstr(line + optional_start, "propagate_from:") + 15);
+    struct mountinfo current = {0};
+    current.id = id;
+    current.parent = parent;
+    current.device = (dev_t)makedev(major, minor);
+    current.root = strndup(line + root_start, (size_t)(root_end - root_start));
+    current.target = strndup(line + target_start, (size_t)(target_end - target_start));
+    current.vfs_option = strndup(line + vfs_option_start,
+                                 (size_t)(vfs_option_end - vfs_option_start));
+    current.type = strndup(line + type_start, (size_t)(type_end - type_start));
+    current.source = strndup(line + source_start,
+                             (size_t)(source_end - source_start));
+    current.fs_option = strndup(line + fs_option_start,
+                                (size_t)(fs_option_end - fs_option_start));
+
+    if (!current.root || !current.target || !current.vfs_option ||
+        !current.type || !current.source || !current.fs_option) {
+      LOGE("Failed allocating mountinfo fields");
+      free(current.root);
+      free(current.target);
+      free(current.vfs_option);
+      free(current.type);
+      free(current.source);
+      free(current.fs_option);
+      goto fail;
     }
 
-    mounts->mounts[i].id = id;
-    mounts->mounts[i].parent = parent;
-    mounts->mounts[i].device = (dev_t)(makedev(maj, min));
-    mounts->mounts[i].root = strndup(line + root_start, (size_t)(root_end - root_start));
-    if (mounts->mounts[i].root == NULL) {
-      LOGE("Failed to allocate memory for root");
+    decode_mountinfo_field(current.root);
+    decode_mountinfo_field(current.target);
+    decode_mountinfo_field(current.source);
 
-      goto cleanup_mount_allocs;
-    }
-    mounts->mounts[i].target = strndup(line + target_start, (size_t)(target_end - target_start));
-    if (mounts->mounts[i].target == NULL) {
-      LOGE("Failed to allocate memory for target");
-
-      goto cleanup_root;
-    }
-    mounts->mounts[i].vfs_option = strndup(line + vfs_option_start, (size_t)(vfs_option_end - vfs_option_start));
-    if (mounts->mounts[i].vfs_option == NULL) {
-      LOGE("Failed to allocate memory for vfs_option");
-
-      goto cleanup_target;
-    }
-    mounts->mounts[i].optional.shared = shared;
-    mounts->mounts[i].optional.master = master;
-    mounts->mounts[i].optional.propagate_from = propagate_from;
-    mounts->mounts[i].type = strndup(line + type_start, (size_t)(type_end - type_start));
-    if (mounts->mounts[i].type == NULL) {
-      LOGE("Failed to allocate memory for type");
-
-      goto cleanup_vfs_option;
-    }
-    mounts->mounts[i].source = strndup(line + source_start, (size_t)(source_end - source_start));
-    if (mounts->mounts[i].source == NULL) {
-      LOGE("Failed to allocate memory for source");
-
-      goto cleanup_type;
-    }
-    mounts->mounts[i].fs_option = strndup(line + fs_option_start, (size_t)(fs_option_end - fs_option_start));
-    if (mounts->mounts[i].fs_option == NULL) {
-      LOGE("Failed to allocate memory for fs_option");
-
-      goto cleanup_source;
+    size_t optional_length = (size_t)(optional_end - optional_start);
+    char *optional = strndup(line + optional_start, optional_length);
+    if (!optional) {
+      free(current.root);
+      free(current.target);
+      free(current.vfs_option);
+      free(current.type);
+      free(current.source);
+      free(current.fs_option);
+      goto fail;
     }
 
-    i++;
+    char *saveptr = NULL;
+    for (char *token = strtok_r(optional, " \t\r\n", &saveptr);
+         token != NULL;
+         token = strtok_r(NULL, " \t\r\n", &saveptr)) {
+      char extra;
+      if (strncmp(token, "shared:", 7) == 0) {
+        if (sscanf(token, "shared:%u%c", &current.optional.shared, &extra) != 1) {
+          free(optional);
+          free(current.root);
+          free(current.target);
+          free(current.vfs_option);
+          free(current.type);
+          free(current.source);
+          free(current.fs_option);
+          goto fail;
+        }
+      } else if (strncmp(token, "master:", 7) == 0) {
+        if (sscanf(token, "master:%u%c", &current.optional.master, &extra) != 1) {
+          free(optional);
+          free(current.root);
+          free(current.target);
+          free(current.vfs_option);
+          free(current.type);
+          free(current.source);
+          free(current.fs_option);
+          goto fail;
+        }
+      } else if (strncmp(token, "propagate_from:", 15) == 0) {
+        if (sscanf(token, "propagate_from:%u%c",
+                   &current.optional.propagate_from, &extra) != 1) {
+          free(optional);
+          free(current.root);
+          free(current.target);
+          free(current.vfs_option);
+          free(current.type);
+          free(current.source);
+          free(current.fs_option);
+          goto fail;
+        }
+      }
+    }
+    free(optional);
 
-    continue;
+    struct mountinfo *grown =
+        realloc(mounts->mounts, (count + 1) * sizeof(*mounts->mounts));
+    if (!grown) {
+      LOGE("Failed allocating mountinfo array");
+      free(current.root);
+      free(current.target);
+      free(current.vfs_option);
+      free(current.type);
+      free(current.source);
+      free(current.fs_option);
+      goto fail;
+    }
 
-    cleanup_source:
-      free(mounts->mounts[i].source);
-    cleanup_type:
-      free(mounts->mounts[i].type);
-    cleanup_vfs_option:
-      free(mounts->mounts[i].vfs_option);
-    cleanup_target:
-      free(mounts->mounts[i].target);
-    cleanup_root:
-      free(mounts->mounts[i].root);
-    cleanup_mount_allocs:
-      fclose(mountinfo);
+    mounts->mounts = grown;
+    mounts->mounts[count++] = current;
+  }
 
-      mounts->length = i;
-      free_mounts(mounts);
-
-      return false;
+  if (ferror(mountinfo)) {
+    LOGE("Error reading mountinfo");
+    goto fail;
   }
 
   fclose(mountinfo);
-
-  mounts->length = i;
-
+  mounts->length = count;
   return true;
+
+fail:
+  fclose(mountinfo);
+  mounts->length = count;
+  free_mounts(mounts);
+  mounts->mounts = NULL;
+  mounts->length = 0;
+  return false;
+}
+
+static bool path_is_or_below(const char *path, const char *prefix) {
+  size_t length = strlen(prefix);
+  return strncmp(path, prefix, length) == 0 &&
+         (path[length] == '\0' || path[length] == '/');
 }
 
 static bool is_protected_resource_target(const char *target) {
@@ -676,29 +746,184 @@ static bool is_protected_resource_target(const char *target) {
     "/vendor/etc/fonts", "/apex/com.android.art"
   };
 
-  size_t product_len = strlen("/product");
-  if (strncmp(target, "/product", product_len) == 0 &&
-      (target[product_len] == '\0' || target[product_len] == '/'))
+  if (strcmp(target, "/") == 0 || strcmp(target, "/system") == 0 ||
+      strcmp(target, "/system_ext") == 0 || strcmp(target, "/vendor") == 0)
     return true;
 
+  if (path_is_or_below(target, "/product")) return true;
+
   for (size_t i = 0; i < sizeof(protected_paths) / sizeof(protected_paths[0]); i++) {
-    size_t len = strlen(protected_paths[i]);
-    if (strncmp(target, protected_paths[i], len) == 0 &&
-        (target[len] == '\0' || target[len] == '/'))
-      return true;
+    if (path_is_or_below(target, protected_paths[i])) return true;
   }
 
   return false;
 }
 
+static bool is_root_mount_candidate(const struct mountinfo *mount,
+                                    struct root_impl impl) {
+  const char *source_name = "magisk";
+  if (impl.impl == KernelSU) source_name = "KSU";
+  else if (impl.impl == APatch) source_name = "APatch";
+
+  if (strcmp(mount->source, source_name) == 0 ||
+      (impl.impl == Magisk && strcmp(mount->source, "worker") == 0))
+    return true;
+
+  if (path_is_or_below(mount->target, "/data/adb/modules") ||
+      path_is_or_below(mount->target, "/debug_ramdisk") ||
+      path_is_or_below(mount->target, "/sbin/.magisk"))
+    return true;
+
+  if (path_is_or_below(mount->root, "/adb/modules") ||
+      path_is_or_below(mount->root, "/adb/ksu") ||
+      path_is_or_below(mount->root, "/adb/ap"))
+    return true;
+
+  return strcmp(mount->type, "overlay") == 0 &&
+      (strstr(mount->fs_option, "/data/adb/modules") != NULL ||
+       strstr(mount->fs_option, "/debug_ramdisk") != NULL ||
+       strstr(mount->root, "/adb/modules/") != NULL);
+}
+
+static int mount_descends_from(const struct mountinfos *mounts,
+                               size_t index, unsigned int ancestor_id) {
+  unsigned int parent = mounts->mounts[index].parent;
+
+  for (size_t depth = 0; depth < mounts->length; depth++) {
+    if (parent == ancestor_id) return 1;
+
+    size_t parent_index = mounts->length;
+    for (size_t i = 0; i < mounts->length; i++) {
+      if (mounts->mounts[i].id == parent) {
+        parent_index = i;
+        break;
+      }
+    }
+
+    if (parent_index == mounts->length) return 0;
+    parent = mounts->mounts[parent_index].parent;
+  }
+
+  return -1;
+}
+
+static bool mount_graph_depth(const struct mountinfos *mounts, size_t index,
+                              size_t *depth_out) {
+  unsigned int parent = mounts->mounts[index].parent;
+  size_t depth = 0;
+
+  while (depth < mounts->length) {
+    size_t parent_index = mounts->length;
+    for (size_t i = 0; i < mounts->length; i++) {
+      if (mounts->mounts[i].id == parent) {
+        parent_index = i;
+        break;
+      }
+    }
+
+    if (parent_index == mounts->length) {
+      *depth_out = depth;
+      return true;
+    }
+
+    depth++;
+    parent = mounts->mounts[parent_index].parent;
+  }
+
+  return false;
+}
+
+static bool validate_mount_topology(const struct mountinfos *mounts,
+                                    const bool *candidate_flags) {
+  for (size_t i = 0; i < mounts->length; i++) {
+    const struct mountinfo *mount = &mounts->mounts[i];
+
+    for (size_t j = 0; j < i; j++) {
+      if (mounts->mounts[j].id == mount->id) {
+        LOGW("Duplicate mount ID %u; refusing clean namespace cache", mount->id);
+        return false;
+      }
+    }
+
+    if (mount->optional.shared || mount->optional.master ||
+        mount->optional.propagate_from) {
+      LOGW("Mount peer relationship remains after MS_PRIVATE: id=%u target=%s shared=%u master=%u propagate_from=%u",
+           mount->id, mount->target, mount->optional.shared,
+           mount->optional.master, mount->optional.propagate_from);
+      return false;
+    }
+
+    size_t ignored_depth = 0;
+    if (!mount_graph_depth(mounts, i, &ignored_depth)) {
+      LOGW("Cyclic mount parent graph at mount ID %u", mount->id);
+      return false;
+    }
+  }
+
+  for (size_t i = 0; i < mounts->length; i++) {
+    if (!candidate_flags[i] ||
+        is_protected_resource_target(mounts->mounts[i].target))
+      continue;
+
+    const struct mountinfo *candidate = &mounts->mounts[i];
+    for (size_t j = 0; j < mounts->length; j++) {
+      if (i == j) continue;
+
+      const struct mountinfo *other = &mounts->mounts[j];
+      if (strcmp(candidate->target, other->target) == 0) {
+        LOGW("Stacked mounts at %s; refusing path-based detach",
+             candidate->target);
+        return false;
+      }
+
+      int descendant = mount_descends_from(mounts, j, candidate->id);
+      if (descendant < 0) {
+        LOGW("Malformed mount parent graph near mount ID %u", other->id);
+        return false;
+      }
+
+      bool nested_path = path_is_or_below(other->target, candidate->target);
+      if ((descendant == 1 && !nested_path) ||
+          (descendant == 0 && nested_path)) {
+        LOGW("Mount path/parent mismatch: parent=%s child=%s parent_id=%u",
+             candidate->target, other->target, other->parent);
+        return false;
+      }
+
+      if (descendant == 1 &&
+          (!candidate_flags[j] ||
+           is_protected_resource_target(other->target))) {
+        LOGW("Mount %s has a non-root or protected child mount %s",
+             candidate->target, other->target);
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+struct mount_target {
+  const char *target;
+  size_t depth;
+  unsigned int id;
+};
+
+static int compare_mount_target_depth(const void *left, const void *right) {
+  const struct mount_target *a = left;
+  const struct mount_target *b = right;
+
+  if (a->depth < b->depth) return 1;
+  if (a->depth > b->depth) return -1;
+  if (a->id < b->id) return 1;
+  if (a->id > b->id) return -1;
+  return 0;
+}
+
 bool umount_root(struct root_impl impl) {
-  /* INFO: We are already in the target pid mount namespace, so actually,
-             when we use self here, we meant its pid.
-  */
   struct mountinfos mounts;
   if (!parse_mountinfo("self", &mounts)) {
     LOGE("Failed to parse mountinfo");
-
     return false;
   }
 
@@ -706,66 +931,91 @@ bool umount_root(struct root_impl impl) {
   if (impl.impl == KernelSU) source_name = "KSU";
   else if (impl.impl == APatch) source_name = "APatch";
 
-  LOGI("[%s] Unmounting root", source_name);
+  LOGI("[%s] Validating clean namespace mount topology", source_name);
 
-  char **targets_to_unmount = NULL;
+  bool *candidate_flags = calloc(mounts.length, sizeof(*candidate_flags));
+  if (!candidate_flags && mounts.length != 0) {
+    LOGE("[%s] Failed allocating mount candidate flags", source_name);
+    free_mounts(&mounts);
+    return false;
+  }
+
+  struct mount_target *targets_to_unmount = NULL;
   size_t num_targets = 0;
 
   for (size_t i = 0; i < mounts.length; i++) {
-    struct mountinfo mount = mounts.mounts[i];
-
-    bool should_unmount = false;
-    if (strcmp(mount.source, source_name) == 0 || (impl.impl == Magisk && strcmp(mount.source, "worker") == 0)) should_unmount = true;
-    if (strncmp(mount.target, "/data/adb/modules", strlen("/data/adb/modules")) == 0) should_unmount = true;
-    if (strncmp(mount.root, "/adb/modules/", strlen("/adb/modules/")) == 0) should_unmount = true;
-    if (strcmp(mount.type, "overlay") == 0 &&
-        (strstr(mount.fs_option, "/data/adb/modules") != NULL ||
-         strstr(mount.fs_option, "/debug_ramdisk") != NULL))
-      should_unmount = true;
+    struct mountinfo *mount = &mounts.mounts[i];
+    bool should_unmount = is_root_mount_candidate(mount, impl);
+    candidate_flags[i] = should_unmount;
 
     if (!should_unmount) continue;
 
-    /* Resource overlays can be pre-opened by Zygote/WebView. Keep them
-       mounted in the cached namespace rather than tearing their backing
-       mount out from under framework/font resource resolution. */
-    if (is_protected_resource_target(mount.target)) {
-      LOGW("[%s] Keeping protected resource overlay at %s", source_name, mount.target);
+    if (is_protected_resource_target(mount->target)) {
+      LOGW("[%s] Keeping protected resource overlay at %s",
+           source_name, mount->target);
       continue;
     }
 
-    char **tmp_targets = realloc(targets_to_unmount, (num_targets + 1) * sizeof(char*));
-    if (tmp_targets == NULL) {
-      LOGE("[%s] Failed to allocate memory for targets_to_unmount", source_name);
-
+    size_t depth = 0;
+    if (!mount_graph_depth(&mounts, i, &depth)) {
+      LOGW("[%s] Cyclic mount parent graph at %s", source_name, mount->target);
       free(targets_to_unmount);
-
+      free(candidate_flags);
       free_mounts(&mounts);
-
       return false;
     }
-    targets_to_unmount = tmp_targets;
 
-    num_targets++;
-
-    targets_to_unmount[num_targets - 1] = mount.target;
-  }
-
-  bool all_unmounted = true;
-  for (size_t i = num_targets; i > 0; i--) {
-    const char *target = targets_to_unmount[i - 1];
-    if (umount2(target, MNT_DETACH) == -1) {
-      LOGE("[%s] Failed to unmount %s: %s", source_name, target, strerror(errno));
-      all_unmounted = false;
-      continue;
+    struct mount_target *grown =
+        realloc(targets_to_unmount, (num_targets + 1) * sizeof(*targets_to_unmount));
+    if (!grown) {
+      LOGE("[%s] Failed allocating mount target list", source_name);
+      free(targets_to_unmount);
+      free(candidate_flags);
+      free_mounts(&mounts);
+      return false;
     }
 
-    LOGI("[%s] Unmounted %s", source_name, target);
+    targets_to_unmount = grown;
+    targets_to_unmount[num_targets].target = mount->target;
+    targets_to_unmount[num_targets].depth = depth;
+    targets_to_unmount[num_targets].id = mount->id;
+    num_targets++;
+  }
+
+  /*
+   * save_mns_fd() made this namespace recursively private before calling us.
+   * Verify that no shared/master peer relationship survived and that every
+   * child below a detach candidate is another selected root mount.
+   */
+  if (!validate_mount_topology(&mounts, candidate_flags)) {
+    LOGW("[%s] Mount chain or peer-group validation failed", source_name);
+    free(targets_to_unmount);
+    free(candidate_flags);
+    free_mounts(&mounts);
+    return false;
+  }
+
+  /* Detach leaves first; a parent detach must never swallow an unprocessed child. */
+  qsort(targets_to_unmount, num_targets, sizeof(*targets_to_unmount),
+        compare_mount_target_depth);
+
+  bool all_unmounted = true;
+  for (size_t i = 0; i < num_targets; i++) {
+    const char *target = targets_to_unmount[i].target;
+    if (umount2(target, MNT_DETACH) == -1) {
+      LOGE("[%s] Failed to unmount %s (id=%u): %s",
+           source_name, target, targets_to_unmount[i].id, strerror(errno));
+      all_unmounted = false;
+      break;
+    }
+
+    LOGI("[%s] Unmounted %s (id=%u)",
+         source_name, target, targets_to_unmount[i].id);
   }
 
   free(targets_to_unmount);
-
+  free(candidate_flags);
   free_mounts(&mounts);
-
   return all_unmounted;
 }
 
