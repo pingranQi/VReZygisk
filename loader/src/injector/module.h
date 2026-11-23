@@ -99,13 +99,11 @@ struct server_specialize_args_v1 {
 };
 
 enum rezygisk_options {
-  /* INFO: Force ReZygisk to umount the root related mounts on this process. This option
-             will only take effect if set in pre...Specialize, as ReZygisk umounts at
-             that point.
-
-           ReZygisk Umount System will not umount all root related mounts, read ReZygiskd
-             umount_root function in utils.c file to understand how it selects the ones
-             to umount.
+  /* INFO: Force ReZygisk to hide root/module mounts for this process.
+             ReZygisk first detaches selected mounts from a private copy of the
+             process mount namespace. Protected resource overlays or any failure
+             fall back to the cached clean namespace.
+             This option only takes effect when requested in pre...Specialize.
   */
   FORCE_DENYLIST_UNMOUNT = 0,
 

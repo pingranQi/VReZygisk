@@ -240,6 +240,6 @@ bool revert_root_mounts(void) {
     LOGD("Detached root/module mount at %s", selected.target);
   }
 
-  LOGW("Mount revert exceeded safety limit (%u)", MAX_REVERT_MOUNTS);
+  LOGW("Mount revert exceeded safety limit (%u)", (unsigned int)MAX_REVERT_MOUNTS);
   return false;
 }
