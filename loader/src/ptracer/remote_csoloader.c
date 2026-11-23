@@ -1385,3 +1385,24 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
   return true;
 }
+
+
+/* Release a bootstrap image when its remote entry point fails. */
+bool remote_csoloader_unmap(int pid, struct user_regs_struct *regs,
+                            struct maps_info *remote_map, uintptr_t base, size_t size) {
+  if (pid <= 0 || !regs || !remote_map || base == 0 || size == 0) return false;
+
+  uintptr_t syscall_gadget = find_syscall_gadget(pid, remote_map);
+  if (!syscall_gadget) {
+    LOGE("Cannot locate a syscall gadget to release remote bootstrap image");
+    return false;
+  }
+
+  long args[2] = { (long)base, (long)size };
+  long result = remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2);
+  if (result != 0) {
+    LOGE("Remote munmap failed for bootstrap image %p (%zu): %ld", (void *)base, size, result);
+    return false;
+  }
+  return true;
+}
