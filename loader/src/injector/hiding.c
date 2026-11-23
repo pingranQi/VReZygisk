@@ -144,6 +144,43 @@ static bool hide_one_mapping(const struct hide_target *target) {
   return true;
 }
 
+struct hide_state {
+  const struct maps_info *libraries;
+  struct hide_target *targets;
+  size_t count;
+  size_t capacity;
+};
+
+static bool collect_hide_target(const struct map_entry *map, void *userdata) {
+  struct hide_state *state = userdata;
+
+  if (!map->is_private || map->end <= map->start) return true;
+
+  const char *owner = find_owner(map, state->libraries);
+  if (owner == NULL) return true;
+
+  if (state->count == state->capacity) {
+    size_t capacity = state->capacity == 0 ? 8 : state->capacity * 2;
+    struct hide_target *targets = realloc(state->targets, capacity * sizeof(*targets));
+    if (targets == NULL) {
+      PLOGE("anonymous-memory: grow target list");
+      return false;
+    }
+
+    state->targets = targets;
+    state->capacity = capacity;
+  }
+
+  state->targets[state->count++] = (struct hide_target) {
+    .start = map->start,
+    .end = map->end,
+    .perms = map->perms,
+    .path = owner
+  };
+
+  return true;
+}
+
 bool hide_module_maps(const struct maps_info *libraries) {
   if (libraries == NULL || libraries->length == 0) return false;
 
@@ -152,50 +189,27 @@ bool hide_module_maps(const struct maps_info *libraries) {
     return true;
   }
 
-  struct maps_info *current = parse_maps("self");
-  if (current == NULL) {
-    LOGE("anonymous-memory: failed to snapshot /proc/self/maps");
-    return false;
-  }
-
-  struct hide_target *targets = calloc(current->length, sizeof(*targets));
-  if (targets == NULL) {
-    PLOGE("anonymous-memory: allocate target list");
-    free_maps(current);
-    return false;
-  }
-
-  size_t target_count = 0;
-  for (size_t i = 0; i < current->length; i++) {
-    const struct map_entry *map = &current->maps[i];
-
-    if (!map->is_private || map->end <= map->start) continue;
-
-    const char *owner = find_owner(map, libraries);
-    if (owner == NULL) continue;
-
-    targets[target_count++] = (struct hide_target) {
-      .start = map->start,
-      .end = map->end,
-      .perms = map->perms,
-      .path = owner
-    };
-  }
+  struct hide_state state = { .libraries = libraries };
 
   /*
-   * parse_maps() has closed its maps stream before we get here. The snapshot
-   * is now stable as input; all replacements happen after collection.
+   * The child opens /proc/self/maps and passes the fd to us. Collection is
+   * completed before any mremap, so no live maps reader races VMA replacement.
    */
+  if (!scan_maps_safe("self", collect_hide_target, &state)) {
+    LOGE("anonymous-memory: failed to snapshot /proc/self/maps");
+    free(state.targets);
+    return false;
+  }
+
   size_t hidden = 0;
-  for (size_t i = 0; i < target_count; i++) {
-    if (hide_one_mapping(&targets[i])) hidden++;
+  for (size_t i = 0; i < state.count; i++) {
+    if (hide_one_mapping(&state.targets[i])) hidden++;
   }
 
   LOGD("anonymous-memory: replaced %zu/%zu eligible mappings",
-       hidden, target_count);
+       hidden, state.count);
 
-  free(targets);
-  free_maps(current);
+  free(state.targets);
 
-  return hidden > 0 || target_count == 0;
+  return hidden > 0 || state.count == 0;
 }
