@@ -584,10 +584,11 @@ static int find_deepest_candidate(struct mount_entry *selected,
   ssize_t length;
   size_t deepest = 0;
   bool found = false;
+  bool saw_mount = false;
   *protected_resource = false;
 
   while ((length = getline(&line, &capacity, fp)) != -1) {
-    (void)length;
+    saw_mount = true;
     struct mount_entry current = {0};
     if (!read_mount_entry(line, &current)) {
       LOGE("Malformed mountinfo entry; refusing direct mount revert");
@@ -620,8 +621,8 @@ static int find_deepest_candidate(struct mount_entry *selected,
   }
 
   free(line);
-  if (ferror(fp)) {
-    LOGE("Failed while reading /proc/self/mountinfo");
+  if (ferror(fp) || !saw_mount) {
+    LOGE("Failed to read a complete /proc/self/mountinfo table");
     fclose(fp);
     return -1;
   }
