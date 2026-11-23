@@ -123,11 +123,11 @@ static bool hide_one_mapping(const struct hide_target *target,
                              size_t page_size) {
   size_t size = 0;
   if (target == NULL) {
-    LOGW("anonymous-memory: skip null mapping target");
+    LOGW("Skip a null mapping target");
     return false;
   }
   if (!get_mapping_size(target, page_size, &size)) {
-    LOGW("anonymous-memory: skip invalid mapping range %p-%p",
+    LOGW("Skip invalid mapping range %p-%p",
          (void *)target->start, (void *)target->end);
     return false;
   }
@@ -139,7 +139,7 @@ static bool hide_one_mapping(const struct hide_target *target,
   void *copy = mmap(NULL, size, PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (copy == MAP_FAILED) {
-    PLOGE("anonymous-memory: allocate copy for [%s]", path);
+    PLOGE("allocate a copy of [%s]", path);
     return false;
   }
 
@@ -151,7 +151,7 @@ static bool hide_one_mapping(const struct hide_target *target,
    */
   if ((target->perms & PROT_READ) == 0) {
     if (mprotect(address, size, target->perms | PROT_READ) == -1) {
-      PLOGE("anonymous-memory: make source readable for [%s]", path);
+      PLOGE("make [%s] readable", path);
       munmap(copy, size);
       return false;
     }
@@ -166,8 +166,8 @@ static bool hide_one_mapping(const struct hide_target *target,
       source_needs_restore = false;
     } else {
       const int restore_error = errno;
-      LOGW("anonymous-memory: defer source permission restore for [%s]: %s",
-           path, strerror(restore_error));
+      LOGE("restore the permissions of [%s] failed with %d: %s",
+           path, restore_error, strerror(restore_error));
     }
   }
 
@@ -181,13 +181,12 @@ static bool hide_one_mapping(const struct hide_target *target,
 
     if (source_needs_restore &&
         mprotect(address, size, target->perms) == -1) {
-      PLOGE("anonymous-memory: restore source permissions after preflight failure for [%s]",
-            path);
+      PLOGE("restore the permissions of [%s] after preflight failure", path);
     }
 
     munmap(copy, size);
-    LOGE("anonymous-memory: final protection rejected for [%s]: %s",
-         path, strerror(protect_error));
+    LOGE("set the permissions of the copy of [%s] failed with %d: %s",
+         path, protect_error, strerror(protect_error));
     return false;
   }
 
@@ -200,13 +199,12 @@ static bool hide_one_mapping(const struct hide_target *target,
 
     if (source_needs_restore &&
         mprotect(address, size, target->perms) == -1) {
-      PLOGE("anonymous-memory: restore source permissions after replacement failure for [%s]",
-            path);
+      PLOGE("restore the permissions of [%s] after replacement failure", path);
     }
 
     munmap(copy, size);
-    LOGE("anonymous-memory: replace mapping for [%s] failed: %s",
-         path, strerror(remap_error));
+    LOGE("move the copy of [%s] over the original failed with %d: %s",
+         path, remap_error, strerror(remap_error));
     return false;
   }
 
@@ -217,8 +215,7 @@ static bool hide_one_mapping(const struct hide_target *target,
     __builtin___clear_cache((char *)address, (char *)address + size);
   }
 
-  LOGD("anonymous-memory: replaced [%s] %p-%p (%zu bytes)",
-       path, address, (void *)target->end, size);
+  LOGD("Hid [%s]", path);
 
   return true;
 }
@@ -233,7 +230,7 @@ static bool collect_hide_target(const struct map_entry *map, void *userdata) {
   if (owner == NULL) return true;
 
   if (state->count == SIZE_MAX) {
-    LOGE("anonymous-memory: target count overflow");
+    LOGE("The hide list count overflowed");
     return false;
   }
 
@@ -244,21 +241,21 @@ static bool collect_hide_target(const struct map_entry *map, void *userdata) {
       capacity = 8;
     } else {
       if (state->capacity > SIZE_MAX / 2) {
-        LOGE("anonymous-memory: target capacity overflow");
+        LOGE("The hide list capacity overflowed");
         return false;
       }
       capacity = state->capacity * 2;
     }
 
     if (capacity > SIZE_MAX / sizeof(*state->targets)) {
-      LOGE("anonymous-memory: target allocation size overflow");
+      LOGE("The hide list allocation size overflowed");
       return false;
     }
 
     struct hide_target *targets =
         realloc(state->targets, capacity * sizeof(*state->targets));
     if (targets == NULL) {
-      PLOGE("anonymous-memory: grow target list");
+      PLOGE("allocate the hide list");
       return false;
     }
 
@@ -279,14 +276,13 @@ static bool collect_hide_target(const struct map_entry *map, void *userdata) {
 bool hide_module_maps(const struct maps_info *libraries) {
   if (libraries == NULL || libraries->length == 0) return false;
   if (libraries->maps == NULL) {
-    LOGE("anonymous-memory: invalid loaded-library table");
+    LOGE("Invalid loaded-library table");
     return false;
   }
 
   const int lock_error = pthread_mutex_lock(&g_hide_mutex);
   if (lock_error != 0) {
-    LOGE("anonymous-memory: unable to acquire lock: %s",
-         strerror(lock_error));
+    LOGE("Unable to acquire the hide lock: %s", strerror(lock_error));
     return false;
   }
 
@@ -299,14 +295,14 @@ bool hide_module_maps(const struct maps_info *libraries) {
   };
 
   if (access(DISABLE_ANON_MEMORY_PATH, F_OK) == 0) {
-    LOGD("anonymous-memory: disabled by %s", DISABLE_ANON_MEMORY_PATH);
+    LOGD("Anonymous-memory hiding is disabled");
     result = true;
     goto cleanup;
   }
 
   const long raw_page_size = sysconf(_SC_PAGESIZE);
   if (raw_page_size <= 0) {
-    LOGE("anonymous-memory: unable to determine page size");
+    LOGE("Failed to determine the page size");
     goto cleanup;
   }
 
@@ -315,7 +311,7 @@ bool hide_module_maps(const struct maps_info *libraries) {
    * completed before any mremap, so no live maps reader races VMA replacement.
    */
   if (!scan_maps_safe("self", collect_hide_target, &state)) {
-    LOGE("anonymous-memory: failed to snapshot /proc/self/maps");
+    LOGE("Failed to read the maps of this process");
     goto cleanup;
   }
 
@@ -326,8 +322,7 @@ bool hide_module_maps(const struct maps_info *libraries) {
     }
   }
 
-  LOGD("anonymous-memory: replaced %zu/%zu eligible mappings",
-       hidden, state.count);
+  LOGD("Hid %zu/%zu module map(s)", hidden, state.count);
 
   result = hidden > 0 || state.count == 0;
 
@@ -336,8 +331,7 @@ cleanup:
 
   const int unlock_error = pthread_mutex_unlock(&g_hide_mutex);
   if (unlock_error != 0) {
-    LOGE("anonymous-memory: unable to release lock: %s",
-         strerror(unlock_error));
+    LOGE("Unable to release the hide lock: %s", strerror(unlock_error));
     return false;
   }
 
