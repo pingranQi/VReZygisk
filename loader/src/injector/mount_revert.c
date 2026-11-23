@@ -22,6 +22,10 @@
 
 struct mount_entry {
   unsigned int id;
+  unsigned int parent;
+  unsigned int shared;
+  unsigned int master;
+  unsigned int propagate_from;
   char root[PATH_MAX];
   char target[PATH_MAX];
   char fs_type[64];
@@ -96,6 +100,10 @@ static bool is_protected_resource_target(const char *target) {
     "/vendor/etc/fonts", "/apex/com.android.art"
   };
 
+  /* Never detach the namespace root or the system root mount itself. */
+  if (strcmp(target, "/") == 0 || strcmp(target, "/system") == 0)
+    return true;
+
   if (path_is_or_below(target, "/product")) return true;
 
   for (size_t i = 0; i < sizeof(protected_paths) / sizeof(protected_paths[0]); i++) {
@@ -110,6 +118,7 @@ static bool read_mount_entry(char *line, struct mount_entry *entry) {
   char device[64], options[256];
   char root[PATH_MAX], target[PATH_MAX];
   char *separator = strstr(line, " - ");
+  int optional_start = 0;
 
   if (!separator) return false;
 
@@ -117,11 +126,31 @@ static bool read_mount_entry(char *line, struct mount_entry *entry) {
       strstr(line, "/data/adb/modules") != NULL ||
       strstr(line, "/debug_ramdisk") != NULL;
   *separator = '\0';
-  if (sscanf(line, "%u %u %63s %4095s %4095s %255s",
-             &id, &parent, device, root, target, options) != 6)
+  if (sscanf(line, "%u %u %63s %4095s %4095s %255s %n",
+             &id, &parent, device, root, target, options,
+             &optional_start) != 6)
     return false;
 
   entry->id = id;
+  entry->parent = parent;
+  entry->shared = 0;
+  entry->master = 0;
+  entry->propagate_from = 0;
+
+  /* Parse mountinfo optional fields. These IDs describe propagation peer
+     groups and slave relationships; they must disappear after MS_PRIVATE. */
+  char *saveptr = NULL;
+  for (char *token = strtok_r(line + optional_start, " \t\r\n", &saveptr);
+       token != NULL;
+       token = strtok_r(NULL, " \t\r\n", &saveptr)) {
+    unsigned int value;
+    if (sscanf(token, "shared:%u", &value) == 1)
+      entry->shared = value;
+    else if (sscanf(token, "master:%u", &value) == 1)
+      entry->master = value;
+    else if (sscanf(token, "propagate_from:%u", &value) == 1)
+      entry->propagate_from = value;
+  }
 
   if (sscanf(separator + 3, "%63s %4095s",
              entry->fs_type, entry->source) != 2)
@@ -239,6 +268,209 @@ static bool inspect_mount_fds(const struct mount_entry *mount) {
 
   closedir(dir);
   return safe;
+}
+
+/*
+ * Return 1 when mount[index] is below ancestor_id in the mount parent graph,
+ * 0 when it is outside that subtree, and -1 when the graph contains a cycle.
+ * A bounded walk prevents malformed parent chains from becoming unbounded.
+ */
+static int mount_descends_from(const struct mount_entry *mounts, size_t count,
+                               size_t index, unsigned int ancestor_id) {
+  unsigned int parent = mounts[index].parent;
+
+  for (size_t depth = 0; depth < count; depth++) {
+    if (parent == ancestor_id) return 1;
+
+    size_t parent_index = count;
+    for (size_t i = 0; i < count; i++) {
+      if (mounts[i].id == parent) {
+        parent_index = i;
+        break;
+      }
+    }
+
+    /* Parent may be outside this namespace's visible mount table. */
+    if (parent_index == count) return 0;
+    parent = mounts[parent_index].parent;
+  }
+
+  return -1;
+}
+
+/*
+ * A detach at a mountpoint also detaches its mounted descendants. Only allow
+ * that when every descendant is itself a recognized root/module mount.
+ * Stacked mounts at the same target are ambiguous for umount2(path), so they
+ * deliberately force the namespace fallback.
+ */
+static bool validate_mount_subtree(const struct mount_entry *selected) {
+  FILE *fp = fopen("/proc/self/mountinfo", "r");
+  if (!fp) {
+    PLOGE("open mountinfo for subtree validation");
+    return false;
+  }
+
+  struct mount_entry *mounts = NULL;
+  size_t count = 0;
+  char *line = NULL;
+  size_t capacity = 0;
+  ssize_t length;
+  bool safe = true;
+  size_t selected_index = SIZE_MAX;
+
+  while ((length = getline(&line, &capacity, fp)) != -1) {
+    (void)length;
+    struct mount_entry current = {0};
+    if (!read_mount_entry(line, &current)) {
+      LOGE("Malformed mountinfo while validating mount subtree");
+      safe = false;
+      break;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+      if (mounts[i].id == current.id) {
+        LOGE("Duplicate mount ID %u; refusing detach", current.id);
+        safe = false;
+        break;
+      }
+    }
+    if (!safe) break;
+
+    struct mount_entry *grown =
+        realloc(mounts, (count + 1) * sizeof(*mounts));
+    if (!grown) {
+      LOGE("Out of memory validating mount subtree");
+      safe = false;
+      break;
+    }
+    mounts = grown;
+    mounts[count] = current;
+
+    if (current.id == selected->id) {
+      if (strcmp(current.target, selected->target) != 0) {
+        LOGE("Mount ID %u changed target during validation", current.id);
+        safe = false;
+        break;
+      }
+      selected_index = count;
+    }
+    count++;
+  }
+
+  if (ferror(fp)) {
+    LOGE("Failed reading mountinfo during subtree validation");
+    safe = false;
+  }
+  free(line);
+  fclose(fp);
+
+  if (!safe || selected_index == SIZE_MAX) {
+    if (selected_index == SIZE_MAX)
+      LOGW("Candidate mount ID %u disappeared before detach", selected->id);
+    free(mounts);
+    return false;
+  }
+
+  for (size_t i = 0; i < count && safe; i++) {
+    if (i == selected_index) continue;
+
+    if (strcmp(mounts[i].target, selected->target) == 0) {
+      LOGW("Stacked mounts share target %s; refusing path-based detach",
+           selected->target);
+      safe = false;
+      break;
+    }
+
+    int descendant = mount_descends_from(mounts, count, i, selected->id);
+    if (descendant < 0) {
+      LOGW("Mount parent graph is cyclic or malformed near mount ID %u",
+           mounts[i].id);
+      safe = false;
+      break;
+    }
+    if (descendant == 0) continue;
+
+    if (is_protected_resource_target(mounts[i].target) ||
+        !is_root_mount(&mounts[i])) {
+      LOGW("Candidate %s has non-root/protected descendant %s (id=%u)",
+           selected->target, mounts[i].target, mounts[i].id);
+      safe = false;
+      break;
+    }
+  }
+
+  /* Check every mount in the subtree for open descriptors, not just its root. */
+  for (size_t i = 0; i < count && safe; i++) {
+    bool in_subtree = (i == selected_index);
+    if (!in_subtree) {
+      int descendant = mount_descends_from(mounts, count, i, selected->id);
+      in_subtree = descendant == 1;
+    }
+
+    if (in_subtree && !inspect_mount_fds(&mounts[i])) {
+      LOGW("Open or unresolved FD pins mount %u at %s",
+           mounts[i].id, mounts[i].target);
+      safe = false;
+    }
+  }
+
+  free(mounts);
+  return safe;
+}
+
+/*
+ * Verify the recursive MS_PRIVATE transition actually removed all shared and
+ * slave peer-group metadata. If any propagation relationship remains, do not
+ * detach anything: an unmount could otherwise affect a peer or master tree.
+ */
+static bool validate_private_propagation(void) {
+  FILE *fp = fopen("/proc/self/mountinfo", "r");
+  if (!fp) {
+    PLOGE("open mountinfo for propagation validation");
+    return false;
+  }
+
+  char *line = NULL;
+  size_t capacity = 0;
+  ssize_t length;
+  bool private_tree = true;
+
+  while ((length = getline(&line, &capacity, fp)) != -1) {
+    (void)length;
+    struct mount_entry current = {0};
+    if (!read_mount_entry(line, &current)) {
+      LOGE("Malformed mountinfo during propagation validation");
+      private_tree = false;
+      break;
+    }
+
+    if (current.shared || current.master || current.propagate_from) {
+      LOGW("Mount propagation remains: id=%u target=%s shared=%u master=%u propagate_from=%u",
+           current.id, current.target, current.shared, current.master,
+           current.propagate_from);
+      private_tree = false;
+      break;
+    }
+  }
+
+  if (ferror(fp)) {
+    LOGE("Failed reading mountinfo during propagation validation");
+    private_tree = false;
+  }
+  free(line);
+  fclose(fp);
+  return private_tree;
+}
+
+static bool restore_original_mount_namespace(int original_ns_fd) {
+  if (setns(original_ns_fd, CLONE_NEWNS) == -1) {
+    PLOGE("restore original mount namespace after failed revert");
+    return false;
+  }
+
+  LOGW("Restored original mount namespace after incomplete revert");
+  return true;
 }
 
 /*
@@ -383,15 +615,31 @@ bool revert_root_mounts(void) {
     return false;
   }
 
-  /* Private copy prevents detach operations propagating to Zygote or siblings. */
+  /*
+   * Keep a handle to the caller's original namespace. Any failure after
+   * unshare() must roll back to this namespace before the clean-namespace
+   * fallback runs; never leave the caller in a partially detached tree.
+   */
+  int original_ns_fd = open("/proc/self/ns/mnt", O_RDONLY | O_CLOEXEC);
+  if (original_ns_fd == -1) {
+    PLOGE("open original mount namespace");
+    return false;
+  }
+
   if (unshare(CLONE_NEWNS) == -1) {
     PLOGE("unshare mount namespace");
+    close(original_ns_fd);
     return false;
   }
 
   if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == -1) {
     PLOGE("make mount propagation private");
-    return false;
+    goto rollback;
+  }
+
+  if (!validate_private_propagation()) {
+    LOGW("Mount namespace still contains shared/slave peer groups");
+    goto rollback;
   }
 
   for (size_t count = 0; count < MAX_REVERT_MOUNTS; count++) {
@@ -399,27 +647,43 @@ bool revert_root_mounts(void) {
     if (state == 0) {
       LOGI("Root/module mounts detached from private process namespace");
       refresh_mountinfo_fds(false);
+      close(original_ns_fd);
       return true;
     }
 
     if (state < 0 || protected_resource) {
       LOGW("Encountered protected or unreadable mount during revert");
-      return false;
+      goto rollback;
     }
 
-    if (!inspect_mount_fds(&selected)) {
-      LOGW("Candidate mount has unknown or unclosable FD references; use clean namespace fallback");
-      return false;
+    /*
+     * Validate the complete mount-parent subtree and all FDs pinned to it.
+     * A path-only MNT_DETACH is unsafe when a non-root child mount is nested
+     * below the candidate or when stacked mount IDs make the target ambiguous.
+     */
+    if (!validate_mount_subtree(&selected)) {
+      LOGW("Mount chain or FD topology is unsafe; use clean namespace fallback");
+      goto rollback;
+    }
+
+    if (!validate_private_propagation()) {
+      LOGW("Peer-group metadata reappeared during mount revert");
+      goto rollback;
     }
 
     if (umount2(selected.target, MNT_DETACH) == -1) {
       PLOGE("detach root/module mount");
-      return false;
+      goto rollback;
     }
 
-    LOGD("Detached root/module mount at %s", selected.target);
+    LOGD("Detached root/module mount id=%u at %s",
+         selected.id, selected.target);
   }
 
   LOGW("Mount revert exceeded safety limit (%u)", (unsigned int)MAX_REVERT_MOUNTS);
+
+rollback:
+  (void)restore_original_mount_namespace(original_ns_fd);
+  close(original_ns_fd);
   return false;
 }
