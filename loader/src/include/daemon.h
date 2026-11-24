@@ -77,6 +77,7 @@ void rezygiskd_free_zn_modules(struct zn_module_list *modules);
 int rezygiskd_connect_companion(size_t index);
 int rezygiskd_connect_zn_companion(size_t index);
 int rezygiskd_get_zn_module_fd(size_t index);
+bool rezygiskd_register_zn_companion_broker(const char *library, int broker_fd);
 int rezygiskd_get_module_dir(size_t index);
 void rezygiskd_zygote_restart(void);
 bool rezygiskd_update_mns(enum mount_namespace_state nms_state, uid_t uid,
