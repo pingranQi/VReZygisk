@@ -509,13 +509,6 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
     return true;
   }
 
-  static bool _linker_has_open_handles(const struct linker *linker) {
-    if (!linker || linker->main_handle_refs != 0) return true;
-    for (int i = 0; i < linker->dep_count; ++i)
-      if (linker->dependencies[i].handle_refs != 0) return true;
-    return false;
-  }
-
 """
         source = replace_once(source, image_from_handle,
                               image_from_handle + "\n\n" + ref_helper,
@@ -553,6 +546,24 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
             "if (_linker_is_library_loaded(linker, lib_full_path)) {",
             "if (_linker_is_library_loaded(linker, lib_name)) {",
             "dependency lookup by DT_NEEDED SONAME",
+        )
+
+    open_handles_marker = "/* VREZYGISK_OPEN_HANDLE_GUARD */"
+    if open_handles_marker not in source:
+        source = replace_once(
+            source,
+            "/* INFO: Internal functions END */",
+            """static bool _linker_has_open_handles(const struct linker *linker) {
+  if (!linker || linker->main_handle_refs != 0) return true;
+  for (int i = 0; i < linker->dep_count; ++i)
+    if (linker->dependencies[i].handle_refs != 0) return true;
+  return false;
+}
+
+/* VREZYGISK_OPEN_HANDLE_GUARD */
+
+/* INFO: Internal functions END */""",
+            "unconditional linker open-handle guard",
         )
 
     deps_marker = "/* VREZYGISK_GROWABLE_LINKER_DEPENDENCIES */"
