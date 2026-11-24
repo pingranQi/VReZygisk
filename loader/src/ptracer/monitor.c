@@ -1036,6 +1036,14 @@ void init_monitor() {
 
   monitor_events_register_event(sigchld_listener_callback, sigchld_signal_fd, EPOLLIN | EPOLLET);
 
+  /*
+   * Start the daemon before init begins dispatching ordinary services. ZN
+   * targets can be launched before app_process64, so lazy daemon startup on
+   * the Zygote exec event would miss those early init-exec targets.
+   */
+  if (!ensure_daemon_created())
+    LOGW("Daemon startup deferred; ZN targets will be retried on later exec events");
+
   monitor_events_loop();
 
   /* INFO: Once it stops the loop, we cannot access the epool data, so we
