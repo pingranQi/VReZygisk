@@ -750,27 +750,6 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
 }
 """ + source[destroy_end:]
 
-        abandon_start = source.index("void linker_abandon(struct linker *linker) {")
-        abandon_end = source.index("\nstatic size_t phdr_get_load_size", abandon_start)
-        abandon = source[abandon_start:abandon_end]
-        abandon = replace_once(
-            abandon,
-            """  linker->dep_count = 0;
-  linker->is_linked = false;
-  linker->main_map_size = 0;
-}""",
-            """  free(linker->dependencies);
-  linker->dependencies = NULL;
-  linker->dep_capacity = 0;
-  linker->dep_count = 0;
-  linker->main_handle_refs = 0;
-  linker->is_linked = false;
-  linker->main_map_size = 0;
-}""",
-            "free abandoned dependency bookkeeping",
-        )
-        source = source[:abandon_start] + abandon + source[abandon_end:]
-
     linker_path.write_text(source)
 
     csoloader_path = linker_path.with_name("csoloader.c")
