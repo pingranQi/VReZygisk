@@ -34,6 +34,8 @@ struct ZnSymbolResolver {
 
 struct zn_module_handle {
   size_t manifest_index;
+  int target_api_version;
+  bool companion;
   void *dl_handle;
   char *module_id;
   char *library;
@@ -189,7 +191,8 @@ static int create_zn_companion_broker(const char *library) {
 
 static int api_connect_companion(void *opaque) {
   const struct zn_module_handle *handle = opaque;
-  if (!handle) return -1;
+  if (!handle || !handle->companion || handle->target_api_version < 3)
+    return -1;
   if (hyos_in_child() && is_hyos_spawner()) {
     if (handle->companion_broker_fd >= 0)
       return connect_zn_companion_via_broker(handle->companion_broker_fd);
@@ -751,6 +754,8 @@ bool zn_modules_load_for_current_process(void) {
       continue;
     }
     self->manifest_index = i;
+    self->target_api_version = module->target_api_version;
+    self->companion = entry->companion;
     self->dl_handle = handle;
     self->module_id = strdup(entry->module_id);
     self->library = strdup(entry->library);
