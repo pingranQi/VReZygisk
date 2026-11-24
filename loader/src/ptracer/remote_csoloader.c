@@ -400,6 +400,12 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       case 0x60000012: /* DT_ANDROID_RELASZ */
         LOGE("Android packed relocations are not supported by remote CSOLoader");
         goto cleanup;
+      case 0x6fffe000: /* DT_ANDROID_RELR */
+      case 0x6fffe001: /* DT_ANDROID_RELRSZ */
+      case 0x6fffe003: /* DT_ANDROID_RELRENT */
+      case 0x6fffe005: /* DT_ANDROID_RELRCOUNT */
+        LOGE("Android RELR relocations are not supported by remote CSOLoader");
+        goto cleanup;
       case 0x6ffffff0: /* DT_VERSYM */
       case 0x6ffffffc: /* DT_VERDEF */
       case 0x6ffffffd: /* DT_VERDEFNUM */
