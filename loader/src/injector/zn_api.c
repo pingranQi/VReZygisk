@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <elf.h>
 #include <link.h>
+#include <pthread.h>
+#include <plti.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,6 +37,73 @@ struct zn_module_handle {
 
 static struct zn_module_handle **g_zn_handles;
 static size_t g_zn_handle_count;
+
+static struct plti g_zn_plti;
+static bool g_zn_plti_initialized;
+static pthread_mutex_t g_zn_plti_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+struct plti_target_lookup {
+  uintptr_t requested_base;
+  const char *path;
+  uintptr_t elf_header;
+  bool found;
+};
+
+static int find_plti_target(struct dl_phdr_info *info, size_t size,
+                            void *opaque) {
+  (void)size;
+  struct plti_target_lookup *lookup = opaque;
+  uintptr_t header = (uintptr_t)info->dlpi_addr;
+  for (Elf64_Half i = 0; i < info->dlpi_phnum; ++i) {
+    const Elf64_Phdr *phdr = &info->dlpi_phdr[i];
+    if (phdr->p_type == PT_LOAD && phdr->p_offset == 0) {
+      header += (uintptr_t)phdr->p_vaddr;
+      break;
+    }
+  }
+  if ((uintptr_t)info->dlpi_addr != lookup->requested_base &&
+      header != lookup->requested_base) return 0;
+  if (!info->dlpi_name || !*info->dlpi_name) return 0;
+  lookup->path = info->dlpi_name;
+  lookup->elf_header = header;
+  lookup->found = true;
+  return 1;
+}
+
+static int api_plt_hook(void *base_addr, const char *symbol,
+                        void *hook_handler, void **original) {
+  if (!base_addr || !symbol || !*symbol || !hook_handler) return ZN_FAILED;
+
+  struct plti_target_lookup lookup = {
+    .requested_base = (uintptr_t)base_addr,
+    .path = NULL,
+    .elf_header = 0,
+    .found = false
+  };
+  dl_iterate_phdr(find_plti_target, &lookup);
+  if (!lookup.found || !lookup.path) {
+    LOGW("ZN pltHook could not resolve library base %p", base_addr);
+    return ZN_FAILED;
+  }
+
+  pthread_mutex_lock(&g_zn_plti_mutex);
+  if (!g_zn_plti_initialized) {
+    g_zn_plti_initialized = plti_init(&g_zn_plti);
+  }
+
+  bool ok = g_zn_plti_initialized &&
+            plti_add_manual_lib(&g_zn_plti, lookup.path, lookup.elf_header);
+  if (ok && original && *original && hook_handler == *original) {
+    ok = plti_remove_hook(&g_zn_plti, lookup.path, symbol, original);
+  } else if (ok) {
+    ok = plti_add_hook(&g_zn_plti, lookup.path, symbol,
+                       hook_handler, original);
+  }
+  pthread_mutex_unlock(&g_zn_plti_mutex);
+
+  if (!ok) LOGW("ZN pltHook failed for %s in %s", symbol, lookup.path);
+  return ok ? ZN_SUCCESS : ZN_FAILED;
+}
 
 static int api_unsupported_plt_hook(void *base, const char *symbol,
                                     void *handler, void **original) {
@@ -296,7 +365,7 @@ static void api_for_each_symbols(
 }
 
 static const struct ZygiskNextAPI g_zn_api = {
-  .pltHook = api_unsupported_plt_hook,
+  .pltHook = api_plt_hook,
   .inlineHook = api_unsupported_inline_hook,
   .inlineUnhook = api_unsupported_inline_unhook,
   .newSymbolResolver = api_new_symbol_resolver,
