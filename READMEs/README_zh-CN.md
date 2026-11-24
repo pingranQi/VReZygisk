@@ -12,7 +12,8 @@ ReZygisk 是从 Zygisk Next 分支出来的 Zygisk API 独立实现，为 **Kern
 - 兼容 KernelSU、APatch 和 Magisk。
 - 仅支持 ARM64 架构（**arm64-v8a**）。
 - 支持自定义链接器。
-- Root 管理器的模块描述会显示运行状态和检测到的 Zygisk 模块名称。
+- Root 管理器的模块描述和 `/data/adb/rezygisk/state.json` 会分别展示 Zygisk / ZN 模块清单。
+- 同一模块 ID 同时提供 `zygisk/arm64-v8a.so` 和有效 `zn_modules.txt` 条目时，会标记为 `[Hybrid]`。
 - 不包含 WebUI。
 
 ## 兼容性
@@ -41,6 +42,8 @@ ReZygisk 是从 Zygisk Next 分支出来的 Zygisk API 独立实现，为 **Kern
 重启后，在 Root 管理器的模块描述中检查 ReZygisk 的运行状态。描述会显示 monitor 和 64 位 Zygisk 状态，例如：
 
 **[Monitor: ✅, ReZygisk 64-bit: ✅] Standalone implementation of Zygisk.**
+
+模块描述会分别列出 Zygisk 模块和 ZN 目标；同时存在于两种后端的模块会标记为 `[Hybrid]`。`zygisk-ptrace64 info` 命令也会输出两类清单。`/data/adb/rezygisk/state.json` 提供 `modules.zygisk`、`modules.zn`、`modules.hybrid` 和 `modules.zn_inventory_available` 字段。
 
 具体状态文本可能随运行状态变化。
 
