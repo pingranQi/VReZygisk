@@ -789,7 +789,7 @@ static char **build_remote_symbol_scope(struct maps_info *remote_map,
       size_t off = dep_info.needed_str_offsets[n];
       if (off >= dep_info.strsz) continue;
       const char *soname = dep_info.strtab + off;
-      if (!memchr(soname, '\\0', dep_info.strsz - off)) continue;
+      if (!memchr(soname, '\0', dep_info.strsz - off)) continue;
       const char *dep_path = find_remote_module_path(remote_map, soname);
       if (!dep_path) continue;
 
@@ -1993,7 +1993,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   if (!find_dynsym_value(fd, &dinfo, "entry", &entry_value)) {
     LOGE("Failed to resolve entry from ELF dynsym");
 
-    free((void *)needed_paths);
+    free_symbol_scope(needed_paths, symbol_scope_count);
     elf_dyn_info_destroy(&dinfo);
     REMOTE_CLEANUP_MAPPING();
     free(phdr);
@@ -2004,7 +2004,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
   if ((uintptr_t)entry_value > UINTPTR_MAX - load_bias) {
     LOGE("Entry point address overflow");
-    free((void *)needed_paths);
+    free_symbol_scope(needed_paths, symbol_scope_count);
     elf_dyn_info_destroy(&dinfo);
     REMOTE_CLEANUP_MAPPING();
     free(phdr);
@@ -2025,7 +2025,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   }
   if (!entry_is_executable) {
     LOGE("Resolved entry point is outside executable PT_LOAD segments");
-    free((void *)needed_paths);
+    free_symbol_scope(needed_paths, symbol_scope_count);
     elf_dyn_info_destroy(&dinfo);
     REMOTE_CLEANUP_MAPPING();
     free(phdr);
