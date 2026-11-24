@@ -448,6 +448,11 @@ static bool ensure_daemon_created(void) {
     return status64.daemon_running;
   }
 
+  if (status64.daemon_error_info) {
+    free(status64.daemon_error_info);
+    status64.daemon_error_info = NULL;
+  }
+
   pid_t pid = fork();
   if (pid < 0) {
     PLOGE("create ReZygiskd64");
