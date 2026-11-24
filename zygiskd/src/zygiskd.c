@@ -499,6 +499,12 @@ void zygiskd_start(char *restrict argv[]) {
           context.modules[i].companion = -1;
         }
 
+        for (size_t i = 0; i < context.zn_modules.count; ++i) {
+          if (context.zn_modules.items[i].companion_fd < 0) continue;
+          close(context.zn_modules.items[i].companion_fd);
+          context.zn_modules.items[i].companion_fd = -1;
+        }
+
         break;
       }
       case GetProcessFlags: {
@@ -602,6 +608,48 @@ void zygiskd_start(char *restrict argv[]) {
           }
         }
 
+        break;
+      }
+      case RequestZnCompanionSocket: {
+        size_t index = 0;
+        ssize_t ret = read_size_t(client_fd, &index);
+        ASSURE_SIZE_READ("RequestZnCompanionSocket", "index", ret,
+                         sizeof(index), break);
+
+        if (index >= context.zn_modules.count ||
+            !context.zn_modules.items[index].companion) {
+          LOGW("Invalid or undeclared ZN companion index: %zu", index);
+          ret = write_uint8_t(client_fd, 0);
+          ASSURE_SIZE_WRITE("RequestZnCompanionSocket", "response", ret,
+                            sizeof(uint8_t), break);
+          break;
+        }
+
+        struct zn_module_entry *module = &context.zn_modules.items[index];
+        if (module->companion_fd >= 0 &&
+            !check_unix_socket(module->companion_fd, false)) {
+          LOGW("ZN companion for module %s disconnected", module->module_id);
+          close(module->companion_fd);
+          module->companion_fd = -1;
+        }
+
+        if (module->companion_fd < 0) {
+          module->companion_fd = spawn_zn_companion(
+              argv, module->module_id, module->library);
+        }
+
+        if (module->companion_fd < 0 ||
+            write_fd(module->companion_fd, client_fd) != 1) {
+          LOGE("Failed dispatching client to ZN companion for %s",
+               module->module_id);
+          if (module->companion_fd >= 0) {
+            close(module->companion_fd);
+            module->companion_fd = -1;
+          }
+          ret = write_uint8_t(client_fd, 0);
+          ASSURE_SIZE_WRITE("RequestZnCompanionSocket", "response", ret,
+                            sizeof(uint8_t), break);
+        }
         break;
       }
       case ReadZnModules: {
