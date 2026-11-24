@@ -285,6 +285,454 @@ static const char *_path_basename""",
         )
         linker_path.write_text(source)
 
+
+def patch_csoloader_linker_lifetime(linker_path: Path) -> None:
+    """Patch SONAME identity, dynamic dependency storage and custom dlopen refs."""
+    header_path = linker_path.parent.parent / "include" / "linker.h"
+    header = header_path.read_text()
+    header_marker = "/* VREZYGISK_LINKER_OBJECT_REFS */"
+    if header_marker not in header:
+        header = replace_once(
+            header,
+            """  enum linker_image_state lifecycle_state;
+  bool is_manual_load;""",
+            """  enum linker_image_state lifecycle_state;
+  size_t handle_refs;
+  bool is_manual_load;""",
+            "dependency handle reference count",
+        )
+        header = replace_once(
+            header,
+            """  struct loaded_dep dependencies[MAX_DEPS];
+  int dep_count;
+
+  size_t main_map_size;
+  bool is_linked;
+  enum linker_image_state main_lifecycle_state;""",
+            """  struct loaded_dep *dependencies;
+  size_t dep_capacity;
+  int dep_count;
+
+  size_t main_map_size;
+  bool is_linked;
+  size_t main_handle_refs;
+  enum linker_image_state main_lifecycle_state;
+  /* VREZYGISK_LINKER_OBJECT_REFS */""",
+            "growable dependency storage and main image references",
+        )
+        header = replace_once(
+            header,
+            "void linker_destroy(struct linker *linker);",
+            "bool linker_destroy(struct linker *linker);",
+            "report unload refusal while handles remain open",
+        )
+        header_path.write_text(header)
+
+    source = linker_path.read_text()
+    soname_marker = "/* VREZYGISK_ELF_SONAME_IDENTITY */"
+    if soname_marker not in source:
+        basename = """static const char *_path_basename(const char *path) {
+  if (!path) return "";
+
+  const char *slash = strrchr(path, '/');
+  return slash ? slash + 1 : path;
+}"""
+        helper = r"""static const char *_linker_image_soname(const struct csoloader_elf *img) {
+  if (!img || !img->header || img->size < sizeof(ElfW(Ehdr))) return NULL;
+  const ElfW(Ehdr) *eh = img->header;
+  if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 ||
+      eh->e_phentsize != sizeof(ElfW(Phdr)) || eh->e_phnum == 0 ||
+      eh->e_phnum > 1024 || eh->e_phoff > img->size ||
+      (size_t)eh->e_phnum > SIZE_MAX / sizeof(ElfW(Phdr)) ||
+      (size_t)eh->e_phnum * sizeof(ElfW(Phdr)) >
+          img->size - (size_t)eh->e_phoff) return NULL;
+
+  const ElfW(Phdr) *phdr =
+      (const ElfW(Phdr) *)((const uint8_t *)img->header + eh->e_phoff);
+  const ElfW(Phdr) *dynamic_phdr = NULL;
+  for (size_t i = 0; i < eh->e_phnum; ++i) {
+    if (phdr[i].p_type == PT_DYNAMIC) {
+      dynamic_phdr = &phdr[i];
+      break;
+    }
+  }
+  if (!dynamic_phdr || dynamic_phdr->p_filesz < sizeof(ElfW(Dyn)) ||
+      dynamic_phdr->p_offset > img->size ||
+      dynamic_phdr->p_filesz > img->size - (size_t)dynamic_phdr->p_offset ||
+      dynamic_phdr->p_filesz % sizeof(ElfW(Dyn)) != 0) return NULL;
+
+  const ElfW(Dyn) *dyn =
+      (const ElfW(Dyn) *)((const uint8_t *)img->header + dynamic_phdr->p_offset);
+  size_t dyn_count = (size_t)dynamic_phdr->p_filesz / sizeof(ElfW(Dyn));
+  ElfW(Addr) strtab_vaddr = 0;
+  size_t strsz = 0;
+  size_t soname_offset = SIZE_MAX;
+  bool terminated = false;
+  for (size_t i = 0; i < dyn_count; ++i) {
+    if (dyn[i].d_tag == DT_NULL) {
+      terminated = true;
+      break;
+    }
+    switch (dyn[i].d_tag) {
+      case DT_STRTAB: strtab_vaddr = dyn[i].d_un.d_ptr; break;
+      case DT_STRSZ: strsz = (size_t)dyn[i].d_un.d_val; break;
+      case DT_SONAME: soname_offset = (size_t)dyn[i].d_un.d_val; break;
+      default: break;
+    }
+  }
+  if (!terminated || !strtab_vaddr || !strsz || soname_offset >= strsz)
+    return NULL;
+
+  for (size_t i = 0; i < eh->e_phnum; ++i) {
+    if (phdr[i].p_type != PT_LOAD || strtab_vaddr < phdr[i].p_vaddr)
+      continue;
+    ElfW(Addr) delta = strtab_vaddr - phdr[i].p_vaddr;
+    if (delta > phdr[i].p_filesz || strsz > phdr[i].p_filesz - delta ||
+        phdr[i].p_offset > img->size ||
+        delta > img->size - (size_t)phdr[i].p_offset) continue;
+    size_t strtab_offset = (size_t)phdr[i].p_offset + (size_t)delta;
+    if (strtab_offset > img->size || strsz > img->size - strtab_offset)
+      continue;
+    const char *strtab = (const char *)img->header + strtab_offset;
+    const char *soname = strtab + soname_offset;
+    if (soname[0] == '\0' ||
+        !memchr(soname, '\0', strsz - soname_offset)) return NULL;
+    return soname;
+  }
+  return NULL;
+}
+
+static bool _linker_image_matches_name(const struct csoloader_elf *img,
+                                       const char *name) {
+  if (!img || !img->elf || !name || !*name) return false;
+  if (strcmp(img->elf, name) == 0) return true;
+  const char *soname = _linker_image_soname(img);
+  if (soname) return strcmp(soname, name) == 0;
+  return strcmp(_path_basename(img->elf), _path_basename(name)) == 0;
+}
+
+/* VREZYGISK_ELF_SONAME_IDENTITY */"""
+        source = replace_once(source, basename, basename + "\n\n" + helper,
+                              "ELF DT_SONAME identity helper")
+
+        source = replace_once(
+            source,
+            """static bool _linker_is_library_loaded(struct linker *linker, const char *lib_name) {
+  if (!linker || !lib_name) return false;
+  const char *requested = _path_basename(lib_name);
+  if (linker->img && strcmp(_path_basename(linker->img->elf), requested) == 0)
+    return true;
+
+  for (int i = 0; i < linker->dep_count; i++) {
+    struct csoloader_elf *loaded = linker->dependencies[i].img;
+    if (loaded && strcmp(_path_basename(loaded->elf), requested) == 0)
+      return true;
+  }
+
+  return false;
+}""",
+            """static bool _linker_is_library_loaded(struct linker *linker, const char *lib_name) {
+  if (!linker || !lib_name) return false;
+  if (_linker_image_matches_name(linker->img, lib_name)) return true;
+  for (int i = 0; i < linker->dep_count; i++) {
+    if (_linker_image_matches_name(linker->dependencies[i].img, lib_name))
+      return true;
+  }
+  return false;
+}""",
+            "DT_SONAME-based dependency de-duplication",
+        )
+        source = replace_once(
+            source,
+            """  static struct csoloader_elf *_linker_find_loaded_image(struct linker *linker, const char *name) {
+    const char *base_name = _path_basename(name);
+    if (linker->img && (strcmp(linker->img->elf, name) == 0 || strcmp(_path_basename(linker->img->elf), base_name) == 0))
+      return linker->img;
+
+    for (int i = 0; i < linker->dep_count; i++) {
+      struct loaded_dep *dep = &linker->dependencies[i];
+      if (!dep->img || !dep->is_manual_load) continue;
+
+      if (strcmp(dep->img->elf, name) == 0 || strcmp(_path_basename(dep->img->elf), base_name) == 0)
+        return dep->img;
+    }
+
+    return NULL;
+  }""",
+            """  static struct csoloader_elf *_linker_find_loaded_image(struct linker *linker, const char *name) {
+    if (!linker || !name) return NULL;
+    if (_linker_image_matches_name(linker->img, name)) return linker->img;
+    for (int i = 0; i < linker->dep_count; i++) {
+      struct loaded_dep *dep = &linker->dependencies[i];
+      if (!dep->img) continue;
+      if (_linker_image_matches_name(dep->img, name)) return dep->img;
+    }
+    return NULL;
+  }""",
+            "dlopen lookup by SONAME",
+        )
+        image_from_handle = """  static struct csoloader_elf *_linker_image_from_handle(struct linker *linker, void *handle) {
+    if (!linker || !handle || handle == RTLD_DEFAULT || handle == RTLD_NEXT) return NULL;
+    if (handle == linker->img) return linker->img;
+
+    for (int i = 0; i < linker->dep_count; i++) {
+      if (!linker->dependencies[i].is_manual_load || handle != linker->dependencies[i].img) continue;
+
+      return linker->dependencies[i].img;
+    }
+
+    return NULL;
+  }"""
+        ref_helper = r"""  static bool _linker_adjust_handle_ref(struct linker *linker,
+                                       struct csoloader_elf *img,
+                                       bool acquire) {
+    if (!linker || !img) return false;
+    size_t *refs = NULL;
+    if (img == linker->img) {
+      refs = &linker->main_handle_refs;
+    } else {
+      for (int i = 0; i < linker->dep_count; ++i) {
+        if (linker->dependencies[i].img == img) {
+          refs = &linker->dependencies[i].handle_refs;
+          break;
+        }
+      }
+    }
+    if (!refs) return false;
+    if (acquire) {
+      if (*refs == SIZE_MAX) return false;
+      ++*refs;
+      return true;
+    }
+    if (*refs == 0) return false;
+    --*refs;
+    return true;
+  }
+
+  static bool _linker_has_open_handles(const struct linker *linker) {
+    if (!linker || linker->main_handle_refs != 0) return true;
+    for (int i = 0; i < linker->dep_count; ++i)
+      if (linker->dependencies[i].handle_refs != 0) return true;
+    return false;
+  }
+
+"""
+        source = replace_once(source, image_from_handle,
+                              image_from_handle + "\n\n" + ref_helper,
+                              "per-image dlopen reference accounting")
+        source = replace_once(
+            source,
+            """      struct csoloader_elf *img = _linker_find_loaded_image(linker, filename);
+      if (img) return img;""",
+            """      struct csoloader_elf *img = _linker_find_loaded_image(linker, filename);
+      if (img && _linker_adjust_handle_ref(linker, img, true)) return img;""",
+            "acquire image handle on custom dlopen",
+        )
+        source = replace_once(
+            source,
+            """  /* INFO: If a handle is shared between modules, this will not be able to find it.*/
+  static int custom_dlclose(void *handle) {
+    int (*original_dlclose)(void *) = (int (*)(void *))_linker_get_original_libdl_symbol("dlclose");
+
+    struct linker *linker = _linker_find_by_caller_address(__builtin_return_address(0));
+    if (linker && _linker_image_from_handle(linker, handle)) return 0;
+
+    return original_dlclose ? original_dlclose(handle) : -1;
+  }""",
+            """  static int custom_dlclose(void *handle) {
+    int (*original_dlclose)(void *) = (int (*)(void *))_linker_get_original_libdl_symbol("dlclose");
+    struct linker *linker = _linker_find_by_caller_address(__builtin_return_address(0));
+    if (linker && _linker_image_from_handle(linker, handle))
+      return _linker_adjust_handle_ref(linker, handle, false) ? 0 : -1;
+    return original_dlclose ? original_dlclose(handle) : -1;
+  }""",
+            "release custom dlopen handle",
+        )
+        source = replace_once(
+            source,
+            "if (_linker_is_library_loaded(linker, lib_full_path)) {",
+            "if (_linker_is_library_loaded(linker, lib_name)) {",
+            "dependency lookup by DT_NEEDED SONAME",
+        )
+
+    deps_marker = "/* VREZYGISK_GROWABLE_LINKER_DEPENDENCIES */"
+    if deps_marker not in source:
+        source = replace_once(
+            source,
+            """bool linker_init(struct linker *linker, struct csoloader_elf *img) {
+  _linker_internal_init();
+
+  linker->img = img;
+  linker->is_linked = false;
+  linker->main_map_size = 0;
+  linker->main_lifecycle_state = LINKER_IMAGE_UNINITIALIZED;
+  linker->dep_count = 0;
+  memset(&linker->tls_indices, 0, sizeof(linker->tls_indices));
+
+  memset(linker->dependencies, 0, sizeof(linker->dependencies));
+
+  _linker_register(linker);
+
+  return true;
+}""",
+            """bool linker_init(struct linker *linker, struct csoloader_elf *img) {
+  if (!linker || !img) return false;
+  _linker_internal_init();
+
+  linker->img = img;
+  linker->is_linked = false;
+  linker->main_map_size = 0;
+  linker->main_lifecycle_state = LINKER_IMAGE_UNINITIALIZED;
+  linker->main_handle_refs = 0;
+  linker->dep_count = 0;
+  linker->dep_capacity = 16;
+  linker->dependencies = calloc(linker->dep_capacity, sizeof(*linker->dependencies));
+  if (!linker->dependencies) {
+    linker->dep_capacity = 0;
+    return false;
+  }
+  memset(&linker->tls_indices, 0, sizeof(linker->tls_indices));
+
+  _linker_register(linker);
+  return true;
+}
+
+/* VREZYGISK_GROWABLE_LINKER_DEPENDENCIES */
+static bool _linker_reserve_dependencies(struct linker *linker, size_t required) {
+  if (!linker || required > 4096) return false;
+  if (required <= linker->dep_capacity) return true;
+  size_t capacity = linker->dep_capacity ? linker->dep_capacity : 16;
+  while (capacity < required) {
+    if (capacity > 2048) {
+      capacity = 4096;
+      break;
+    }
+    capacity *= 2;
+  }
+  if (capacity < required || capacity > SIZE_MAX / sizeof(*linker->dependencies))
+    return false;
+  struct loaded_dep *grown =
+      realloc(linker->dependencies, capacity * sizeof(*linker->dependencies));
+  if (!grown) return false;
+  memset(grown + linker->dep_capacity, 0,
+         (capacity - linker->dep_capacity) * sizeof(*linker->dependencies));
+  linker->dependencies = grown;
+  linker->dep_capacity = capacity;
+  return true;
+}""",
+            "growable dependency allocation",
+        )
+        source = replace_once(
+            source,
+            """    if (linker->dep_count >= MAX_DEPS) {
+      LOGE("Maximum dependency count (%d) exceeded while loading: %s", MAX_DEPS, lib_full_path);
+
+      carray_destroy(loaded_libs);
+
+      return false;
+    }
+
+    struct loaded_dep *current_dep = &linker->dependencies[linker->dep_count];""",
+            """    if (!_linker_reserve_dependencies(linker,
+                                      (size_t)linker->dep_count + 1)) {
+      LOGE("Dependency graph limit/allocation failure while loading: %s",
+           lib_full_path);
+      carray_destroy(loaded_libs);
+      return false;
+    }
+
+    struct loaded_dep *current_dep = &linker->dependencies[linker->dep_count];""",
+            "dynamic dependency graph growth",
+        )
+        source = source.replace(
+            "void linker_destroy(struct linker *linker) {",
+            "bool linker_destroy(struct linker *linker) {",
+            1,
+        )
+        destroy_start = source.index("bool linker_destroy(struct linker *linker) {")
+        destroy_end = source.index("\n/* INFO: Free resources related to the library without unloading it */",
+                                  destroy_start)
+        source = source[:destroy_start] + r"""bool linker_destroy(struct linker *linker) {
+  if (!linker || !linker->img) return false;
+  if (_linker_has_open_handles(linker)) {
+    LOGE("Refusing to unload %s while custom dlopen handles remain open",
+         linker->img->elf);
+    return false;
+  }
+
+  void *main_base = linker->img->base;
+  size_t main_map_size = linker->main_map_size;
+  if (linker->is_linked) {
+    _linker_call_destructors(linker->img, &linker->main_lifecycle_state);
+    unregister_eh_frame_for_library(linker->img);
+    unregister_custom_library_for_backtrace(linker->img);
+  }
+
+  _linker_release_dependencies(linker, true, linker->is_linked);
+  _linker_unregister(linker);
+  _linker_unregister_tls_segment((struct loaded_dep *)linker);
+  csoloader_elf_destroy(linker->img);
+  linker->img = NULL;
+  if (main_base && main_map_size > 0) munmap(main_base, main_map_size);
+
+  free(linker->dependencies);
+  linker->dependencies = NULL;
+  linker->dep_capacity = 0;
+  linker->dep_count = 0;
+  linker->main_handle_refs = 0;
+  linker->is_linked = false;
+  linker->main_map_size = 0;
+  return true;
+}
+""" + source[destroy_end:]
+
+        abandon_start = source.index("void linker_abandon(struct linker *linker) {")
+        abandon_end = source.index("\nstatic size_t phdr_get_load_size", abandon_start)
+        abandon = source[abandon_start:abandon_end]
+        abandon = replace_once(
+            abandon,
+            """  linker->dep_count = 0;
+  linker->is_linked = false;
+  linker->main_map_size = 0;
+}""",
+            """  free(linker->dependencies);
+  linker->dependencies = NULL;
+  linker->dep_capacity = 0;
+  linker->dep_count = 0;
+  linker->main_handle_refs = 0;
+  linker->is_linked = false;
+  linker->main_map_size = 0;
+}""",
+            "free abandoned dependency bookkeeping",
+        )
+        source = source[:abandon_start] + abandon + source[abandon_end:]
+
+    linker_path.write_text(source)
+
+    csoloader_path = linker_path.with_name("csoloader.c")
+    csoloader = csoloader_path.read_text()
+    unload_marker = "/* VREZYGISK_REFCOUNTED_CSOLOADER_UNLOAD */"
+    if unload_marker not in csoloader:
+        csoloader = replace_once(
+            csoloader,
+            """bool csoloader_unload(struct csoloader *lib) {
+  linker_destroy(&lib->linker);
+
+  free(lib->lib_path);""",
+            """bool csoloader_unload(struct csoloader *lib) {
+  if (!lib || !linker_destroy(&lib->linker)) return false;
+
+  free(lib->lib_path);""",
+            "propagate linker unload refusal",
+        )
+        csoloader = csoloader.replace(
+            "  return true;\n}\n\n/* INFO: Free resources related to the library without unloading it */",
+            "  return true;\n}\n\n/* VREZYGISK_REFCOUNTED_CSOLOADER_UNLOAD */\n\n/* INFO: Free resources related to the library without unloading it */",
+            1,
+        )
+        csoloader_path.write_text(csoloader)
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(f"usage: {sys.argv[0]} <CSOLoader/src/linker.c>", file=sys.stderr)
@@ -296,6 +744,7 @@ def main() -> int:
     if MARKER in source:
         patch_csoloader_api(csoloader_path)
         patch_csoloader_lifecycle(path)
+        patch_csoloader_linker_lifetime(path)
         if REGISTRATION_MARKER not in source:
             source = replace_once(
                 source,
@@ -615,6 +1064,7 @@ static size_t _linker_bump_tls_generation(void) {
     patch_csoloader_api(csoloader_path)
     path.write_text(source)
     patch_csoloader_lifecycle(path)
+    patch_csoloader_linker_lifetime(path)
     print(f"Applied VReZygisk linker/TLS hardening to {path}")
     return 0
 
