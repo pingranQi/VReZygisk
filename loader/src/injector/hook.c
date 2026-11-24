@@ -1311,7 +1311,7 @@ static void release_unregistered_module(struct rezygisk_module *module, const ch
   if (module->loader_backend == MODULE_LOADER_CSO) {
     released = csoloader_unload_serialized(&module->lib);
     if (!released) {
-      csoloader_pinned = true;
+      csoloader_pin();
       LOGE("Retaining failed CSOLoader image for [%s]", lib_path);
     }
   } else if (module->loader_backend == MODULE_LOADER_SYSTEM) {
@@ -1454,7 +1454,7 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
       had_cso_module = true;
       if (!m->unload) {
         LOGD("Abandoning CSOLoader image at %p", m->lib.img ? m->lib.img->header : NULL);
-        csoloader_pinned = true;
+        csoloader_pin();
         all_cso_modules_unloaded = false;
         if (!csoloader_abandon_serialized(&m->lib)) {
           LOGE("Failed to abandon CSOLoader module safely");
