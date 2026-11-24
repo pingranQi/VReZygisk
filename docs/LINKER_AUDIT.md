@@ -22,6 +22,7 @@ Keep these paths separate in the design and test plans. They have different addr
 - Segment bookkeeping uses a fixed 64-entry array. The parser must reject excess PT_LOAD entries before mapping; silent truncation would leave permissions incomplete.
 - All dynamic pointers and relocation targets must be proven to fall inside validated PT_LOAD/file-backed ranges before reads, writes or arithmetic. Keep file offsets distinct from target virtual addresses.
 - Failure after remote mapping begins must restore target registers and release every remote fd/mapping. Cleanup errors need to be preserved separately from the original failure.
+- The remote bootstrap resolver currently searches the image's direct DT_NEEDED libraries only. It does not yet construct the complete ordered transitive/global lookup scope; keep unresolved symbols fail-closed rather than searching arbitrary resident mappings.
 - In-process CSOLoader supports a pthread-key based emulated TLS implementation (128 module slots), including AArch64 DTPMOD/DTPREL/TPREL and TLSDESC paths. This is not Bionic's native static-TLS ABI; ordinary modules with PT_TLS are therefore routed to Bionic by the VReZygisk integration until the emulation has dedicated device tests.
 - CSOLoader's symbol parser is section-header-oriented and does not implement GNU symbol version selection. VReZygisk detects GNU version tags in PT_DYNAMIC and routes those images to Bionic rather than silently performing unversioned lookup.
 - The pinned CSOLoader contains Android packed relocation, RELR, IFUNC and IRELATIVE handling. Those implementations still require dedicated regression tests; the separate ptracer bootstrap mapper deliberately rejects the unsupported formats.
@@ -43,6 +44,7 @@ Keep these paths separate in the design and test plans. They have different addr
 - Make load/unload and shared dependency ownership safe under concurrent requests. Existing CSOLoader global TLS/linker state and active-linker tracking require a concurrency audit.
 - Validate W^X and PT_GNU_RELRO final permissions, page overlap, BSS tails, segment alignment and cache maintenance.
 - Add structured diagnostics identifying stage, ELF object, dynamic tag/relocation, symbol, target address, errno and cleanup status.
+- Preallocate CSOLoader path bookkeeping before constructors so custom-loader failure cannot fall back to Bionic after module code has executed.
 - Add host-side ELF fixtures and Android device tests for API levels, Bionic variants, concurrent load/unload, fork, TLS, C++ exceptions/unwind and module callbacks.
 
 ## Reference-derived design points
