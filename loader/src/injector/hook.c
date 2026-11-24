@@ -1346,6 +1346,7 @@ static void release_unregistered_module(struct rezygisk_module *module, const ch
     return;
   }
 
+  rz_module_sync_destroy(module);
   memset(module, 0, sizeof(*module));
 }
 
@@ -1375,6 +1376,11 @@ static bool load_modules_only(void) {
     const char *lib_path = ms.modules[i];
     struct rezygisk_module *module = &zygisk_modules[zygisk_module_length];
     memset(module, 0, sizeof(*module));
+    if (!rz_module_sync_init(module)) {
+      LOGE("Failed to initialize module execution lease for [%s]", lib_path);
+      rezygiskd_remove_module(i);
+      continue;
+    }
 
     /*
      * Prefer CSOLoader, but do not make a module unavailable solely because
@@ -1397,6 +1403,8 @@ static bool load_modules_only(void) {
              lib_path, error ? error : "unknown dlopen error");
 
         rezygiskd_remove_module(i);
+        rz_module_sync_destroy(module);
+        memset(module, 0, sizeof(*module));
         continue;
       }
       module->loader_backend = MODULE_LOADER_SYSTEM;
@@ -1471,6 +1479,17 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
     if (FLAG_GET(ctx, APP_SPECIALIZE)) rz_module_call_post_app_specialize(m, ctx->args.app);
     else if (FLAG_GET(ctx, SERVER_FORK_AND_SPECIALIZE)) rz_module_call_post_server_specialize(m, ctx->args.server);
 
+    if (m->unload && !rz_module_sync_close_and_wait(m)) {
+      LOGE("Module [%s] still has active callbacks; retaining image",
+           m->lib.lib_path ? m->lib.lib_path : "system-linker module");
+      if (m->loader_backend == MODULE_LOADER_CSO) {
+        csoloader_pin();
+        all_cso_modules_unloaded = false;
+      }
+      should_unmap_zygisk = false;
+      continue;
+    }
+
     if (m->loader_backend == MODULE_LOADER_CSO) {
       had_cso_module = true;
       if (!m->unload) {
@@ -1510,6 +1529,7 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
     }
 
     m->loader_backend = MODULE_LOADER_NONE;
+    rz_module_sync_destroy(m);
     modules_unloaded++;
   }
 
@@ -1776,6 +1796,7 @@ static void rz_cleanup(struct zygisk_context *ctx) {
 
   /* INFO: Strip out all API function pointers */
   for (size_t i = 0; i < zygisk_module_length; i++) {
+    rz_module_sync_destroy(&zygisk_modules[i]);
     memset(&zygisk_modules[i], 0, sizeof(zygisk_modules[i]));
   }
 
