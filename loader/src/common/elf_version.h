@@ -16,6 +16,14 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
                                     const char *symbol_name,
                                     const char *version_name);
 
+uintptr_t elf_find_versioned_symbol_info(void *image_base,
+                                         const char *symbol_name,
+                                         const char *version_name,
+                                         unsigned *out_type);
+
+uintptr_t elf_find_symbol_info(void *image_base, const char *symbol_name,
+                               unsigned *out_type);
+
 /*
  * Resolve a relocation's version requirement: requester_symbol_index selects
  * the requester's .dynsym/.gnu.version entry and DT_VERNEED metadata; the
