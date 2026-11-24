@@ -14,28 +14,41 @@ build; builds must not fetch a moving upstream branch.
 There are two separate loading paths and they must not be conflated:
 
 - Modules loaded inside the injected `libzygisk.so` process use a bounded
-  ELF feature probe before CSOLoader. Images with `PT_TLS` or GNU symbol-version
-  tags are routed directly to Bionic. CSOLoader's pinned implementation already
-  processes Android packed relocations, RELR, IFUNC and IRELATIVE; these remain
-  on the custom path. Other images try CSOLoader first and fall back to Bionic
-  on a clean pre-execution failure. The probe validates ELF64/AArch64 identity,
-  program-header bounds, the file-backed `PT_DYNAMIC` mapping and its
-  `DT_NULL` terminator. The matching release operation is `csoloader_unload()` for
-  CSOLoader images and `dlclose()` for Bionic handles.
-- CSOLoader public lifecycle operations are serialized by a recursive
-  process-wide mutex because the pinned dependency maintains global linker
-  and TLS registries. A successful-image counter prevents global deinit while
-  another custom image remains loaded; failed partial loads are cleaned up
-  when no image is active. The lock is not held across module entry points or
-  specialization callbacks.
-- GNU symbol versioning is not implemented by the pinned CSOLoader, so the
-  integration detects its dynamic tags and delegates those images to Bionic.
+  ELF feature probe before CSOLoader. Main images with `PT_TLS` or GNU
+  symbol-version tags are routed directly to Bionic. The patched CSOLoader
+  also detects GNU version tags in manually loaded dependencies and fails
+  closed so the injector can retry the complete dependency closure with
+  Bionic. CSOLoader's pinned implementation already processes Android packed
+  relocations, RELR, IFUNC and IRELATIVE; these remain on the custom path when
+  the dependency closure is compatible. Other images try CSOLoader first and
+  fall back to Bionic only after a clean pre-execution failure. The probe
+  validates ELF64/AArch64 identity, program-header bounds, the file-backed
+  `PT_DYNAMIC` mapping and its `DT_NULL` terminator.
+- The build-time patch adds actual `DT_SONAME` matching, a growable bounded
+  dependency array, fail-closed handling for missing required `DT_NEEDED`
+  entries, and per-image constructor/destructor states. Custom
+  `dlopen`/`dlsym`/`dlclose` hooks are enabled; image handles carry reference
+  counts and can be resolved/released by modules other than the original
+  caller. Destruction runs finalizers once and refuses to unmap an image while
+  tracked handles remain open.
+- CSOLoader operations use a recursive process mutex. Its active-linker
+  registry has a separate recursive mutex, coordinated with the injector's
+  at-fork handlers in the same lock order. Module callbacks use execution
+  leases; the lease gate is closed and active callbacks drained before both
+  unload and abandon. A retained image is pinned if callbacks or custom
+  handles prevent safe teardown. The callback lease does not track arbitrary
+  detached threads that execute module code without a tracked custom handle.
 - The ptracer's bootstrap ELF mapper is a separate implementation. It supports
-  standard and Android RELR, Android APS2 packed RELA, and executes AArch64
-  IFUNC/IRELATIVE resolvers inside the stopped target process. It still rejects
-  PT_TLS, TLS relocation families, Android packed REL, and unsupported
-  architecture relocation types. Its resolver calling convention and cleanup
-  require Android device validation.
+  standard and Android RELR, Android APS2 packed RELA, GNU versioned undefined
+  symbol lookup, and target-process AArch64 IFUNC/IRELATIVE execution. It still
+  rejects `PT_TLS`, TLS relocation families, Android packed REL, and
+  unsupported architecture relocation types. The resolver ABI is selected by
+  runtime Android API level, but target auxv/HWCAP, stack alignment, signal-stop
+  handling, reentrancy and abnormal cleanup still require device validation.
+- Dependency de-duplication is within each CSOLoader instance. Separate
+  CSOLoader instances do not share a process-wide dependency-object registry,
+  so duplicate private dependency mappings across independent module linkers
+  remain possible.
 
 Do not claim complete TLS support for the ptracer mapper. IFUNC/IRELATIVE
 support is implemented using target-process execution, but must be validated
@@ -91,8 +104,8 @@ Before advancing the pinned revision, validate at least:
   PT_DYNAMIC termination, and all dynamic-table ranges.
 - REL/RELA and PLT relocation tables, symbol bounds, weak/undefined symbols,
   Android relocation variants, and architecture-specific relocation types.
-- GNU IFUNC and IRELATIVE resolver execution order and resolver failure paths
-  (currently unsupported by the ptracer bootstrap mapper and must be rejected).
+- GNU IFUNC and IRELATIVE resolver execution order, API-specific resolver ABI,
+  target register restoration, signal-stop verification and resolver failure paths.
 - TLS module allocation, per-thread block initialization, thread-exit cleanup,
   module-id reuse/generation handling, and deinit after all images are gone
   (PT_TLS is currently rejected by the ptracer bootstrap mapper).
@@ -108,8 +121,8 @@ failure propagation, and per-image constructor/destructor state. Its emulated
 TLS is not a substitute for Bionic's native TLS ABI, so VReZygisk routes PT_TLS
 images to Bionic for now. GNU symbol versioning in the in-process CSOLoader is
 likewise delegated to Bionic. The ptracer bootstrap path has a separate
-version-aware undefined-symbol resolver based on `DT_VERSYM`/`DT_VERNEED`
-and local Bionic `dlvsym()`; it is not a complete replacement for Bionic's
-global namespace and version lookup rules. A failed custom load is allowed to fall back to Bionic only when cleanup
+version-aware undefined-symbol resolver based on `DT_VERSYM`/`DT_VERNEED`,
+actual provider `DT_SONAME`, and mapped-provider version metadata. It is not a
+complete replacement for Bionic's global namespace and version lookup rules. A failed custom load is allowed to fall back to Bionic only when cleanup
 is complete and module code has not started; a successful custom load must
 always be released with `csoloader_unload()`, never `dlclose()`.
