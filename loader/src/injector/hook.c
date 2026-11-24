@@ -1145,7 +1145,8 @@ static void api_set_option(void *id, enum rezygisk_options opt) {
     }
     case DLCLOSE_MODULE_LIBRARY: {
       struct rezygisk_module *m_lib = &zygisk_modules[DECODE_ID(id)];
-      m_lib->unload = true;
+      if (!rz_module_request_unload(m_lib))
+        LOGW("Ignoring unload request for module in a closing/invalid state");
 
       break;
     }
@@ -1178,6 +1179,7 @@ bool rezygisk_module_register(struct rezygisk_api *api, struct rezygisk_abi cons
   struct rezygisk_module *m = &zygisk_modules[DECODE_ID(api->impl)];
   m->abi = *target_module;
   m->api = *api;
+  (void)rz_module_set_state(m, MODULE_STATE_REGISTERED);
 
   api->hook_jni_native_methods = hook_jni_methods;
   if (target_module->api_version >= 4) {
@@ -1382,6 +1384,8 @@ static bool load_modules_only(void) {
       continue;
     }
 
+    (void)rz_module_set_state(module, MODULE_STATE_LOADING);
+
     /*
      * Prefer CSOLoader, but do not make a module unavailable solely because
      * the custom linker cannot handle a device-/module-specific ELF feature.
@@ -1409,6 +1413,8 @@ static bool load_modules_only(void) {
       }
       module->loader_backend = MODULE_LOADER_SYSTEM;
     }
+
+    (void)rz_module_set_state(module, MODULE_STATE_IMAGE_LOADED);
 
     struct stat st;
     if (stat(lib_path, &st) != 0) {
@@ -1444,11 +1450,13 @@ static bool load_modules_only(void) {
     module->api.register_module = rezygisk_module_register;
     module->api.impl = ENCODE_ID((void *)zygisk_module_length);
     module->zygisk_module_entry = (void (*)(void *, void *))entry;
+    (void)rz_module_set_state(module, MODULE_STATE_ENTRY_RUNNING);
 
     LOGD("Loaded module [%s] using %s linker. Entry: %p", lib_path,
          module->loader_backend == MODULE_LOADER_CSO ? "CSO" : "system", entry);
 
     module->unload = false;
+    (void)rz_module_set_state(module, MODULE_STATE_ACTIVE);
     zygisk_module_length++;
   }
 
@@ -1479,9 +1487,10 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
     if (FLAG_GET(ctx, APP_SPECIALIZE)) rz_module_call_post_app_specialize(m, ctx->args.app);
     else if (FLAG_GET(ctx, SERVER_FORK_AND_SPECIALIZE)) rz_module_call_post_server_specialize(m, ctx->args.server);
 
-    if (m->unload && !rz_module_sync_close_and_wait(m)) {
+    if (rz_module_unload_requested(m) && !rz_module_sync_close_and_wait(m)) {
       LOGE("Module [%s] still has active callbacks; retaining image",
            m->lib.lib_path ? m->lib.lib_path : "system-linker module");
+      (void)rz_module_set_state(m, MODULE_STATE_RETAINED);
       if (m->loader_backend == MODULE_LOADER_CSO) {
         csoloader_pin();
         all_cso_modules_unloaded = false;
@@ -1492,7 +1501,7 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
 
     if (m->loader_backend == MODULE_LOADER_CSO) {
       had_cso_module = true;
-      if (!m->unload) {
+      if (!rz_module_unload_requested(m)) {
         LOGD("Abandoning CSOLoader image at %p", m->lib.img ? m->lib.img->header : NULL);
         csoloader_pin();
         all_cso_modules_unloaded = false;
@@ -1512,7 +1521,7 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
         continue;
       }
     } else if (m->loader_backend == MODULE_LOADER_SYSTEM) {
-      if (!m->unload) {
+      if (!rz_module_unload_requested(m)) {
         /* Intentional residency: keep the dlopen reference and its handle alive. */
         LOGD("Keeping system-linker module resident: %p", m->system_handle);
         continue;
