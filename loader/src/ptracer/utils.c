@@ -170,7 +170,8 @@ void *find_func_addr_info(struct maps_info *local_info,
 
   uintptr_t local_symbol = elf_find_symbol_info((void *)local_base, func,
                                                  out_type);
-  if (!local_symbol || local_symbol < local_base) return NULL;
+  if (!local_symbol) return NULL;
+  if (local_symbol < local_base) return (void *)local_symbol;
   uintptr_t offset = local_symbol - local_base;
   if (offset > UINTPTR_MAX - remote_base) return NULL;
   return (void *)(remote_base + offset);
