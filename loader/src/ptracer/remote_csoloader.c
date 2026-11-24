@@ -364,15 +364,24 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   size_t verdef_num = 0;
   size_t strsz = 0;
   size_t syment = 0;
+  bool has_syment = false;
 
   size_t needed_count = 0;
   bool has_dt_null = false;
+  if (dyn_count == 0 || dyn_count > 4096) {
+    LOGE("PT_DYNAMIC entry count exceeds parser limit");
+    goto cleanup;
+  }
   for (size_t i = 0; i < dyn_count; i++) {
     if (dyn[i].d_tag == DT_NEEDED) needed_count++;
     if (dyn[i].d_tag == DT_NULL) {
       has_dt_null = true;
       break;
     }
+  }
+  if (needed_count > 4096) {
+    LOGE("DT_NEEDED count exceeds parser limit");
+    goto cleanup;
   }
   if (!has_dt_null) {
     LOGE("PT_DYNAMIC has no DT_NULL terminator");
@@ -395,7 +404,10 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       case DT_SYMTAB:    symtab_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
       case DT_STRTAB:    strtab_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
       case DT_STRSZ:     strsz = (size_t)dyn[i].d_un.d_val; break;
-      case DT_SYMENT:    syment = (size_t)dyn[i].d_un.d_val; break;
+      case DT_SYMENT:
+        syment = (size_t)dyn[i].d_un.d_val;
+        has_syment = true;
+        break;
       case DT_REL:       rel_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
       case DT_RELSZ:     rel_sz = (size_t)dyn[i].d_un.d_val; break;
       case DT_RELA:      rela_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
@@ -486,9 +498,8 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   }
 
   /* INFO: Validate required entries */
-  if (!syment) syment = sizeof(ElfW(Sym));
-
-  if (!symtab_vaddr || !strtab_vaddr || !strsz) {
+  if (!has_syment || syment != sizeof(ElfW(Sym)) ||
+      !symtab_vaddr || !strtab_vaddr || !strsz) {
     LOGE("Missing DT_SYMTAB/DT_STRTAB/DT_STRSZ");
 
     goto cleanup;
@@ -1152,6 +1163,9 @@ static bool validate_verdef_table(int fd, const struct elf_dyn_info *info,
           aux.vda_name >= info->strsz ||
           !memchr(info->strtab + aux.vda_name, '\0',
                   info->strsz - aux.vda_name))
+        return false;
+      if (j == 0 &&
+          def.vd_hash != elf_sysv_hash(info->strtab + aux.vda_name))
         return false;
       if (j + 1 < def.vd_cnt) {
         if (aux.vda_next == 0 || aux_addr > UINTPTR_MAX - aux.vda_next)
