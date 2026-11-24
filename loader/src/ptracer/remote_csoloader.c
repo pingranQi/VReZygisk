@@ -20,6 +20,7 @@
 #include <elf.h>
 #include <link.h>
 #include <sys/syscall.h>
+#include <sys/auxv.h>
 
 #undef SYS_mmap
 #define SYS_mmap LP_SELECT(__NR_mmap2, __NR_mmap)
@@ -989,6 +990,93 @@ static bool validate_verdef_table(int fd, const struct elf_dyn_info *info,
     }
   }
   return true;
+}
+
+struct remote_ifunc_args {
+  unsigned long size;
+  unsigned long hwcap;
+  unsigned long hwcap2;
+};
+
+/*
+ * Execute an AArch64 IFUNC resolver inside the target process. A private
+ * scratch mapping supplies an isolated stack and resolver argument block.
+ * The resolver returns through address zero, producing the expected SIGSEGV
+ * stop; remote_call verifies the stop PC before accepting x0 as the result.
+ */
+static bool run_remote_ifunc_resolver(int pid, struct user_regs_struct *regs,
+                                      struct maps_info *remote_map,
+                                      uintptr_t resolver,
+                                      uintptr_t *out_address) {
+#if !defined(__aarch64__)
+  (void)pid; (void)regs; (void)remote_map; (void)resolver; (void)out_address;
+  return false;
+#else
+  if (pid <= 0 || !regs || !remote_map || !resolver || !out_address)
+    return false;
+
+  long page_long = sysconf(_SC_PAGESIZE);
+  if (page_long <= 0) return false;
+  size_t page_size = (size_t)page_long;
+  uintptr_t gadget = find_syscall_gadget(pid, remote_map);
+  if (!gadget) return false;
+
+  long mmap_args[6] = {
+    0, (long)page_size, PROT_READ | PROT_WRITE,
+    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
+  };
+  long mapped = remote_syscall(pid, regs, gadget, SYS_mmap, mmap_args, 6);
+  if (remote_syscall_failed(mapped)) {
+    LOGE("Failed to allocate remote IFUNC scratch stack: %ld", mapped);
+    return false;
+  }
+  uintptr_t scratch = (uintptr_t)mapped;
+  uintptr_t args_address = scratch + page_size / 2;
+  struct remote_ifunc_args ifunc_args = {
+    .size = sizeof(struct remote_ifunc_args),
+    .hwcap = getauxval(AT_HWCAP),
+    .hwcap2 = getauxval(AT_HWCAP2)
+  };
+  bool success = false;
+  struct user_regs_struct saved = *regs;
+
+  if (write_proc(pid, args_address, &ifunc_args, sizeof(ifunc_args)) !=
+      (ssize_t)sizeof(ifunc_args)) {
+    LOGE("Failed to write remote IFUNC argument block");
+    goto cleanup;
+  }
+
+  regs->REG_SP = (scratch + page_size - 16) & ~(uintptr_t)0xf;
+  long call_args[2] = {
+    (long)(ifunc_args.hwcap | (1ULL << 62)),
+    (long)args_address
+  };
+  uintptr_t resolved = remote_call(pid, regs, resolver, 0, call_args, 2);
+  if (resolved == 0) {
+    LOGE("Remote IFUNC resolver failed or returned a null address");
+    goto restore;
+  }
+  *out_address = resolved;
+  success = true;
+
+restore:
+  *regs = saved;
+  if (!set_regs(pid, regs)) {
+    LOGE("Failed to restore target registers after IFUNC resolver");
+    success = false;
+  }
+
+cleanup: {
+    long unmap_args[2] = { (long)scratch, (long)page_size };
+    long unmap_result = remote_syscall(pid, regs, gadget, SYS_munmap,
+                                       unmap_args, 2);
+    if (unmap_result != 0) {
+      LOGE("Failed to release remote IFUNC scratch mapping: %ld", unmap_result);
+      success = false;
+    }
+  }
+  return success;
+#endif
 }
 
 /* INFO: Resolve a symbol address - either local or from DT_NEEDED libraries. */
