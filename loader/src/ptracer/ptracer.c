@@ -18,8 +18,8 @@
 
 #include "remote_csoloader.h"
 
-bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, uintptr_t libc_init_got_slot) {
-  LOGI("injecting %s to zygote %d via GOT hook", lib_path, pid);
+bool inject_on_main(int pid, const char *lib_path, const char *entry_symbol, uintptr_t libc_init_target, uintptr_t libc_init_got_slot) {
+  LOGI("injecting %s (%s) to process %d via GOT hook", lib_path, entry_symbol, pid);
 
   uintptr_t break_addr = (uintptr_t)((intptr_t)(-0x0F & ~1) | (intptr_t)(libc_init_target & 1));
   if (!ptrace_poke_uintptr(pid, libc_init_got_slot, break_addr)) {
@@ -92,7 +92,7 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
   uintptr_t remote_base = 0, injector_entry = 0;
   size_t remote_size = 0;
 
-  if (!remote_csoloader_load_and_resolve_entry(pid, &regs, map, local_map, lib_path, &remote_base, &remote_size, &injector_entry)) {
+  if (!remote_csoloader_load_and_resolve_entry(pid, &regs, map, local_map, lib_path, entry_symbol, &remote_base, &remote_size, &injector_entry)) {
     LOGE("Remote CSOLoader mapping failed");
 
     free_maps(local_map);
@@ -157,7 +157,7 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
     return false;                             \
   }
 
-bool trace_zygote(int pid) {
+static bool trace_process(int pid, const char *entry_symbol) {
   LOGI("start tracing %d (tracer %d)", pid, getpid());
 
   /* INFO: Set value 0 to make compiler happy. */
@@ -201,7 +201,7 @@ bool trace_zygote(int pid) {
 
   if (STOPPED_WITH(SIGSTOP, PTRACE_EVENT_STOP)) {
     char *lib_path = "/data/adb/modules/rezygisk/lib64/libzygisk.so";
-    if (!inject_on_main(pid, lib_path, libc_init_resolved, libc_init_got_slot)) {
+    if (!inject_on_main(pid, lib_path, entry_symbol, libc_init_resolved, libc_init_got_slot)) {
       LOGE("failed to inject");
 
       return false;
@@ -258,4 +258,19 @@ bool trace_zygote(int pid) {
   }
 
   return true;
+}
+
+
+bool trace_zygote(int pid) {
+  return trace_process(pid, "entry");
+}
+
+bool trace_zn_target(int pid) {
+  bool ok = trace_process(pid, "zn_entry");
+  if (!ok) {
+    /* A failed optional ZN injection must not leave an init service stopped. */
+    (void)ptrace(PTRACE_DETACH, pid, 0, SIGCONT);
+    (void)kill(pid, SIGCONT);
+  }
+  return ok;
 }
