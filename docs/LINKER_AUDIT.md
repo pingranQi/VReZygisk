@@ -1,79 +1,73 @@
 # Linker overhaul audit
 
-> Scope: ARM64-only VReZygisk. This document records the initial source audit before implementation.
+> Scope: ARM64-only VReZygisk. This document records implemented behavior and remaining compatibility boundaries.
 > Reference projects: YukiZygisk/YukiLinker and Zygisk Next (ZN Linker).
-> This is an engineering plan, not a claim that the listed features are implemented.
 
-## Existing architecture
+## Architecture
 
-VReZygisk currently has two distinct loading paths:
+VReZygisk has two independent loading paths:
 
-1. **In-process module loader**: `loader/src/injector/hook.c` calls the pinned CSOLoader submodule first and can fall back to Bionic `dlopen`. CSOLoader is pinned at `0d29278cf60a3c38850dde3eaf07b0ffc3241f03`.
-2. **Ptracer bootstrap mapper**: `loader/src/ptracer/remote_csoloader.c` maps the initial ELF into the target process, resolves its dynamic dependencies and relocations, and resolves the entry point. This is a separate implementation; improvements to CSOLoader do not automatically improve this path.
-
-Keep these paths separate in the design and test plans. They have different address spaces, dependency resolution constraints, and rollback requirements.
+1. **In-process module loader**: `loader/src/injector/hook.c` uses the pinned CSOLoader submodule or Bionic `dlopen`. CSOLoader is pinned at `0d29278cf60a3c38850dde3eaf07b0ffc3241f03`.
+2. **Ptracer bootstrap mapper**: `loader/src/ptracer/remote_csoloader.c` maps the bootstrap ELF into the target process, builds its dependency scope, applies relocations, and resolves the entry point. It must not confuse injector addresses with target addresses.
 
 ## Implemented in this branch
 
-- Serialized CSOLoader lifecycle and symbol operations, active-image accounting, partial-load cleanup, and pre-constructor path allocation.
-- Bounded ELF64/AArch64 PT_DYNAMIC inspection; Bionic routing for PT_TLS and GNU symbol-versioned images.
-- Build-time hardening of CSOLoader TLS key creation, TLS allocation metadata, per-thread module generations, module-ID reuse and registration failure propagation.
-- Fail-closed remote bootstrap handling for unsupported standard/Android RELR, Android packed relocation, GNU versioning, PT_TLS and IFUNC metadata; defined-symbol bounds and SHN_ABS handling.
+### GNU symbol versioning
 
-### Remaining findings
+- Parses `DT_VERSYM`, `DT_VERNEED`, `DT_VERNEEDNUM`, `DT_VERDEF`, and `DT_VERDEFNUM` with file-backed PT_LOAD range checks.
+- Validates the complete `DT_VERSYM` table against the dynamic symbol count and validates GNU version-definition chains.
+- For undefined symbols with a version requirement, resolves the exact provider SONAME and version through the local Bionic `dlvsym()`, then translates the provider-relative offset to the corresponding target mapping.
+- If local Bionic cannot resolve the provider/version, bootstrap fails closed.
+- The in-process CSOLoader feature probe still routes versioned images to Bionic; its section-oriented symbol parser has not been extended with a complete GNU version resolver.
 
-### P0 — correctness and memory-safety gates
+### Dependency graph and symbol scope
 
-- The remote mapper explicitly rejects `PT_TLS`, `DT_RELR`, Android packed relocations, GNU symbol-version tags and `STT_GNU_IFUNC`. These are honest fail-closed checks and must remain until complete implementations and tests exist.
-- The remote mapper supports a deliberately small relocation set. On AArch64 its RELA path handles RELATIVE, GLOB_DAT, JUMP_SLOT and ABS64; unsupported types fail. TLS, IRELATIVE and other architecture-specific cases are not handled there.
-- Segment bookkeeping uses a fixed 64-entry array. The parser must reject excess PT_LOAD entries before mapping; silent truncation would leave permissions incomplete.
-- All dynamic pointers and relocation targets must be proven to fall inside validated PT_LOAD/file-backed ranges before reads, writes or arithmetic. Keep file offsets distinct from target virtual addresses.
-- Failure after remote mapping begins must restore target registers and release every remote fd/mapping. Cleanup errors need to be preserved separately from the original failure.
-- The remote bootstrap resolver currently searches the image's direct DT_NEEDED libraries only. It does not yet construct the complete ordered transitive/global lookup scope; keep unresolved symbols fail-closed rather than searching arbitrary resident mappings.
-- In-process CSOLoader supports a pthread-key based emulated TLS implementation (128 module slots), including AArch64 DTPMOD/DTPREL/TPREL and TLSDESC paths. This is not Bionic's native static-TLS ABI; ordinary modules with PT_TLS are therefore routed to Bionic by the VReZygisk integration until the emulation has dedicated device tests.
-- CSOLoader's symbol parser is section-header-oriented and does not implement GNU symbol version selection. VReZygisk detects GNU version tags in PT_DYNAMIC and routes those images to Bionic rather than silently performing unversioned lookup.
-- The pinned CSOLoader contains Android packed relocation, RELR, IFUNC and IRELATIVE handling. Those implementations still require dedicated regression tests; the separate ptracer bootstrap mapper deliberately rejects the unsupported formats.
-- CSOLoader has process-global active-linker and TLS registries. VReZygisk serializes its public load, lookup, unload, abandon and deinit calls with a recursive process mutex; the module entry point and specialization callbacks are deliberately invoked outside that mutex.
-- A build-time patch hardens TLS key creation and registration failures, per-thread TLS block generation tracking (including module-ID reuse), alignment and offset validation, and TLS registry failure propagation.
+- Builds the remote dependency search scope breadth-first: all direct `DT_NEEDED` entries first, followed by their transitive dependencies in discovery order.
+- De-duplicates by SONAME/basename, which terminates cycles and avoids duplicate entries caused by path aliases.
+- Rejects missing direct dependencies, unreadable dependency metadata, and missing non-alias transitive dependencies rather than continuing with an incomplete scope.
+- Symbol resolution checks the main image first, then the ordered dependency scope; weak undefined symbols resolve to zero only after the scope is exhausted.
+- This is a dependency-local scope, not a complete Bionic global namespace implementation. It does not enumerate arbitrary `RTLD_GLOBAL` objects, model namespace isolation, or fully implement all `RTLD_LOCAL`/symbolic lookup rules. SONAME matching currently uses the mapped filename basename; unusual SONAME/path arrangements need device fixtures.
 
-### P1 — ABI and linker compatibility
+### Relocations and remote resolvers
 
-- If the remote bootstrap mapper needs these formats, add bounded Android packed REL/RELA and RELR decoding with transactional rollback; until then its fail-closed rejection is intentional.
-- Add GNU symbol version selection to the custom backend only if Bionic fallback is no longer sufficient; the current in-process policy routes versioned images to Bionic.
-- Audit symbol scope and precedence: main image, ordered DT_NEEDED dependencies, global/weak symbols, visibility, symbol type, version, and duplicate names.
-- Audit the in-process IFUNC/IRELATIVE implementation with regression fixtures. The remote bootstrap mapper must continue rejecting these until it can execute resolvers in the target process with defined ordering and rollback.
-- Audit dependency recursion, cycles, duplicate SONAMEs, maximum dependency count, path provenance and missing dependency behavior.
-- Audit constructor/destructor order, `DT_INIT`/`DT_INIT_ARRAY`, `DT_FINI_ARRAY`/`DT_FINI`, partial constructor failure, and one-time finalization.
+- Supports standard `DT_RELR` and Android `DT_ANDROID_RELR` tables, including optional `DT_ANDROID_RELRCOUNT` validation.
+- Supports Android APS2 packed **RELA** decoding with bounded SLEB128 parsing and the AArch64 RELATIVE, IRELATIVE, GLOB_DAT, JUMP_SLOT and ABS64 relocation subset.
+- Executes AArch64 IFUNC and IRELATIVE resolver functions in the stopped target process, using a temporary target mapping and restoring the saved register state afterward.
+- Unsupported Android packed REL, TLS relocation families, and unsupported AArch64 relocation types remain fail-closed.
+- The in-process pinned CSOLoader already contains Android packed relocation, RELR, IFUNC and IRELATIVE implementations.
 
-### P2 — lifecycle, observability and maintainability
+### Lifecycle and concurrency
 
-- Define an explicit image state machine: parsed -> reserved -> mapped -> relocated -> protected -> initialized -> active -> finalizing -> unmapped. Every transition needs rollback semantics.
-- Make load/unload and shared dependency ownership safe under concurrent requests. Existing CSOLoader global TLS/linker state and active-linker tracking require a concurrency audit.
-- Validate W^X and PT_GNU_RELRO final permissions, page overlap, BSS tails, segment alignment and cache maintenance.
-- Add structured diagnostics identifying stage, ELF object, dynamic tag/relocation, symbol, target address, errno and cleanup status.
-- Preallocate CSOLoader path bookkeeping before constructors so custom-loader failure cannot fall back to Bionic after module code has executed.
-- Add host-side ELF fixtures and Android device tests for API levels, Bionic variants, concurrent load/unload, fork, TLS, C++ exceptions/unwind and module callbacks.
+- CSOLoader load, symbol lookup, unload, abandon and deinit are serialized through a recursive process mutex. Module entry points and specialization callbacks run outside that mutex.
+- Active custom-image accounting prevents global CSOLoader deinit while a tracked image remains active. A failed custom load is eligible for Bionic fallback only before module code has executed and after cleanup.
+- Module callbacks acquire execution leases. Unload closes the lease gate, waits for active callbacks to leave, then releases the backend-specific handle. A failed release pins the image and prevents unmapping the containing runtime.
+- Module lifecycle states cover new, loading, image-loaded, entry-running, registered, active, closing, retained, failed/unloaded bookkeeping.
+- The build-time CSOLoader patch adds per-image constructor/destructor state. Constructors are called once; destructors run once and only for images whose constructors completed. Dependency finalization follows reverse load/constructor order.
+- Dependency ownership is currently per CSOLoader instance. There is no process-wide shared dependency reference-count registry across independent CSOLoader instances; concurrent public operations are serialized, but duplicate dependency mappings across separate module linkers are still possible.
+
+### TLS policy
+
+- The pinned CSOLoader contains pthread-key based emulated TLS. The build-time patch checks TLS key creation and thread registration, validates allocation alignment and offsets, and tracks per-thread module generations to prevent stale TLS block reuse after module-ID recycling.
+- Emulated TLS is not claimed to be equivalent to Bionic's native static-TLS ABI. In-process images with `PT_TLS` are routed to Bionic.
+- The ptracer bootstrap mapper rejects `PT_TLS` and TLS symbols/relocations.
+
+## Remaining correctness gates
+
+1. **Global symbol scope**: implement only with explicit namespace and visibility semantics. Do not resolve from arbitrary resident mappings as a shortcut.
+2. **Dependency identity**: parse and honor `DT_SONAME` rather than relying solely on basename matching; add fixtures for aliases and duplicate SONAMEs.
+3. **Shared dependency ownership**: a process-wide image registry/refcount is not implemented across separate CSOLoader instances. Until that exists, do not claim shared-object de-duplication across independent module loads.
+4. **GNU versioning**: remote undefined-symbol version lookup relies on the local Bionic `dlvsym` implementation and a matching local provider mapping. Full custom-linker version lookup, versioned symbol export selection, version inheritance and namespace-specific provider resolution are not implemented.
+5. **Remote resolver ABI**: IFUNC/IRELATIVE execution needs device validation for resolver calling convention, target auxv/HWCAP handling, stack alignment, signal-stop verification, resolver reentrancy and cleanup after abnormal termination.
+6. **Relocation coverage**: Android packed REL and TLS relocation families remain unsupported; other relocation types fail closed.
+7. **Constructor failure semantics**: ELF constructors have no standard error return. State tracking prevents duplicate finalization, but cannot roll back arbitrary side effects performed by a constructor that terminates the process or faults.
+8. **Real-device matrix**: no claim of Android runtime correctness until tested across supported API levels, Bionic revisions, fork behavior, thread exit, C++ unwind, constructor/destructor order, and concurrent load/unload stress.
+
+## Validation status
+
+The GitHub Actions build verifies pinned submodules, idempotent build-time patching, Android NDK Debug/Release compilation, and artifact packaging. CI success is not a substitute for on-device runtime tests. The feature branch remains separate from `main` and the pull request remains a review candidate.
 
 ## Reference-derived design points
 
-- **YukiLinker** demonstrates a separate loader runtime with explicit library ownership, execution leases, retained failed operations, private-image tracking and controlled Bionic fallback. The transferable lesson is lifecycle discipline and backend boundaries, not copying its kernel/runtime integration.
-- **ZN Linker** documents a staged feature set: packed relocations, RELR, TLS relocation, symbol lookup and lifecycle-related compatibility. Treat each feature as an independently testable capability, not a single "custom linker enabled" switch.
-- VReZygisk should retain Bionic fallback for unsupported images. A custom backend must report a precise failure and fully roll back before fallback; never fall back after constructors or other image code may have executed unless the state is proven safe.
-
-## Implementation sequence
-
-1. Freeze the existing CSOLoader submodule pin and record baseline build/test behavior.
-2. Serialize access to CSOLoader's process-global registries and keep callbacks outside the lock.
-3. Harden CSOLoader's emulated TLS registry against key-creation failure, TLS module-ID reuse, invalid offsets and incomplete registration.
-4. Add a bounded PT_DYNAMIC feature probe; route PT_TLS and GNU symbol versioning to Bionic, while keeping CSOLoader's existing Android packed relocation and RELR support behind its custom backend.
-5. Harden the remote ELF parser and mapping transaction without expanding supported relocation types.
-6. Implement missing remote relocation and resolver features only with a target-thread execution model, rollback and regression fixtures.
-7. Add GNU symbol version selection to the custom backend only when the dependency can be safely extended; until then Bionic handles versioned images.
-8. Add stress, fork, unload, Android API matrix and device validation; update support claims only after evidence exists.
-
-## Non-goals for this branch
-
-- No blind source-code or binary copying from reference projects.
-- No bypass claims or guarantees against third-party detection.
-- No weakening of ELF validation or fail-closed behavior to make more modules appear to load.
-- No change to the main branch until the branch passes review and CI.
+- YukiLinker demonstrates explicit image ownership, execution leases, retained failed operations and controlled Bionic fallback. The transferable lesson is lifecycle discipline and backend boundaries.
+- ZN Linker demonstrates staged support for packed relocations, RELR, TLS and symbol lookup. Each capability needs independent tests rather than one broad "custom linker supported" claim.
+- A custom backend must report precise failure and fully roll back before Bionic fallback. Never fall back after constructors or other image code may have executed unless execution state proves that doing so is safe.
