@@ -21,6 +21,7 @@
 #include "logging.h"
 #include "socket_utils.h"
 #include "zygisk_next_api.h"
+#include "zn_hook.h"
 
 struct ZnSymbolResolver {
   uintptr_t base;
@@ -120,17 +121,14 @@ static int api_plt_hook(void *base_addr, const char *symbol,
   return ok ? ZN_SUCCESS : ZN_FAILED;
 }
 
-static int api_unsupported_inline_hook(void *target, void *handler,
-                                       void **original) {
-  (void)target; (void)handler; (void)original;
-  LOGW("ZN inlineHook backend is not initialized");
-  return ZN_FAILED;
+static int api_inline_hook(void *target, void *handler,
+                           void **original) {
+  return zn_inline_hook(target, handler, original,
+                        __builtin_return_address(0));
 }
 
-static int api_unsupported_inline_unhook(void *target) {
-  (void)target;
-  LOGW("ZN inlineUnhook backend is not initialized");
-  return ZN_FAILED;
+static int api_inline_unhook(void *target) {
+  return zn_inline_unhook(target, __builtin_return_address(0));
 }
 
 static bool hyos_in_child(void);
@@ -669,8 +667,8 @@ static void api_for_each_symbols(
 
 static const struct ZygiskNextAPI g_zn_api = {
   .pltHook = api_plt_hook,
-  .inlineHook = api_unsupported_inline_hook,
-  .inlineUnhook = api_unsupported_inline_unhook,
+  .inlineHook = api_inline_hook,
+  .inlineUnhook = api_inline_unhook,
   .newSymbolResolver = api_new_symbol_resolver,
   .freeSymbolResolver = api_free_symbol_resolver,
   .getBaseAddress = api_get_base_address,
