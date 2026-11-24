@@ -9,6 +9,7 @@
 #endif
 
 #include <stdlib.h>
+#include <limits.h>
 #include <inttypes.h>
 #include <string.h>
 
