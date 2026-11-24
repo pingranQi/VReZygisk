@@ -238,8 +238,6 @@ static void csoloader_deinit_if_safe(void) {
  * than allowing the section-oriented CSOLoader parser to mis-link the image. */
 struct linker_elf_features {
   bool has_gnu_versions;
-  bool has_android_packed_relocs;
-  bool has_relr;
   bool has_pt_tls;
 };
 
@@ -339,17 +337,6 @@ static bool inspect_linker_elf(const char *path, struct linker_elf_features *fea
           case 0x6fffffffULL: /* DT_VERNEEDNUM */
             features->has_gnu_versions = true;
             break;
-          case 0x6000000fULL: /* DT_ANDROID_REL */
-          case 0x60000010ULL: /* DT_ANDROID_RELSZ */
-          case 0x60000011ULL: /* DT_ANDROID_RELA */
-          case 0x60000012ULL: /* DT_ANDROID_RELASZ */
-            features->has_android_packed_relocs = true;
-            break;
-          case 35: /* DT_RELRSZ */
-          case 36: /* DT_RELR */
-          case 37: /* DT_RELRENT */
-            features->has_relr = true;
-            break;
           default:
             break;
         }
@@ -371,11 +358,9 @@ static bool requires_system_linker(const char *path) {
     LOGW("Unable to validate ELF metadata for [%s]; using Bionic linker", path);
     return true;
   }
-  if (features.has_pt_tls || features.has_gnu_versions ||
-      features.has_android_packed_relocs || features.has_relr) {
-    LOGI("Using Bionic linker for [%s]: PT_TLS=%d GNU versions=%d Android packed relocations=%d RELR=%d",
-         path, features.has_pt_tls, features.has_gnu_versions,
-         features.has_android_packed_relocs, features.has_relr);
+  if (features.has_pt_tls || features.has_gnu_versions) {
+    LOGI("Using Bionic linker for [%s]: PT_TLS=%d GNU versions=%d",
+         path, features.has_pt_tls, features.has_gnu_versions);
     return true;
   }
   return false;
