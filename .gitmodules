@@ -4,3 +4,7 @@
 [submodule "CSOLoader"]
 	path = loader/src/external/csoloader
 	url = https://github.com/ThePedroo/CSOLoader
+
+[submodule "ShadowHook"]
+	path = loader/src/external/shadowhook
+	url = https://github.com/bytedance/android-inline-hook
