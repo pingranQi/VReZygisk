@@ -21,6 +21,12 @@
 #ifndef DT_VERDEFNUM
 #define DT_VERDEFNUM 0x6ffffffd
 #endif
+#ifndef DT_VERNEED
+#define DT_VERNEED 0x6ffffffe
+#endif
+#ifndef DT_VERNEEDNUM
+#define DT_VERNEEDNUM 0x6fffffff
+#endif
 #ifndef STT_GNU_IFUNC
 #define STT_GNU_IFUNC 10
 #endif
@@ -29,6 +35,9 @@
 #endif
 #ifndef VER_NDX_GLOBAL
 #define VER_NDX_GLOBAL 1
+#endif
+#ifndef VER_NEED_CURRENT
+#define VER_NEED_CURRENT 1
 #endif
 
 #define VER_NDX_MASK 0x7fffU
