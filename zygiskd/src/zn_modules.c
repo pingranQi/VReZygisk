@@ -175,6 +175,7 @@ static void parse_manifest(const char *module_id, const char *module_dir,
     }
     entry.companion = (uint8_t)(option != NULL);
     entry.companion_fd = -1;
+    entry.companion_pid = -1;
     entry.companion_broker_fd = -1;
     entry.companion_broker_running = false;
     entry.module_id = strdup(module_id);
