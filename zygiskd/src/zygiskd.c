@@ -9,6 +9,7 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <pthread.h>
 
 #include <linux/limits.h>
 #include <linux/memfd.h>
@@ -29,6 +30,7 @@ struct Context {
   struct Module *modules;
   size_t len;
   struct zn_module_list zn_modules;
+  pthread_mutex_t zn_mutex;
 };
 
 struct rzd_msg_header {
@@ -445,12 +447,193 @@ static int spawn_zn_companion(char *restrict argv[], const char *module_id,
   return daemon_fd;
 }
 
+struct zn_broker_thread_args {
+  struct Context *context;
+  size_t module_index;
+  int broker_fd;
+  char **argv;
+};
+
+static void *zn_companion_broker_thread(void *opaque) {
+  struct zn_broker_thread_args *args = opaque;
+  struct Context *context = args->context;
+  const size_t index = args->module_index;
+  const int broker_fd = args->broker_fd;
+  char **argv = args->argv;
+  free(args);
+
+  LOGI("ZN companion broker started for manifest index %zu", index);
+  for (;;) {
+    int client_fd = read_fd(broker_fd);
+    if (client_fd < 0) break;
+
+    bool dispatched = false;
+    pthread_mutex_lock(&context->zn_mutex);
+    if (index < context->zn_modules.count) {
+      struct zn_module_entry *module = &context->zn_modules.items[index];
+      if (module->companion_fd >= 0 &&
+          !check_unix_socket(module->companion_fd, false)) {
+        close(module->companion_fd);
+        module->companion_fd = -1;
+      }
+
+      if (module->companion_fd < 0) {
+        module->companion_fd = spawn_zn_companion(
+            argv, module->module_id, module->library);
+      }
+
+      if (module->companion_fd >= 0 &&
+          write_fd(module->companion_fd, client_fd) == 1) {
+        dispatched = true;
+      } else if (module->companion_fd >= 0) {
+        close(module->companion_fd);
+        module->companion_fd = -1;
+      }
+    }
+    pthread_mutex_unlock(&context->zn_mutex);
+
+    if (!dispatched) {
+      uint8_t ack = 0;
+      (void)write_uint8_t(client_fd, ack);
+    }
+    close(client_fd);
+  }
+
+  close(broker_fd);
+  LOGI("ZN companion broker stopped for manifest index %zu", index);
+  return NULL;
+}
+
+static bool register_zn_companion_broker(int client_fd,
+                                         struct Context *context,
+                                         char **argv) {
+  struct ucred peer = {0};
+  socklen_t peer_size = sizeof(peer);
+  if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) != 0 ||
+      peer.uid != 0) {
+    LOGW("Rejecting ZN companion broker registration from uid %u", peer.uid);
+    (void)write_uint8_t(client_fd, 0);
+    return false;
+  }
+
+  char library[PATH_MAX];
+  if (read_string(client_fd, library, sizeof(library)) < 0) {
+    LOGE("Failed reading ZN companion broker library path");
+    (void)write_uint8_t(client_fd, 0);
+    return false;
+  }
+
+  int broker_fd = read_fd(client_fd);
+  if (broker_fd < 0) {
+    LOGE("Failed receiving ZN companion broker FD");
+    (void)write_uint8_t(client_fd, 0);
+    return false;
+  }
+
+  int socket_type = 0;
+  socklen_t socket_type_size = sizeof(socket_type);
+  if (getsockopt(broker_fd, SOL_SOCKET, SO_TYPE, &socket_type,
+                 &socket_type_size) != 0 || socket_type != SOCK_DGRAM) {
+    LOGW("ZN companion broker must be SOCK_DGRAM");
+    close(broker_fd);
+    (void)write_uint8_t(client_fd, 0);
+    return false;
+  }
+
+  size_t index = SIZE_MAX;
+  for (size_t i = 0; i < context->zn_modules.count; ++i) {
+    const struct zn_module_entry *entry = &context->zn_modules.items[i];
+    if (entry->companion && strcmp(entry->library, library) == 0) {
+      index = i;
+      break;
+    }
+  }
+  if (index == SIZE_MAX) {
+    LOGW("Rejecting broker for undeclared ZN companion library %s", library);
+    close(broker_fd);
+    (void)write_uint8_t(client_fd, 0);
+    return false;
+  }
+
+  struct zn_module_entry *entry = &context->zn_modules.items[index];
+  int old_fd = -1;
+  pthread_t old_thread = (pthread_t)0;
+  bool join_old = false;
+
+  pthread_mutex_lock(&context->zn_mutex);
+  if (entry->companion_broker_fd >= 0) {
+    old_fd = entry->companion_broker_fd;
+    old_thread = entry->companion_broker_thread;
+    join_old = entry->companion_broker_running;
+    entry->companion_broker_fd = -1;
+    entry->companion_broker_running = false;
+  }
+  pthread_mutex_unlock(&context->zn_mutex);
+
+  if (old_fd >= 0) {
+    (void)shutdown(old_fd, SHUT_RDWR);
+    close(old_fd);
+  }
+  if (join_old) pthread_join(old_thread, NULL);
+
+  struct zn_broker_thread_args *args = calloc(1, sizeof(*args));
+  if (!args) {
+    close(broker_fd);
+    (void)write_uint8_t(client_fd, 0);
+    return false;
+  }
+  args->context = context;
+  args->module_index = index;
+  args->broker_fd = broker_fd;
+  args->argv = argv;
+
+  pthread_mutex_lock(&context->zn_mutex);
+  entry->companion_broker_fd = broker_fd;
+  int result = pthread_create(&entry->companion_broker_thread, NULL,
+                              zn_companion_broker_thread, args);
+  if (result == 0) {
+    entry->companion_broker_running = true;
+  } else {
+    entry->companion_broker_fd = -1;
+    entry->companion_broker_running = false;
+  }
+  pthread_mutex_unlock(&context->zn_mutex);
+
+  if (result != 0) {
+    LOGE("Failed starting ZN companion broker thread: %s", strerror(result));
+    free(args);
+    close(broker_fd);
+    (void)write_uint8_t(client_fd, 0);
+    return false;
+  }
+
+  LOGI("Registered ZN companion broker for %s", library);
+  (void)write_uint8_t(client_fd, 1);
+  return true;
+}
+
+static void stop_zn_companion_brokers(struct Context *context) {
+  for (size_t i = 0; i < context->zn_modules.count; ++i) {
+    struct zn_module_entry *entry = &context->zn_modules.items[i];
+    if (entry->companion_broker_fd >= 0) {
+      (void)shutdown(entry->companion_broker_fd, SHUT_RDWR);
+      close(entry->companion_broker_fd);
+      entry->companion_broker_fd = -1;
+    }
+    if (entry->companion_broker_running) {
+      pthread_join(entry->companion_broker_thread, NULL);
+      entry->companion_broker_running = false;
+    }
+  }
+}
+
 /* WARNING: Dynamic memory based */
 void zygiskd_start(char *restrict argv[]) {
   /* INFO: When implementation is None or Multiple, it won't set the values
             for the context, causing it to have garbage values. In response
             to that, "= { 0 }" is used to ensure that the values are clean. */
   struct Context context = { 0 };
+  pthread_mutex_init(&context.zn_mutex, NULL);
 
   struct root_impl impl;
   get_impl(&impl);
@@ -691,6 +874,10 @@ void zygiskd_start(char *restrict argv[]) {
           }
         }
 
+        break;
+      }
+      case RegisterZnCompanionBroker: {
+        (void)register_zn_companion_broker(client_fd, &context, argv);
         break;
       }
       case GetZnModuleFd: {
@@ -1000,6 +1187,7 @@ void zygiskd_start(char *restrict argv[]) {
 
   close(socket_fd);
   free_modules(&context);
+  stop_zn_companion_brokers(&context);
   zn_modules_free(&context.zn_modules);
   root_impl_cleanup();
 }
