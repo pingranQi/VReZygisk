@@ -22,8 +22,10 @@ Keep these paths separate in the design and test plans. They have different addr
 - Segment bookkeeping uses a fixed 64-entry array. The parser must reject excess PT_LOAD entries before mapping; silent truncation would leave permissions incomplete.
 - All dynamic pointers and relocation targets must be proven to fall inside validated PT_LOAD/file-backed ranges before reads, writes or arithmetic. Keep file offsets distinct from target virtual addresses.
 - Failure after remote mapping begins must restore target registers and release every remote fd/mapping. Cleanup errors need to be preserved separately from the original failure.
-- In-process CSOLoader's ELF parser is section-header-oriented in several paths. Runtime loading must not depend on section headers being present; PT_DYNAMIC and dynamic tags are the authoritative runtime metadata.
-- CSOLoader's TLS implementation is a pthread-key based emulation with a fixed 128-module table. It is not equivalent to Bionic's native TLS ABI. Audit thread-exit, unload/reuse, fork, concurrent registration and TLSDESC semantics before expanding its support claims.
+- In-process CSOLoader supports a pthread-key based emulated TLS implementation (128 module slots), including AArch64 DTPMOD/DTPREL/TPREL and TLSDESC paths. This is not Bionic's native static-TLS ABI; ordinary modules with PT_TLS are therefore routed to Bionic by the VReZygisk integration until the emulation has dedicated device tests.
+- CSOLoader's symbol parser is section-header-oriented and does not implement GNU symbol version selection. VReZygisk now detects GNU version tags in PT_DYNAMIC and routes those images to Bionic rather than silently performing unversioned lookup.
+- CSOLoader does not consume Android packed relocation or RELR dynamic tables. The integration now detects these tags and routes such images to Bionic.
+- CSOLoader has process-global active-linker and TLS registries. VReZygisk serializes its public load, lookup, unload, abandon and deinit calls with a process mutex; the module entry point and specialization callbacks are deliberately invoked outside that mutex.
 
 ### P1 — ABI and linker compatibility
 
@@ -50,13 +52,13 @@ Keep these paths separate in the design and test plans. They have different addr
 
 ## Implementation sequence
 
-1. Freeze the existing submodule pin and record baseline build/test behavior.
-2. Harden the remote ELF parser and mapping transaction without expanding supported relocation types.
-3. Add a dedicated ELF/dynamic-table validation layer and regression fixtures.
-4. Improve in-process CSOLoader integration and lifecycle/error contracts; upstream reusable fixes where practical.
-5. Add relocation and symbol features incrementally: RELR, Android packed relocations, GNU symbol versions, then IFUNC/IRELATIVE only with a safe resolver execution model.
-6. Rework TLS only after deciding whether the supported ABI is emulated TLS or true Bionic-compatible TLS. Do not advertise the former as the latter.
-7. Add stress, fork, unload, Android API matrix and device validation; update documentation only after evidence exists.
+1. Freeze the existing CSOLoader submodule pin and record baseline build/test behavior.
+2. Serialize access to CSOLoader's process-global registries and keep callbacks outside the lock.
+3. Add a bounded PT_DYNAMIC feature probe; route PT_TLS, GNU symbol versioning, Android packed relocations and RELR to Bionic until native custom support is implemented and tested.
+4. Harden the remote ELF parser and mapping transaction without expanding supported relocation types.
+5. Implement missing remote relocation and resolver features only with a target-thread execution model, rollback and regression fixtures.
+6. Add symbol scope/versioning and TLS ABI support to the custom backend only when the pinned dependency can be safely patched and validated.
+7. Add stress, fork, unload, Android API matrix and device validation; update support claims only after evidence exists.
 
 ## Non-goals for this branch
 
