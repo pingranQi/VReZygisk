@@ -481,6 +481,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       (android_relr_vaddr == 0) != (android_relr_sz == 0) ||
       (android_relr_sz && android_relrent != sizeof(ElfW(Addr))) ||
       (!android_relr_sz && android_relrent != 0) ||
+      (relr_sz && android_relr_sz) ||
       (has_android_relr_count && !android_relr_sz) ||
       (android_relr_count > 10000000) ||
       (android_rela_vaddr == 0) != (android_rela_sz == 0) ||
