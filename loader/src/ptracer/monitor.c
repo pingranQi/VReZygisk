@@ -28,6 +28,8 @@ struct environment_information {
   char *root_impl;
   char **modules;
   uint32_t modules_len;
+  struct zn_module_list zn_modules;
+  bool zn_inventory_available;
 };
 
 static struct environment_information environment_information64;
@@ -356,6 +358,14 @@ void rezygiskd_listener_callback() {
           LOGD("%s module %zu: %s", daemon_name, i, environment_information->modules[i]);
 
           raw_modules += strlen(environment_information->modules[i]) + 1;
+        }
+
+        if (msg->cmd == DAEMON64_SET_INFO) {
+          if (refresh_zn_targets(&environment_information64.zn_modules)) {
+            environment_information64.zn_inventory_available = true;
+          } else {
+            environment_information64.zn_inventory_available = false;
+          }
         }
 
         update_status(NULL);
@@ -825,6 +835,70 @@ void sigchld_listener_stop() {
 static char pre_section[1024];
 static char post_section[1024];
 
+static void write_json_string(FILE *fp, const char *value) {
+  fputc('"', fp);
+  if (value) {
+    for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
+      switch (*p) {
+        case '"': fputs("\\\"", fp); break;
+        case '\\': fputs("\\\\", fp); break;
+        case '\b': fputs("\\b", fp); break;
+        case '\f': fputs("\\f", fp); break;
+        case '\n': fputs("\\n", fp); break;
+        case '\r': fputs("\\r", fp); break;
+        case '\t': fputs("\\t", fp); break;
+        default:
+          if (*p < 0x20) fprintf(fp, "\\u%04x", *p);
+          else fputc(*p, fp);
+      }
+    }
+  }
+  fputc('"', fp);
+}
+
+static bool module_id_in_zygisk(const struct environment_information *info,
+                                const char *module_id) {
+  if (!info || !module_id) return false;
+  for (uint32_t i = 0; i < info->modules_len; ++i) {
+    if (info->modules[i] && strcmp(info->modules[i], module_id) == 0)
+      return true;
+  }
+  return false;
+}
+
+static void append_module_prop_list(char *buffer, size_t capacity,
+                                    const char *label,
+                                    const struct environment_information *info,
+                                    bool zn_only) {
+  size_t used = strlen(buffer);
+  int n = snprintf(buffer + used, capacity - used, "\\n%s: ", label);
+  if (n < 0 || (size_t)n >= capacity - used) return;
+  used += (size_t)n;
+  bool first = true;
+  if (!zn_only && info->modules) {
+    for (uint32_t i = 0; i < info->modules_len; ++i) {
+      n = snprintf(buffer + used, capacity - used, "%s%s",
+                   first ? "" : ", ", info->modules[i]);
+      if (n < 0 || (size_t)n >= capacity - used) return;
+      used += (size_t)n;
+      first = false;
+    }
+  }
+  if (zn_only && info->zn_inventory_available) {
+    for (size_t i = 0; i < info->zn_modules.count; ++i) {
+      const struct zn_module_info *entry = &info->zn_modules.items[i];
+      bool hybrid = module_id_in_zygisk(info, entry->module_id);
+      n = snprintf(buffer + used, capacity - used, "%s%s%s -> %s",
+                   first ? "" : ", ", entry->module_id,
+                   hybrid ? " [Hybrid]" : "", entry->target);
+      if (n < 0 || (size_t)n >= capacity - used) return;
+      used += (size_t)n;
+      first = false;
+    }
+  }
+  if (first) snprintf(buffer + used, capacity - used, "N/A");
+}
+
 #define WRITE_STATUS_ABI(suffix)                                                     \
   if (status ## suffix.supported) {                                                  \
     strcat(status_text, ", ReZygisk " # suffix "-bit: ");                            \
@@ -882,18 +956,13 @@ static bool update_status(const char *message) {
 
   WRITE_STATUS_ABI(64)
 
-  if (environment_information64.modules_len > 0 && environment_information64.modules != NULL) {
-    size_t used = strlen(status_text);
-    int written = snprintf(status_text + used, sizeof(status_text) - used, "\\nZygisk modules: ");
-    if (written > 0 && (size_t)written < sizeof(status_text) - used) {
-      used += (size_t)written;
-      for (uint32_t i = 0; i < environment_information64.modules_len; i++) {
-        written = snprintf(status_text + used, sizeof(status_text) - used, "%s%s",
-                           i == 0 ? "" : ", ", environment_information64.modules[i]);
-        if (written < 0 || (size_t)written >= sizeof(status_text) - used) break;
-        used += (size_t)written;
-      }
-    }
+  if (environment_information64.modules_len > 0 ||
+      (environment_information64.zn_inventory_available &&
+       environment_information64.zn_modules.count > 0)) {
+    append_module_prop_list(status_text, sizeof(status_text), "Zygisk modules",
+                            &environment_information64, false);
+    append_module_prop_list(status_text, sizeof(status_text), "ZN modules",
+                            &environment_information64, true);
   }
 
   fprintf(prop, "%s[%s] %s", pre_section, status_text, post_section);
@@ -908,7 +977,48 @@ static bool update_status(const char *message) {
     }
 
     fprintf(json, "{\n");
-    fprintf(json, "  \"root\": \"%s\",\n", environment_information64.root_impl ? environment_information64.root_impl : environment_information32.root_impl);
+    fprintf(json, "  \"root\": ");
+    write_json_string(json, environment_information64.root_impl ?
+                      environment_information64.root_impl :
+                      environment_information32.root_impl);
+    fprintf(json, ",\n");
+    const struct environment_information *inventory = &environment_information64;
+    fprintf(json, "  \"modules\": {\n");
+    fprintf(json, "    \"zygisk\": [");
+    for (uint32_t i = 0; i < inventory->modules_len; ++i) {
+      if (i) fprintf(json, ", ");
+      write_json_string(json, inventory->modules[i]);
+    }
+    fprintf(json, "],\n    \"zn\": [");
+    for (size_t i = 0; i < inventory->zn_modules.count; ++i) {
+      const struct zn_module_info *entry = &inventory->zn_modules.items[i];
+      if (i) fprintf(json, ", ");
+      fprintf(json, "{\"module_id\":");
+      write_json_string(json, entry->module_id);
+      fprintf(json, ",\"target\":");
+      write_json_string(json, entry->target);
+      fprintf(json, ",\"target_type\":");
+      write_json_string(json, entry->target_type == ZN_TARGET_PATH ? "path" : "name");
+      fprintf(json, ",\"library\":");
+      write_json_string(json, entry->library);
+      fprintf(json, ",\"companion\":%s,\"hybrid\":%s}",
+              entry->companion ? "true" : "false",
+              module_id_in_zygisk(inventory, entry->module_id) ? "true" : "false");
+    }
+    fprintf(json, "],\n    \"hybrid\": [");
+    bool first_hybrid = true;
+    for (size_t i = 0; i < inventory->zn_modules.count; ++i) {
+      const char *id = inventory->zn_modules.items[i].module_id;
+      if (!module_id_in_zygisk(inventory, id)) continue;
+      bool seen = false;
+      for (size_t j = 0; j < i; ++j)
+        if (strcmp(inventory->zn_modules.items[j].module_id, id) == 0) seen = true;
+      if (seen) continue;
+      if (!first_hybrid) fprintf(json, ", ");
+      write_json_string(json, id);
+      first_hybrid = false;
+    }
+    fprintf(json, "]\n  },\n");
 
     fprintf(json, "  \"monitor\": {\n");
     fprintf(json, "    \"state\": \"%d\"", tracing_state);
@@ -1063,6 +1173,7 @@ void init_monitor() {
   if (status32.daemon_error_info) free(status32.daemon_error_info);
 
   if (environment_information64.root_impl) free((void *)environment_information64.root_impl);
+  rezygiskd_free_zn_modules(&environment_information64.zn_modules);
   if (environment_information64.modules) {
     for (uint32_t i = 0; i < environment_information64.modules_len; i++) {
       free((void *)environment_information64.modules[i]);
