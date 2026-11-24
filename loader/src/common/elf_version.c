@@ -306,6 +306,7 @@ static bool parse_dynamic(const struct image_view *v,
                      sizeof(Elf64_Verneed)))) return false;
   if (di->has_soname &&
       (di->soname_offset >= di->strsz ||
+       di->strtab[di->soname_offset] == '\0' ||
        !memchr(di->strtab + di->soname_offset, '\0',
                di->strsz - di->soname_offset))) return false;
   return true;
@@ -352,7 +353,8 @@ static bool version_name_for_index(const struct image_view *v,
     }
 
     if ((vd->vd_ndx & VER_NDX_MASK) == wanted_index) {
-      if (!primary_name || vd->vd_hash != elf_name_hash(primary_name) ||
+      if (!primary_name || primary_name[0] == '\0' ||
+          vd->vd_hash != elf_name_hash(primary_name) ||
           found_name) return false;
       found_name = primary_name;
       found_hash = vd->vd_hash;
@@ -388,8 +390,7 @@ static bool symbol_runtime_address(const struct image_view *view,
   if (sym->st_shndx >= SHN_LORESERVE) return false;
 
   uintptr_t value = (uintptr_t)sym->st_value;
-  if ((Elf64_Addr)value != sym->st_value ||
-      sym->st_size > UINTPTR_MAX - value) return false;
+  if (sym->st_size > UINTPTR_MAX - value) return false;
   uintptr_t value_end = value + (uintptr_t)sym->st_size;
 
   for (size_t i = 0; i < phnum; ++i) {
@@ -488,6 +489,7 @@ static bool version_requirement_for_index(const struct image_view *view,
     if (need->vn_version != VER_NEED_CURRENT || need->vn_cnt == 0 ||
         need->vn_cnt > MAX_VERSION_ENTRIES || need->vn_aux < sizeof(Elf64_Verneed) ||
         need->vn_file >= di->strsz ||
+        di->strtab[need->vn_file] == '\0' ||
         !memchr(di->strtab + need->vn_file, '\0',
                 di->strsz - need->vn_file)) return false;
 
@@ -504,7 +506,8 @@ static bool version_requirement_for_index(const struct image_view *view,
                   di->strsz - aux->vna_name)) return false;
 
       const char *version = di->strtab + aux->vna_name;
-      if (aux->vna_hash != elf_name_hash(version)) return false;
+      if (version[0] == '\0' ||
+          aux->vna_hash != elf_name_hash(version)) return false;
       if ((aux->vna_other & VER_NDX_MASK) == wanted_index) {
         if (found_version) return false;
         found_version = version;
