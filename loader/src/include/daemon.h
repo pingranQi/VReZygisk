@@ -15,7 +15,8 @@ enum rezygiskd_actions {
   ZygoteRestart,
   UpdateMountNamespace,
   RemoveModule,
-  ReadZnModules
+  ReadZnModules,
+  RequestZnCompanionSocket
 };
 
 struct zygisk_modules {
