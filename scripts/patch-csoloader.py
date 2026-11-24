@@ -848,6 +848,20 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
 
     linker_path.write_text(source)
 
+    makefile_path = linker_path.parent.parent / "Makefile"
+    makefile = makefile_path.read_text()
+    hooks_marker = "# VREZYGISK_ENABLE_CSOLOADER_LINKER_HOOKS"
+    if hooks_marker not in makefile:
+        makefile = replace_once(
+            makefile,
+            "-fstack-protector-strong -D_FORTIFY_SOURCE=2 -Iinclude",
+            "-fstack-protector-strong -D_FORTIFY_SOURCE=2 -Iinclude "
+            "-DCSOLOADER_MAKE_LINKER_HOOKS",
+            "enable CSOLoader dlopen/dlsym/dlclose hooks",
+        )
+        makefile += "\n" + hooks_marker + "\n"
+        makefile_path.write_text(makefile)
+
     csoloader_path = linker_path.with_name("csoloader.c")
     csoloader = csoloader_path.read_text()
     unload_marker = "/* VREZYGISK_REFCOUNTED_CSOLOADER_UNLOAD */"
