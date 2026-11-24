@@ -1449,16 +1449,28 @@ static bool decode_sleb128(const uint8_t **cursor, const uint8_t *end,
   uint64_t value = 0;
   unsigned shift = 0;
   uint8_t byte = 0;
-  do {
-    if (*cursor >= end || shift >= 64) return false;
-    byte = *(*cursor)++;
-    if (shift == 63 && (byte & 0x7e) != 0 && (byte & 0x7e) != 0x7e)
-      return false;
-    value |= (uint64_t)(byte & 0x7f) << shift;
-    shift += 7;
-  } while (byte & 0x80);
 
-  if (shift < 64 && (byte & 0x40)) value |= (~UINT64_C(0)) << shift;
+  for (;;) {
+    if (*cursor >= end || shift > 63) return false;
+    byte = *(*cursor)++;
+    uint8_t payload = byte & 0x7f;
+
+    if (shift == 63) {
+      /* The tenth SLEB128 byte may only carry the sign-extension bit. */
+      if (payload != 0x00 && payload != 0x7f) return false;
+      value |= (uint64_t)(payload & 1) << 63;
+    } else {
+      value |= (uint64_t)payload << shift;
+    }
+
+    if (!(byte & 0x80)) break;
+    shift += 7;
+  }
+
+  shift += 7;
+  if (shift < 64 && (byte & 0x40))
+    value |= (~UINT64_C(0)) << shift;
+
   *out = (int64_t)value;
   return true;
 }
