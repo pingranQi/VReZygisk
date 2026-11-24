@@ -594,6 +594,9 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
   if (!linker || !img) return false;
   _linker_internal_init();
 
+  struct loaded_dep *dependencies = calloc(16, sizeof(*dependencies));
+  if (!dependencies) return false;
+
   linker->img = img;
   linker->is_linked = false;
   linker->main_map_size = 0;
@@ -601,11 +604,7 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
   linker->main_handle_refs = 0;
   linker->dep_count = 0;
   linker->dep_capacity = 16;
-  linker->dependencies = calloc(linker->dep_capacity, sizeof(*linker->dependencies));
-  if (!linker->dependencies) {
-    linker->dep_capacity = 0;
-    return false;
-  }
+  linker->dependencies = dependencies;
   memset(&linker->tls_indices, 0, sizeof(linker->tls_indices));
 
   _linker_register(linker);
