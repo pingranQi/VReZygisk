@@ -8,6 +8,7 @@
 
 #include "logging.h"
 #include "zn_hook.h"
+#include "zygisk_next_api.h"
 #include "shadowhook.h"
 
 struct zn_inline_hook_record {
