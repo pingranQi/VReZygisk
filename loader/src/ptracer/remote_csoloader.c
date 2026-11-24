@@ -387,21 +387,26 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       case DT_RELASZ:    rela_sz = (size_t)dyn[i].d_un.d_val; break;
       case DT_JMPREL:    jmprel_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
       case DT_PLTRELSZ:  jmprel_sz = (size_t)dyn[i].d_un.d_val; break;
-#if defined(DT_RELR) && defined(DT_RELRSZ) && defined(DT_RELRENT)
-       case DT_RELR:
-       case DT_RELRSZ:
-       case DT_RELRENT:
-         LOGE("DT_RELR relocations are not supported by remote CSOLoader");
-         goto cleanup;
-#endif
-#if defined(DT_ANDROID_REL) && defined(DT_ANDROID_RELSZ) && defined(DT_ANDROID_RELA) && defined(DT_ANDROID_RELASZ)
-       case DT_ANDROID_REL:
-       case DT_ANDROID_RELSZ:
-       case DT_ANDROID_RELA:
-       case DT_ANDROID_RELASZ:
-         LOGE("Android packed relocations are not supported by remote CSOLoader");
-         goto cleanup;
-#endif
+      /* Reject unsupported dynamic metadata by ABI tag value, independent
+       * of whether the platform elf.h exposes the corresponding macro. */
+      case 35: /* DT_RELRSZ */
+      case 36: /* DT_RELR */
+      case 37: /* DT_RELRENT */
+        LOGE("DT_RELR relocations are not supported by remote CSOLoader");
+        goto cleanup;
+      case 0x6000000f: /* DT_ANDROID_REL */
+      case 0x60000010: /* DT_ANDROID_RELSZ */
+      case 0x60000011: /* DT_ANDROID_RELA */
+      case 0x60000012: /* DT_ANDROID_RELASZ */
+        LOGE("Android packed relocations are not supported by remote CSOLoader");
+        goto cleanup;
+      case 0x6ffffff0: /* DT_VERSYM */
+      case 0x6ffffffc: /* DT_VERDEF */
+      case 0x6ffffffd: /* DT_VERDEFNUM */
+      case 0x6ffffffe: /* DT_VERNEED */
+      case 0x6fffffff: /* DT_VERNEEDNUM */
+        LOGE("GNU symbol versioning is not supported by remote CSOLoader");
+        goto cleanup;
       case DT_PLTREL:    out->pltrel_type = (int)dyn[i].d_un.d_val; break;
       case DT_GNU_HASH:  gnu_hash_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
       case DT_HASH:      sysv_hash_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
