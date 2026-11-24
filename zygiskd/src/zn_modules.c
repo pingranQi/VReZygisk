@@ -174,6 +174,7 @@ static void parse_manifest(const char *module_id, const char *module_dir,
       continue;
     }
     entry.companion = (uint8_t)(option != NULL);
+    entry.companion_fd = -1;
     entry.module_id = strdup(module_id);
 
     char library_expanded[PATH_MAX];
@@ -237,6 +238,7 @@ bool zn_modules_load(const char *modules_root, struct zn_module_list *out) {
 void zn_modules_free(struct zn_module_list *list) {
   if (!list) return;
   for (size_t i = 0; i < list->count; ++i) {
+    if (list->items[i].companion_fd >= 0) close(list->items[i].companion_fd);
     free(list->items[i].module_id);
     free(list->items[i].target);
     free(list->items[i].library);
