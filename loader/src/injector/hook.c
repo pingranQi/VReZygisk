@@ -1511,7 +1511,11 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
     if (FLAG_GET(ctx, APP_SPECIALIZE)) rz_module_call_post_app_specialize(m, ctx->args.app);
     else if (FLAG_GET(ctx, SERVER_FORK_AND_SPECIALIZE)) rz_module_call_post_server_specialize(m, ctx->args.server);
 
-    if (rz_module_unload_requested(m) && !rz_module_sync_close_and_wait(m)) {
+    /*
+     * No module callback may outlive loader metadata teardown. This applies
+     * to intentional residency/abandon as well as explicit unload.
+     */
+    if (!rz_module_sync_close_and_wait(m)) {
       LOGE("Module [%s] still has active callbacks; retaining image",
            m->lib.lib_path ? m->lib.lib_path : "system-linker module");
       (void)rz_module_set_state(m, MODULE_STATE_RETAINED);
