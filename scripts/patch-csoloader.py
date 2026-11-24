@@ -256,6 +256,33 @@ static const char *_path_basename""",
   linker->dep_count = 0;""",
             "initialize main image lifecycle",
         )
+        source = replace_once(
+            source,
+            """static bool _linker_is_library_loaded(struct linker *linker, const char *lib_name) {
+  if (strstr(linker->img->elf, lib_name)) return true;
+
+  for (int i = 0; i < linker->dep_count; i++) {
+    if (strstr(linker->dependencies[i].img->elf, lib_name)) return true;
+  }
+
+  return false;
+}""",
+            """static bool _linker_is_library_loaded(struct linker *linker, const char *lib_name) {
+  if (!linker || !lib_name) return false;
+  const char *requested = _path_basename(lib_name);
+  if (linker->img && strcmp(_path_basename(linker->img->elf), requested) == 0)
+    return true;
+
+  for (int i = 0; i < linker->dep_count; i++) {
+    struct csoloader_elf *loaded = linker->dependencies[i].img;
+    if (loaded && strcmp(_path_basename(loaded->elf), requested) == 0)
+      return true;
+  }
+
+  return false;
+}""",
+            "exact SONAME/path dependency de-duplication",
+        )
         linker_path.write_text(source)
 
 def main() -> int:
