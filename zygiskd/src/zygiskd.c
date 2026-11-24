@@ -14,6 +14,7 @@
 #include "constants.h"
 #include "root_impl/common.h"
 #include "utils.h"
+#include "zn_modules.h"
 
 struct Module {
   char *name;
@@ -146,7 +147,7 @@ static void load_modules(struct Context *restrict context) {
   closedir(dir);
 }
 
-static void free_modules(struct Context *restrict context) {
+static void free_modules(struct Context *restrict context) {\n  zn_modules_free(&context->zn_modules);
   for (size_t i = 0; i < context->len; i++) {
     free(context->modules[i].name);
     if (context->modules[i].companion >= 0) close(context->modules[i].companion);
@@ -315,7 +316,7 @@ void zygiskd_start(char *restrict argv[]) {
 
     exit(EXIT_FAILURE);
   } else {
-    load_modules(&context);
+    load_modules(&context);\n    if (!zn_modules_load(PATH_MODULES_DIR, &context.zn_modules)) {\n      LOGW("Failed scanning ZN module manifests");\n    } else {\n      LOGI("Discovered %zu ZN module target(s)", context.zn_modules.count);\n    }
 
     size_t info_len = sizeof(struct rzd_info_payload);
     for (size_t i = 0; i < context.len; i++) {
@@ -514,6 +515,31 @@ void zygiskd_start(char *restrict argv[]) {
           }
         }
 
+        break;
+      }
+      case ReadZnModules: {
+        size_t count = context.zn_modules.count;
+        ssize_t ret = write_size_t(client_fd, count);
+        ASSURE_SIZE_WRITE("ReadZnModules", "count", ret, sizeof(count), break);
+
+        for (size_t i = 0; i < count; ++i) {
+          const struct zn_module_entry *entry = &context.zn_modules.items[i];
+          ret = write_string(client_fd, entry->module_id);
+          ASSURE_SIZE_WRITE("ReadZnModules", "module id", ret,
+                            strlen(entry->module_id), break);
+          ret = write_string(client_fd, entry->target);
+          ASSURE_SIZE_WRITE("ReadZnModules", "target", ret,
+                            strlen(entry->target), break);
+          ret = write_string(client_fd, entry->library);
+          ASSURE_SIZE_WRITE("ReadZnModules", "library", ret,
+                            strlen(entry->library), break);
+          ret = write_uint8_t(client_fd, entry->target_type);
+          ASSURE_SIZE_WRITE("ReadZnModules", "target type", ret,
+                            sizeof(uint8_t), break);
+          ret = write_uint8_t(client_fd, entry->companion);
+          ASSURE_SIZE_WRITE("ReadZnModules", "companion", ret,
+                            sizeof(uint8_t), break);
+        }
         break;
       }
       case ReadModules: {
