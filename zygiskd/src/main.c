@@ -24,6 +24,15 @@ int main(int argc, char *argv[]) {
       return 0;
     }
 
+    else if (strcmp(argv[1], "zn-companion") == 0) {
+      if (argc < 3) {
+        LOGI("Usage: zygiskd zn-companion <fd>");
+        return 1;
+      }
+      zn_companion_entry(atoi(argv[2]));
+      return 0;
+    }
+
     else if (strcmp(argv[1], "version") == 0) {
       LOGI("ReZygisk Daemon %s", ZKSU_VERSION);
 
@@ -45,7 +54,7 @@ int main(int argc, char *argv[]) {
     }
 
     else {
-      LOGI("Usage: zygiskd [companion|version|root]");
+      LOGI("Usage: zygiskd [companion|zn-companion|version|root]");
 
       return 0;
     }
