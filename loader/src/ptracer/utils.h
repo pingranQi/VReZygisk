@@ -40,7 +40,17 @@ void *find_module_base(struct maps_info *map, const char *file);
 
 void *find_func_addr(struct maps_info *local_info, struct maps_info *remote_info, const char *module, const char *func);
 
-void *find_func_addr_version(struct maps_info *local_info, struct maps_info *remote_info, const char *module, const char *func, const char *version);
+void *find_func_addr_info(struct maps_info *local_info, struct maps_info *remote_info,
+                          const char *module, const char *func,
+                          unsigned *out_type);
+
+void *find_func_addr_version(struct maps_info *local_info, struct maps_info *remote_info,
+                             const char *module, const char *func,
+                             const char *version);
+
+void *find_func_addr_version_info(struct maps_info *local_info, struct maps_info *remote_info,
+                                  const char *module, const char *func,
+                                  const char *version, unsigned *out_type);
 
 void align_stack(struct user_regs_struct *regs, long preserve);
 
