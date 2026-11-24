@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 
 #include "elf_util.h"
+#include "elf_version.h"
 
 #include "utils.h"
 
@@ -209,32 +210,16 @@ void *find_func_addr_version(struct maps_info *local_info, struct maps_info *rem
   uintptr_t remote_base = (uintptr_t)find_module_base(remote_info, module);
   if (!local_base || !remote_base) return NULL;
 
-  typedef void *(*dlvsym_fn)(void *, const char *, const char *);
-  dlvsym_fn versioned_lookup = (dlvsym_fn)dlsym(RTLD_DEFAULT, "dlvsym");
-  if (!versioned_lookup) {
-    LOGW("dlvsym is unavailable; cannot resolve %s@%s in %s",
-         func, version, module);
-    return NULL;
-  }
+  /*
+   * Resolve from the mapped ELF's own DT_VERSYM/DT_VERDEF metadata. Using
+   * dlvsym() here was subtly wrong: it could return an interposed definition
+   * from a different object and then apply that object's offset to this one.
+   */
+  uintptr_t local_symbol =
+      elf_find_versioned_symbol((void *)local_base, func, version);
+  if (!local_symbol || local_symbol < local_base) return NULL;
 
-  void *handle = dlopen(module, RTLD_NOW | RTLD_NOLOAD);
-  if (!handle) {
-    LOGD("Versioned lookup module is not locally loaded: %s", module);
-    return NULL;
-  }
-
-  void *local_symbol = versioned_lookup(handle, func, version);
-  dlclose(handle);
-  if (!local_symbol) return NULL;
-
-  uintptr_t symbol = (uintptr_t)local_symbol;
-  if (symbol < local_base) {
-    LOGW("Versioned symbol %s@%s is outside local image %s",
-         func, version, module);
-    return NULL;
-  }
-
-  uintptr_t offset = symbol - local_base;
+  uintptr_t offset = local_symbol - local_base;
   if (offset > UINTPTR_MAX - remote_base) return NULL;
   return (void *)(remote_base + offset);
 }
