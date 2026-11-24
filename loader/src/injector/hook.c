@@ -216,6 +216,7 @@ struct linker_elf_features {
   bool has_gnu_versions;
   bool has_android_packed_relocs;
   bool has_relr;
+  bool has_pt_tls;
 };
 
 static bool file_range_valid(uint64_t offset, uint64_t length, uint64_t file_size) {
@@ -266,14 +267,34 @@ static bool inspect_linker_elf(const char *path, struct linker_elf_features *fea
   if (valid) {
     for (Elf64_Half i = 0; i < eh.e_phnum; ++i) {
       const Elf64_Phdr *p = &phdr[i];
+      if (p->p_type == PT_TLS) features->has_pt_tls = true;
       if (p->p_type != PT_DYNAMIC) continue;
-      if (dynamic_found || p->p_filesz % sizeof(Elf64_Dyn) != 0 ||
-          p->p_filesz > SIZE_MAX ||
+      if (dynamic_found || p->p_filesz == 0 || p->p_filesz > p->p_memsz ||
+          p->p_filesz % sizeof(Elf64_Dyn) != 0 ||
           !file_range_valid(p->p_offset, p->p_filesz, (uint64_t)st.st_size)) {
         valid = false;
         break;
       }
+      /* PT_DYNAMIC must be backed by the matching file bytes of a PT_LOAD. */
+      bool dynamic_in_load = false;
+      for (Elf64_Half k = 0; k < eh.e_phnum; ++k) {
+        const Elf64_Phdr *load = &phdr[k];
+        if (load->p_type != PT_LOAD || p->p_vaddr < load->p_vaddr) continue;
+        uint64_t delta = p->p_vaddr - load->p_vaddr;
+        if (delta <= load->p_filesz && p->p_filesz <= load->p_filesz - delta &&
+            load->p_offset <= UINT64_MAX - delta &&
+            load->p_offset + delta == p->p_offset) {
+          dynamic_in_load = true;
+          break;
+        }
+      }
+      if (!dynamic_in_load) {
+        valid = false;
+        break;
+      }
+
       dynamic_found = true;
+      bool dynamic_terminated = false;
       size_t count = (size_t)(p->p_filesz / sizeof(Elf64_Dyn));
       for (size_t n = 0; n < count; ++n) {
         Elf64_Dyn dyn;
@@ -282,7 +303,10 @@ static bool inspect_linker_elf(const char *path, struct linker_elf_features *fea
           valid = false;
           break;
         }
-        if (dyn.d_tag == DT_NULL) break;
+        if (dyn.d_tag == DT_NULL) {
+          dynamic_terminated = true;
+          break;
+        }
         switch ((uint64_t)dyn.d_tag) {
           case 0x6ffffff0ULL: /* DT_VERSYM */
           case 0x6ffffffcULL: /* DT_VERDEF */
@@ -306,6 +330,7 @@ static bool inspect_linker_elf(const char *path, struct linker_elf_features *fea
             break;
         }
       }
+      if (!dynamic_terminated) valid = false;
       break;
     }
     if (!dynamic_found) valid = false;
@@ -322,11 +347,11 @@ static bool requires_system_linker(const char *path) {
     LOGW("Unable to validate ELF metadata for [%s]; using Bionic linker", path);
     return true;
   }
-  if (features.has_gnu_versions || features.has_android_packed_relocs ||
-      features.has_relr) {
-    LOGI("Using Bionic linker for [%s]: GNU versions=%d Android packed relocations=%d RELR=%d",
-         path, features.has_gnu_versions, features.has_android_packed_relocs,
-         features.has_relr);
+  if (features.has_pt_tls || features.has_gnu_versions ||
+      features.has_android_packed_relocs || features.has_relr) {
+    LOGI("Using Bionic linker for [%s]: PT_TLS=%d GNU versions=%d Android packed relocations=%d RELR=%d",
+         path, features.has_pt_tls, features.has_gnu_versions,
+         features.has_android_packed_relocs, features.has_relr);
     return true;
   }
   return false;
