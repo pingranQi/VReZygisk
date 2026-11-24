@@ -238,8 +238,10 @@ static bool is_hyos_spawner(void) {
   size_t length = strlen(path);
   const size_t suffix_length = sizeof(deleted_suffix) - 1;
   if (length >= suffix_length &&
-      strcmp(path + length - suffix_length, deleted_suffix) == 0)
-    path[length - suffix_length] = '\0', length -= suffix_length;
+      strcmp(path + length - suffix_length, deleted_suffix) == 0) {
+    path[length - suffix_length] = '\0';
+    length -= suffix_length;
+  }
 
   const char *suffix = "/hyos_spawner";
   size_t suffix_len = sizeof(suffix) - 1;
