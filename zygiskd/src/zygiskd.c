@@ -499,7 +499,7 @@ static void *zn_companion_broker_thread(void *opaque) {
     close(client_fd);
   }
 
-  close(broker_fd);
+  /* Keep the broker FD owned by the manifest entry until it is joined. */
   LOGI("ZN companion broker stopped for manifest index %zu", index);
   return NULL;
 }
@@ -919,6 +919,7 @@ void zygiskd_start(char *restrict argv[]) {
           break;
         }
 
+        pthread_mutex_lock(&context.zn_mutex);
         struct zn_module_entry *module = &context.zn_modules.items[index];
         if (module->companion_fd >= 0 &&
             !check_unix_socket(module->companion_fd, false)) {
@@ -932,14 +933,15 @@ void zygiskd_start(char *restrict argv[]) {
               argv, module->module_id, module->library);
         }
 
-        if (module->companion_fd < 0 ||
-            write_fd(module->companion_fd, client_fd) != 1) {
-          LOGE("Failed dispatching client to ZN companion for %s",
-               module->module_id);
-          if (module->companion_fd >= 0) {
-            close(module->companion_fd);
-            module->companion_fd = -1;
-          }
+        bool dispatched = module->companion_fd >= 0 &&
+                          write_fd(module->companion_fd, client_fd) == 1;
+        if (!dispatched && module->companion_fd >= 0) {
+          close(module->companion_fd);
+          module->companion_fd = -1;
+        }
+        pthread_mutex_unlock(&context.zn_mutex);
+
+        if (!dispatched) {
           ret = write_uint8_t(client_fd, 0);
           ASSURE_SIZE_WRITE("RequestZnCompanionSocket", "response", ret,
                             sizeof(uint8_t), break);
