@@ -1570,7 +1570,7 @@ static bool apply_android_rela_section(int pid, struct user_regs_struct *regs, i
                  type == R_AARCH64_JUMP_SLOT ||
                  type == R_AARCH64_ABS64) {
         uintptr_t sym_addr = 0;
-        if (!resolve_symbol_addr(fd, info, local_map, remote_map,
+        if (!resolve_symbol_addr(pid, regs, fd, info, local_map, remote_map,
                                  needed_paths, phdr, phnum, load_bias,
                                  sym, &sym_addr)) goto done;
         value = sym_addr ? (ElfW(Addr))(sym_addr + (uintptr_t)addend) : 0;
@@ -1620,14 +1620,14 @@ static bool apply_relocations(int pid, struct user_regs_struct *regs, int fd,
 
   /* INFO: Process REL section */
   if (info->rel_sz && info->rel_off) {
-    if (!apply_rel_section(pid, regs, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->rel_off, info->rel_sz))
+    if (!apply_rel_section(pid, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->rel_off, info->rel_sz))
       return false;
   }
 
   /* INFO: Process JMPREL section (PLT relocations) - uses same format as RELA/REL */
   if (info->jmprel_sz && info->jmprel_off) {
     if (info->pltrel_type == DT_RELA) {
-      if (!apply_rela_section(pid, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->jmprel_off, info->jmprel_sz))
+      if (!apply_rela_section(pid, regs, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->jmprel_off, info->jmprel_sz))
         return false;
     } else if (info->pltrel_type == DT_REL) {
       if (!apply_rel_section(pid, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->jmprel_off, info->jmprel_sz))
@@ -2058,7 +2058,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   dinfo.needed_count = symbol_scope_count;
 
   /* INFO: Apply all relocations */
-  if (!apply_relocations(pid, regs, fd, &dinfo, local_map, remote_map, needed_paths, phdr, eh.e_phnum, load_bias)) {
+  if (!apply_relocations(pid, regs, fd, &dinfo, local_map, remote_map, (const char *const *)needed_paths, phdr, eh.e_phnum, load_bias)) {
     LOGE("Failed to apply relocations");
 
     free_symbol_scope(needed_paths, symbol_scope_count);
