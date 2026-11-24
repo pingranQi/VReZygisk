@@ -69,6 +69,12 @@ static bool range_ok(const struct image_view *v, uintptr_t p, size_t n) {
   return p >= v->begin && p <= v->end && n <= v->end - p;
 }
 
+static bool add_overflow_uintptr(uintptr_t a, uintptr_t b, uintptr_t *out) {
+  if (a > UINTPTR_MAX - b) return true;
+  *out = a + b;
+  return false;
+}
+
 static bool load_range_ok(const struct image_view *v,
                           const Elf64_Phdr *phdr, size_t phnum,
                           uintptr_t p, size_t n) {
@@ -103,11 +109,6 @@ static bool load_segment_remaining(const struct image_view *v,
   return false;
 }
 
-static bool add_overflow_uintptr(uintptr_t a, uintptr_t b, uintptr_t *out) {
-  if (a > UINTPTR_MAX - b) return true;
-  *out = a + b;
-  return false;
-}
 
 static uintptr_t dynamic_pointer(const struct image_view *v, Elf64_Addr value) {
   uintptr_t p = (uintptr_t)value;
