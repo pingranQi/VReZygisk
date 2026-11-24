@@ -15,6 +15,8 @@
 #include <sys/types.h>
 
 #include <unistd.h>
+#include <pthread.h>
+#include <errno.h>
 
 #include <csoloader.h>
 #include <plti.h>
@@ -147,11 +149,187 @@ static bool enable_unloader = false;
 static bool csoloader_initialized = false;
 static bool csoloader_pinned = false;
 
+/*
+ * CSOLoader keeps process-global linker/TLS registries. Serialize its public
+ * lifecycle API so simultaneous module load/unload requests cannot race those
+ * registries. Do not hold this lock while invoking a module entry point or
+ * specialization callback.
+ */
+static pthread_mutex_t g_csoloader_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static bool csoloader_lock(void) {
+  int error = pthread_mutex_lock(&g_csoloader_mutex);
+  if (error != 0) {
+    LOGE("Failed to lock CSOLoader state: %d", error);
+    return false;
+  }
+  return true;
+}
+
+static void csoloader_unlock(void) {
+  int error = pthread_mutex_unlock(&g_csoloader_mutex);
+  if (error != 0) LOGE("Failed to unlock CSOLoader state: %d", error);
+}
+
+static bool csoloader_load_serialized(struct csoloader *lib, const char *path) {
+  if (!csoloader_lock()) return false;
+  bool loaded = csoloader_load(lib, path);
+  if (loaded) csoloader_initialized = true;
+  csoloader_unlock();
+  return loaded;
+}
+
+static bool csoloader_unload_serialized(struct csoloader *lib) {
+  if (!csoloader_lock()) return false;
+  bool unloaded = csoloader_unload(lib);
+  csoloader_unlock();
+  return unloaded;
+}
+
+static bool csoloader_abandon_serialized(struct csoloader *lib) {
+  if (!csoloader_lock()) return false;
+  bool abandoned = csoloader_abandon(lib);
+  csoloader_unlock();
+  return abandoned;
+}
+
+static void *csoloader_get_symbol_serialized(struct csoloader *lib, const char *name) {
+  if (!csoloader_lock()) return NULL;
+  void *symbol = csoloader_get_symbol(lib, name);
+  csoloader_unlock();
+  return symbol;
+}
+
 static void csoloader_deinit_if_safe(void) {
-  if (!csoloader_initialized || csoloader_pinned) return;
-  csoloader_deinit();
-  csoloader_initialized = false;
-  LOGD("CSOLoader global state deinitialized");
+  if (!csoloader_lock()) return;
+  if (csoloader_initialized && !csoloader_pinned) {
+    csoloader_deinit();
+    csoloader_initialized = false;
+    LOGD("CSOLoader global state deinitialized");
+  }
+  csoloader_unlock();
+}
+
+/* Read-only ELF feature probe. Unsupported metadata is routed to Bionic rather
+ * than allowing the section-oriented CSOLoader parser to mis-link the image. */
+struct linker_elf_features {
+  bool has_gnu_versions;
+  bool has_android_packed_relocs;
+  bool has_relr;
+};
+
+static bool file_range_valid(uint64_t offset, uint64_t length, uint64_t file_size) {
+  return offset <= file_size && length <= file_size - offset;
+}
+
+static bool pread_fully(int fd, void *buffer, size_t size, off_t offset) {
+  unsigned char *out = (unsigned char *)buffer;
+  size_t done = 0;
+  while (done < size) {
+    ssize_t n = pread(fd, out + done, size - done, offset + (off_t)done);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) return false;
+    done += (size_t)n;
+  }
+  return true;
+}
+
+static bool inspect_linker_elf(const char *path, struct linker_elf_features *features) {
+  if (!path || !features) return false;
+  memset(features, 0, sizeof(*features));
+
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+
+  struct stat st;
+  Elf64_Ehdr eh;
+  bool valid = fstat(fd, &st) == 0 && st.st_size >= (off_t)sizeof(eh) &&
+      pread_fully(fd, &eh, sizeof(eh), 0) &&
+      memcmp(eh.e_ident, ELFMAG, SELFMAG) == 0 &&
+      eh.e_ident[EI_CLASS] == ELFCLASS64 &&
+      eh.e_ident[EI_DATA] == ELFDATA2LSB &&
+      eh.e_ident[EI_VERSION] == EV_CURRENT &&
+      eh.e_machine == EM_AARCH64 && eh.e_type == ET_DYN &&
+      eh.e_ehsize == sizeof(eh) && eh.e_phentsize == sizeof(Elf64_Phdr) &&
+      eh.e_phnum > 0 &&
+      file_range_valid(eh.e_phoff, (uint64_t)eh.e_phnum * sizeof(Elf64_Phdr),
+                       (uint64_t)st.st_size);
+
+  Elf64_Phdr *phdr = NULL;
+  if (valid) {
+    size_t bytes = (size_t)eh.e_phnum * sizeof(Elf64_Phdr);
+    phdr = (Elf64_Phdr *)malloc(bytes);
+    valid = phdr && pread_fully(fd, phdr, bytes, (off_t)eh.e_phoff);
+  }
+
+  bool dynamic_found = false;
+  if (valid) {
+    for (Elf64_Half i = 0; i < eh.e_phnum; ++i) {
+      const Elf64_Phdr *p = &phdr[i];
+      if (p->p_type != PT_DYNAMIC) continue;
+      if (dynamic_found || p->p_filesz % sizeof(Elf64_Dyn) != 0 ||
+          p->p_filesz > SIZE_MAX ||
+          !file_range_valid(p->p_offset, p->p_filesz, (uint64_t)st.st_size)) {
+        valid = false;
+        break;
+      }
+      dynamic_found = true;
+      size_t count = (size_t)(p->p_filesz / sizeof(Elf64_Dyn));
+      for (size_t n = 0; n < count; ++n) {
+        Elf64_Dyn dyn;
+        if (!pread_fully(fd, &dyn, sizeof(dyn),
+                         (off_t)(p->p_offset + n * sizeof(dyn)))) {
+          valid = false;
+          break;
+        }
+        if (dyn.d_tag == DT_NULL) break;
+        switch ((uint64_t)dyn.d_tag) {
+          case 0x6ffffff0ULL: /* DT_VERSYM */
+          case 0x6ffffffcULL: /* DT_VERDEF */
+          case 0x6ffffffdULL: /* DT_VERDEFNUM */
+          case 0x6ffffffeULL: /* DT_VERNEED */
+          case 0x6fffffffULL: /* DT_VERNEEDNUM */
+            features->has_gnu_versions = true;
+            break;
+          case 0x6000000fULL: /* DT_ANDROID_REL */
+          case 0x60000010ULL: /* DT_ANDROID_RELSZ */
+          case 0x60000011ULL: /* DT_ANDROID_RELA */
+          case 0x60000012ULL: /* DT_ANDROID_RELASZ */
+            features->has_android_packed_relocs = true;
+            break;
+          case 35: /* DT_RELRSZ */
+          case 36: /* DT_RELR */
+          case 37: /* DT_RELRENT */
+            features->has_relr = true;
+            break;
+          default:
+            break;
+        }
+      }
+      break;
+    }
+    if (!dynamic_found) valid = false;
+  }
+
+  free(phdr);
+  close(fd);
+  return valid;
+}
+
+static bool requires_system_linker(const char *path) {
+  struct linker_elf_features features;
+  if (!inspect_linker_elf(path, &features)) {
+    LOGW("Unable to validate ELF metadata for [%s]; using Bionic linker", path);
+    return true;
+  }
+  if (features.has_gnu_versions || features.has_android_packed_relocs ||
+      features.has_relr) {
+    LOGI("Using Bionic linker for [%s]: GNU versions=%d Android packed relocations=%d RELR=%d",
+         path, features.has_gnu_versions, features.has_android_packed_relocs,
+         features.has_relr);
+    return true;
+  }
+  return false;
 }
 
 /* INFO: Helper function to add to PLT hook list */
@@ -1100,7 +1278,7 @@ static void release_unregistered_module(struct rezygisk_module *module, const ch
   bool released = true;
 
   if (module->loader_backend == MODULE_LOADER_CSO) {
-    released = csoloader_unload(&module->lib);
+    released = csoloader_unload_serialized(&module->lib);
     if (!released) {
       csoloader_pinned = true;
       LOGE("Retaining failed CSOLoader image for [%s]", lib_path);
@@ -1155,9 +1333,8 @@ static bool load_modules_only(void) {
      * the custom linker cannot handle a device-/module-specific ELF feature.
      * A system handle is never stored in struct csoloader.
      */
-    if (csoloader_load(&module->lib, lib_path)) {
+    if (!requires_system_linker(lib_path) && csoloader_load_serialized(&module->lib, lib_path)) {
       module->loader_backend = MODULE_LOADER_CSO;
-      csoloader_initialized = true;
     } else {
       LOGW("CSOLoader rejected [%s]; retrying with the system linker", lib_path);
       dlerror();
@@ -1186,7 +1363,7 @@ static bool load_modules_only(void) {
 
     void *entry = NULL;
     if (module->loader_backend == MODULE_LOADER_CSO) {
-      entry = csoloader_get_symbol(&module->lib, "zygisk_module_entry");
+      entry = csoloader_get_symbol_serialized(&module->lib, "zygisk_module_entry");
     } else {
       dlerror();
       entry = dlsym(module->system_handle, "zygisk_module_entry");
@@ -1248,11 +1425,14 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
         LOGD("Abandoning CSOLoader image at %p", m->lib.img ? m->lib.img->header : NULL);
         csoloader_pinned = true;
         all_cso_modules_unloaded = false;
-        csoloader_abandon(&m->lib);
+        if (!csoloader_abandon_serialized(&m->lib)) {
+          LOGE("Failed to abandon CSOLoader module safely");
+          should_unmap_zygisk = false;
+        }
         continue;
       }
 
-      if (!csoloader_unload(&m->lib)) {
+      if (!csoloader_unload_serialized(&m->lib)) {
         LOGE("Failed to unload CSOLoader module [%s]",
              m->lib.lib_path ? m->lib.lib_path : "(unknown)");
         csoloader_pinned = true;
