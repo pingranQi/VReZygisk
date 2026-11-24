@@ -205,12 +205,10 @@ static bool parse_dynamic(const struct image_view *v,
       case DT_SYMTAB: di->symtab = (const Elf64_Sym *)p; break;
       case DT_STRTAB: di->strtab = (const char *)p; break;
       case DT_STRSZ:
-        if (dyn[i].d_un.d_val > SIZE_MAX) return false;
         di->strsz = (size_t)dyn[i].d_un.d_val;
         have_strsz = true;
         break;
       case DT_SYMENT:
-        if (dyn[i].d_un.d_val > SIZE_MAX) return false;
         di->syment = (size_t)dyn[i].d_un.d_val;
         have_syment = true;
         break;
@@ -222,7 +220,6 @@ static bool parse_dynamic(const struct image_view *v,
       case DT_VERNEED: di->verneed = (const Elf64_Verneed *)p; break;
       case DT_VERNEEDNUM: di->verneed_count = (size_t)dyn[i].d_un.d_val; break;
       case DT_SONAME:
-        if (dyn[i].d_un.d_val > SIZE_MAX) return false;
         di->soname_offset = (size_t)dyn[i].d_un.d_val;
         di->has_soname = true;
         break;
@@ -251,8 +248,9 @@ static bool parse_dynamic(const struct image_view *v,
   if (di->versym &&
       !range_ok(v, (uintptr_t)di->versym,
                 di->symbol_count * sizeof(Elf64_Half))) return false;
-  if (!range_ok(v, (uintptr_t)di->strtab, 1)) return false;
-  if (di->verdef_count > MAX_VERSION_ENTRIES ||\n      di->verneed_count > MAX_VERSION_ENTRIES) return false;
+  if (!range_ok(v, (uintptr_t)di->strtab, di->strsz)) return false;
+  if (di->verdef_count > MAX_VERSION_ENTRIES ||
+      di->verneed_count > MAX_VERSION_ENTRIES) return false;
   if (di->verdef_count && (!di->verdef ||
       !range_ok(v, (uintptr_t)di->verdef, sizeof(Elf64_Verdef)))) return false;
   if (di->verneed_count && (!di->verneed ||
@@ -318,7 +316,7 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
   for (size_t i = 0; i < di.symbol_count; ++i) {
     const Elf64_Sym *sym = &di.symtab[i];
     if (sym->st_name == 0 || sym->st_shndx == SHN_UNDEF ||
-        sym->st_name >= view.end - (uintptr_t)di.strtab) continue;
+        sym->st_name >= di.strsz) continue;
 
     unsigned bind = ELF64_ST_BIND(sym->st_info);
     unsigned type = ELF64_ST_TYPE(sym->st_info);
@@ -390,7 +388,7 @@ uintptr_t elf_resolve_versioned_symbol(void *provider_base,
         if (aux->vna_name >= str_size || need->vn_file >= str_size) return 0;
         const char *required_version = request.strtab + aux->vna_name;
         const char *required_provider = request.strtab + need->vn_file;
-        if (!memchr(required_version, '\\0', str_size - aux->vna_name) ||
+        if (!memchr(required_version, '\0', str_size - aux->vna_name) ||
             !memchr(required_provider, '\\0', str_size - need->vn_file) ||
             aux->vna_hash != elf_name_hash(required_version)) return 0;
 
