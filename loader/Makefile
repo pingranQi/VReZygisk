@@ -132,7 +132,7 @@ $(LIBCOMMON): $(COMMON_OBJS)
 
 $(LIBZYGISK): $(INJECTOR_OBJS) $(LIBCOMMON) $(PLTI_LIB) $(CSOLOADER_LIB) $(SHADOWHOOK_LIB)
 	@mkdir -p $(dir $@)
-	$(CC_ARCH) -fPIC -shared -Wl,-soname,libzygisk.so                            \
+	$(CC_ARCH) -fPIC -shared -Wl,-soname,libzygisk.so -Wl,-z,max-page-size=16384 \
 		$(COMMON_LDFLAGS) $(TYPE_LDFLAGS) -Wl,--wrap=free -Wl,--wrap=realloc     \
 		-nostartfiles $(INJECTOR_OBJS) $(LIBCOMMON) $(PLTI_LIB) $(CSOLOADER_LIB) $(SHADOWHOOK_LIB) \
 		-llog -lm -ldl -o $@
