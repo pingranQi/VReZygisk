@@ -48,6 +48,9 @@ struct dynamic_info {
   const Elf64_Half *versym;
   const Elf64_Verdef *verdef;
   size_t verdef_count;
+  const Elf64_Verneed *verneed;
+  size_t verneed_count;
+  size_t soname_offset;
   size_t symbol_count;
 };
 
@@ -194,6 +197,9 @@ static bool parse_dynamic(const struct image_view *v,
       case DT_VERSYM: di->versym = (const Elf64_Half *)p; break;
       case DT_VERDEF: di->verdef = (const Elf64_Verdef *)p; break;
       case DT_VERDEFNUM: di->verdef_count = (size_t)dyn[i].d_un.d_val; break;
+      case DT_VERNEED: di->verneed = (const Elf64_Verneed *)p; break;
+      case DT_VERNEEDNUM: di->verneed_count = (size_t)dyn[i].d_un.d_val; break;
+      case DT_SONAME: di->soname_offset = (size_t)dyn[i].d_un.d_val; break;
       default: break;
     }
   }
@@ -213,9 +219,12 @@ static bool parse_dynamic(const struct image_view *v,
       !range_ok(v, (uintptr_t)di->versym,
                 di->symbol_count * sizeof(Elf64_Half))) return false;
   if (!range_ok(v, (uintptr_t)di->strtab, 1)) return false;
-  if (di->verdef_count > MAX_VERSION_ENTRIES) return false;
+  if (di->verdef_count > MAX_VERSION_ENTRIES ||\n      di->verneed_count > MAX_VERSION_ENTRIES) return false;
   if (di->verdef_count && (!di->verdef ||
       !range_ok(v, (uintptr_t)di->verdef, sizeof(Elf64_Verdef)))) return false;
+  if (di->verneed_count && (!di->verneed ||
+      !range_ok(v, (uintptr_t)di->verneed, sizeof(Elf64_Verneed)))) return false;
+  if (di->soname_offset >= v->end - (uintptr_t)di->strtab) return false;
   return true;
 }
 
@@ -303,6 +312,83 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
       return 0;
     if (result < view.begin || result >= view.end) return 0;
     return result;
+  }
+  return 0;
+}
+
+
+uintptr_t elf_resolve_versioned_symbol(void *provider_base,
+                                       void *requester_base,
+                                       size_t requester_symbol_index,
+                                       const char *symbol_name) {
+  if (!provider_base || !requester_base || !symbol_name || !*symbol_name)
+    return 0;
+
+  struct image_view requester_view = {0};
+  const Elf64_Ehdr *requester_eh = NULL;
+  const Elf64_Phdr *requester_phdr = NULL;
+  if (!image_bounds(requester_base, &requester_view,
+                    &requester_eh, &requester_phdr)) return 0;
+
+  struct dynamic_info request = {0};
+  if (!parse_dynamic(&requester_view, requester_eh, requester_phdr, &request) ||
+      !request.versym || !request.verneed || !request.verneed_count ||
+      requester_symbol_index >= request.symbol_count) return 0;
+
+  uint16_t wanted = request.versym[requester_symbol_index] & VER_NDX_MASK;
+  if (wanted <= VER_NDX_GLOBAL) return 0;
+
+  uintptr_t need_addr = (uintptr_t)request.verneed;
+  for (size_t i = 0; i < request.verneed_count; ++i) {
+    if (!range_ok(&requester_view, need_addr, sizeof(Elf64_Verneed))) return 0;
+    const Elf64_Verneed *need = (const Elf64_Verneed *)need_addr;
+    if (need->vn_version != VER_NEED_CURRENT || !need->vn_aux) return 0;
+
+    uintptr_t aux_addr;
+    if (add_overflow_uintptr(need_addr, need->vn_aux, &aux_addr)) return 0;
+    for (size_t j = 0; j < need->vn_cnt; ++j) {
+      if (!range_ok(&requester_view, aux_addr, sizeof(Elf64_Vernaux))) return 0;
+      const Elf64_Vernaux *aux = (const Elf64_Vernaux *)aux_addr;
+      if ((aux->vna_other & VER_NDX_MASK) == wanted) {
+        size_t str_size = requester_view.end - (uintptr_t)request.strtab;
+        if (aux->vna_name >= str_size || need->vn_file >= str_size) return 0;
+        const char *required_version = request.strtab + aux->vna_name;
+        const char *required_provider = request.strtab + need->vn_file;
+        if (!memchr(required_version, '\\0', str_size - aux->vna_name) ||
+            !memchr(required_provider, '\\0', str_size - need->vn_file) ||
+            aux->vna_hash != elf_name_hash(required_version)) return 0;
+
+        struct image_view provider_view = {0};
+        const Elf64_Ehdr *provider_eh = NULL;
+        const Elf64_Phdr *provider_phdr = NULL;
+        if (!image_bounds(provider_base, &provider_view,
+                          &provider_eh, &provider_phdr)) return 0;
+        struct dynamic_info provider = {0};
+        if (!parse_dynamic(&provider_view, provider_eh, provider_phdr, &provider))
+          return 0;
+
+        /* If the provider advertises DT_SONAME, enforce the VERNEED owner. */
+        if (provider.soname_offset) {
+          size_t provider_str_size = provider_view.end - (uintptr_t)provider.strtab;
+          if (provider.soname_offset >= provider_str_size) return 0;
+          const char *soname = provider.strtab + provider.soname_offset;
+          if (!memchr(soname, '\\0', provider_str_size - provider.soname_offset) ||
+              strcmp(soname, required_provider) != 0) return 0;
+        }
+        return elf_find_versioned_symbol(provider_base, symbol_name,
+                                         required_version);
+      }
+      if (!aux->vna_next) break;
+      uintptr_t next;
+      if (add_overflow_uintptr(aux_addr, aux->vna_next, &next) ||
+          next <= aux_addr) return 0;
+      aux_addr = next;
+    }
+    if (!need->vn_next) break;
+    uintptr_t next;
+    if (add_overflow_uintptr(need_addr, need->vn_next, &next) ||
+        next <= need_addr) return 0;
+    need_addr = next;
   }
   return 0;
 }
