@@ -15,8 +15,7 @@ int main(int argc, char **argv) {
   } else if (argc >= 3 && strcmp(argv[1], "trace-zn") == 0) {
       long pid = strtol(argv[2], 0, 0);
       if (!trace_zn_target((int)pid)) {
-        LOGE("ZN target injection failed for pid %ld; target will be resumed", pid);
-        kill((pid_t)pid, SIGCONT);
+        printf("[ReZygisk] ZN target injection failed for pid %ld; target resumed\n", pid);
         return 1;
       }
       return 0;
