@@ -269,6 +269,7 @@ struct elf_dyn_info {
   off_t android_rela_off;
   size_t android_rela_sz;
   off_t versym_off;
+  bool has_versym;
   ElfW(Addr) verneed_vaddr;
   size_t verneed_num;
   ElfW(Addr) verdef_vaddr;
@@ -464,6 +465,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       (android_rela_vaddr == 0) != (android_rela_sz == 0) ||
       ((verneed_vaddr == 0) != (verneed_num == 0)) ||
       ((verdef_vaddr == 0) != (verdef_num == 0)) ||
+      ((verneed_num || verdef_num) && versym_vaddr == 0) ||
       (verneed_num > 4096) || (verdef_num > 4096) ||
       (relr_sz && relrent != sizeof(ElfW(Addr))) ||
       (!relr_sz && relrent != 0) ||
@@ -533,10 +535,13 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
     }
     out->android_rela_sz = android_rela_sz;
   }
-  if (versym_vaddr && !vaddr_to_offset(phdr, eh->e_phnum, versym_vaddr,
-                                        sizeof(uint16_t), &out->versym_off)) {
-    LOGE("Invalid DT_VERSYM address");
-    goto cleanup;
+  if (versym_vaddr) {
+    if (!vaddr_to_offset(phdr, eh->e_phnum, versym_vaddr,
+                         sizeof(uint16_t), &out->versym_off)) {
+      LOGE("Invalid DT_VERSYM address");
+      goto cleanup;
+    }
+    out->has_versym = true;
   }
   out->verneed_vaddr = verneed_vaddr;
   out->verneed_num = verneed_num;
@@ -915,7 +920,7 @@ static bool get_symbol_version_requirement(int fd,
     return false;
   version[0] = '\0';
   provider[0] = '\0';
-  if (!info || info->versym_off == 0) return true;
+  if (!info || !info->has_versym) return true;
 
   uint16_t versym = 0;
   if (sym_idx > (size_t)INT64_MAX / sizeof(versym) ||
