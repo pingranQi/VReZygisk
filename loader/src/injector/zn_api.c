@@ -334,6 +334,11 @@ static int api_hyos_register_module(const void *opaque) {
       g_hyos_atfork_registered = true;
   }
   hyos_install_hooks();
+  if (!g_hyos_orig_setcontext) {
+    --g_hyos_module_count;
+    LOGW("HyperOS Runtime registration failed: specialization hook unavailable");
+    return ZN_FAILED;
+  }
   LOGI("Registered HyperOS Runtime module (%zu)", g_hyos_module_count);
   return ZN_SUCCESS;
 }
