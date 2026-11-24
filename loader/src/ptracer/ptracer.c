@@ -157,7 +157,7 @@ bool inject_on_main(int pid, const char *lib_path, const char *entry_symbol, uin
     return false;                             \
   }
 
-static bool trace_process(int pid, const char *entry_symbol) {
+static bool trace_process(int pid, const char *entry_symbol, bool exit_kill) {
   LOGI("start tracing %d (tracer %d)", pid, getpid());
 
   /* INFO: Set value 0 to make compiler happy. */
@@ -165,7 +165,9 @@ static bool trace_process(int pid, const char *entry_symbol) {
 
   struct kernel_version version = parse_kversion();
   if (version.major > 3 || (version.major == 3 && version.minor >= 8)) {
-    if (ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_EXITKILL | PTRACE_O_TRACESECCOMP) == -1) {
+    unsigned long options = PTRACE_O_TRACESECCOMP;
+    if (exit_kill) options |= PTRACE_O_EXITKILL;
+    if (ptrace(PTRACE_SEIZE, pid, 0, options) == -1) {
       PLOGE("seize with EXITKILL and SECCOMP tracing");
 
       return false;
@@ -262,11 +264,11 @@ static bool trace_process(int pid, const char *entry_symbol) {
 
 
 bool trace_zygote(int pid) {
-  return trace_process(pid, "entry");
+  return trace_process(pid, "entry", true);
 }
 
 bool trace_zn_target(int pid) {
-  bool ok = trace_process(pid, "zn_entry");
+  bool ok = trace_process(pid, "zn_entry", false);
   if (!ok) {
     /* A failed optional ZN injection must not leave an init service stopped. */
     (void)ptrace(PTRACE_DETACH, pid, 0, SIGCONT);
