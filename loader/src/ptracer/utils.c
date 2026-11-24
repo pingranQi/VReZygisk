@@ -157,52 +157,35 @@ void *find_module_base(struct maps_info *map, const char *file) {
   return NULL;
 }
 
-void *find_func_addr(struct maps_info *local_info, struct maps_info *remote_info, const char *module, const char *func) {
-  uint8_t *local_base = (uint8_t *)find_module_base(local_info, module);
-  if (local_base == NULL) {
-    LOGD("failed to find local base for module %s", module);
+void *find_func_addr_info(struct maps_info *local_info,
+                          struct maps_info *remote_info,
+                          const char *module, const char *func,
+                          unsigned *out_type) {
+  if (out_type) *out_type = STT_NOTYPE;
+  if (!local_info || !remote_info || !module || !func) return NULL;
 
-    return NULL;
-  }
+  uintptr_t local_base = (uintptr_t)find_module_base(local_info, module);
+  uintptr_t remote_base = (uintptr_t)find_module_base(remote_info, module);
+  if (!local_base || !remote_base) return NULL;
 
-  uint8_t *remote_base = (uint8_t *)find_module_base(remote_info, module);
-  if (remote_base == NULL) {
-    LOGD("failed to find remote base for module %s", module);
-
-    return NULL;
-  }
-
-  LOGD("found local base %p remote base %p", local_base, remote_base);
-
-  ElfImg *mod = ElfImg_create(module, local_base);
-  if (mod == NULL) {
-    LOGW("failed to create elf img %s", module);
-
-    return NULL;
-  }
-
-  uint8_t *sym = (uint8_t *)getSymbAddress(mod, func);
-  if (sym == NULL) {
-    LOGD("failed to find symbol %s in %s", func, module);
-
-    ElfImg_destroy(mod);
-
-    return NULL;
-  }
-
-  LOGD("found symbol %s in %s: %p", func, module, sym);
-
-  uintptr_t addr = (uintptr_t)(sym - local_base) + (uintptr_t)remote_base;
-  LOGD("addr %p", (void *)addr);
-
-  ElfImg_destroy(mod);
-
-  return (void *)addr;
+  uintptr_t local_symbol = elf_find_symbol_info((void *)local_base, func,
+                                                 out_type);
+  if (!local_symbol || local_symbol < local_base) return NULL;
+  uintptr_t offset = local_symbol - local_base;
+  if (offset > UINTPTR_MAX - remote_base) return NULL;
+  return (void *)(remote_base + offset);
 }
 
-void *find_func_addr_version(struct maps_info *local_info, struct maps_info *remote_info,
-                            const char *module, const char *func,
-                            const char *version) {
+void *find_func_addr(struct maps_info *local_info, struct maps_info *remote_info,
+                     const char *module, const char *func) {
+  return find_func_addr_info(local_info, remote_info, module, func, NULL);
+}
+
+void *find_func_addr_version_info(struct maps_info *local_info,
+                                  struct maps_info *remote_info,
+                                  const char *module, const char *func,
+                                  const char *version, unsigned *out_type) {
+  if (out_type) *out_type = STT_NOTYPE;
   if (!local_info || !remote_info || !module || !func || !version ||
       !*version) return NULL;
 
@@ -212,16 +195,24 @@ void *find_func_addr_version(struct maps_info *local_info, struct maps_info *rem
 
   /*
    * Resolve from the mapped ELF's own DT_VERSYM/DT_VERDEF metadata. Using
-   * dlvsym() here was subtly wrong: it could return an interposed definition
-   * from a different object and then apply that object's offset to this one.
+   * dlvsym() here could return an interposed definition from another object.
    */
   uintptr_t local_symbol =
-      elf_find_versioned_symbol((void *)local_base, func, version);
+      elf_find_versioned_symbol_info((void *)local_base, func, version,
+                                     out_type);
   if (!local_symbol || local_symbol < local_base) return NULL;
 
   uintptr_t offset = local_symbol - local_base;
   if (offset > UINTPTR_MAX - remote_base) return NULL;
   return (void *)(remote_base + offset);
+}
+
+void *find_func_addr_version(struct maps_info *local_info,
+                             struct maps_info *remote_info,
+                             const char *module, const char *func,
+                             const char *version) {
+  return find_func_addr_version_info(local_info, remote_info, module, func,
+                                     version, NULL);
 }
 
 void align_stack(struct user_regs_struct *regs, long preserve) {
