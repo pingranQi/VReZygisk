@@ -296,6 +296,39 @@ static int spawn_companion(char *restrict argv[], char *restrict name, int lib_f
  * passing it to an app-domain process. This avoids requiring the receiver to
  * traverse /data/adb/modules and avoids exposing the original module path.
  */
+static bool zn_peer_matches_target(int client_fd,
+                                     const struct zn_module_entry *entry) {
+  if (!entry) return false;
+  struct ucred peer = {0};
+  socklen_t peer_size = sizeof(peer);
+  if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) != 0 ||
+      peer.pid <= 0) {
+    LOGW("Cannot identify ZN IPC peer");
+    return false;
+  }
+
+  char proc_path[64];
+  snprintf(proc_path, sizeof(proc_path), "/proc/%d/exe", peer.pid);
+  char executable[PATH_MAX];
+  ssize_t n = readlink(proc_path, executable, sizeof(executable) - 1);
+  if (n <= 0 || (size_t)n >= sizeof(executable)) return false;
+  executable[n] = '\0';
+
+  static const char deleted_suffix[] = " (deleted)";
+  size_t length = strlen(executable);
+  const size_t suffix_length = sizeof(deleted_suffix) - 1;
+  if (length >= suffix_length &&
+      strcmp(executable + length - suffix_length, deleted_suffix) == 0)
+    executable[length - suffix_length] = '\0';
+
+  if (entry->target_type == ZN_TARGET_PATH)
+    return strcmp(entry->target, executable) == 0;
+  const char *base = strrchr(executable, '/');
+  base = base ? base + 1 : executable;
+  return entry->target_type == ZN_TARGET_NAME &&
+         strcmp(entry->target, base) == 0;
+}
+
 static int create_zn_module_memfd(const char *path) {
 #ifdef SYS_memfd_create
   int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -897,8 +930,9 @@ void zygiskd_start(char *restrict argv[]) {
         ASSURE_SIZE_READ("GetZnModuleFd", "index", ret,
                          sizeof(index), break);
 
-        if (index >= context.zn_modules.count) {
-          LOGW("Invalid ZN module index for image request: %zu", index);
+        if (index >= context.zn_modules.count ||
+            !zn_peer_matches_target(client_fd, &context.zn_modules.items[index])) {
+          LOGW("Rejecting unauthorized ZN module image request for index %zu", index);
           break;
         }
 
@@ -922,7 +956,8 @@ void zygiskd_start(char *restrict argv[]) {
                          sizeof(index), break);
 
         if (index >= context.zn_modules.count ||
-            !context.zn_modules.items[index].companion) {
+            !context.zn_modules.items[index].companion ||
+            !zn_peer_matches_target(client_fd, &context.zn_modules.items[index])) {
           LOGW("Invalid or undeclared ZN companion index: %zu", index);
           ret = write_uint8_t(client_fd, 0);
           ASSURE_SIZE_WRITE("RequestZnCompanionSocket", "response", ret,
