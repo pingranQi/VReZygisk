@@ -265,6 +265,8 @@ struct elf_dyn_info {
   size_t jmprel_sz;
   off_t relr_off;
   size_t relr_sz;
+  off_t android_rela_off;
+  size_t android_rela_sz;
   int pltrel_type;
 
   size_t syment;
@@ -352,6 +354,8 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   size_t jmprel_sz = 0;
   size_t relr_sz = 0;
   size_t relrent = 0;
+  ElfW(Addr) android_rela_vaddr = 0;
+  size_t android_rela_sz = 0;
   size_t strsz = 0;
   size_t syment = 0;
 
@@ -397,11 +401,15 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       case 35: /* DT_RELRSZ */ relr_sz = (size_t)dyn[i].d_un.d_val; break;
       case 36: /* DT_RELR */ relr_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
       case 37: /* DT_RELRENT */ relrent = (size_t)dyn[i].d_un.d_val; break;
+      case 0x60000011: /* DT_ANDROID_RELA */
+        android_rela_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr;
+        break;
+      case 0x60000012: /* DT_ANDROID_RELASZ */
+        android_rela_sz = (size_t)dyn[i].d_un.d_val;
+        break;
       case 0x6000000f: /* DT_ANDROID_REL */
       case 0x60000010: /* DT_ANDROID_RELSZ */
-      case 0x60000011: /* DT_ANDROID_RELA */
-      case 0x60000012: /* DT_ANDROID_RELASZ */
-        LOGE("Android packed relocations are not supported by remote CSOLoader");
+        LOGE("Android REL packed relocations are not supported on AArch64");
         goto cleanup;
       case 0x6fffe000: /* DT_ANDROID_RELR */
       case 0x6fffe001: /* DT_ANDROID_RELRSZ */
@@ -434,6 +442,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       (rela_vaddr == 0) != (rela_sz == 0) ||
       (jmprel_vaddr == 0) != (jmprel_sz == 0) ||
       (relr_vaddr == 0) != (relr_sz == 0) ||
+      (android_rela_vaddr == 0) != (android_rela_sz == 0) ||
       (relr_sz && relrent != sizeof(ElfW(Addr))) ||
       (!relr_sz && relrent != 0) ||
       (jmprel_sz && out->pltrel_type != DT_REL && out->pltrel_type != DT_RELA)) {
@@ -492,6 +501,15 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       goto cleanup;
     }
     out->relr_sz = relr_sz;
+  }
+
+  if (android_rela_vaddr && android_rela_sz) {
+    if (!vaddr_to_offset(phdr, eh->e_phnum, android_rela_vaddr,
+                         android_rela_sz, &out->android_rela_off)) {
+      LOGE("Invalid or out-of-bounds DT_ANDROID_RELA table");
+      goto cleanup;
+    }
+    out->android_rela_sz = android_rela_sz;
   }
 
   /* INFO: Read string table into memory */
@@ -977,6 +995,175 @@ static bool apply_relr_section(int pid, int fd, const struct elf_dyn_info *info,
   return true;
 }
 
+static bool decode_sleb128(const uint8_t **cursor, const uint8_t *end,
+                           int64_t *out) {
+  if (!cursor || !*cursor || !out) return false;
+  uint64_t value = 0;
+  unsigned shift = 0;
+  uint8_t byte = 0;
+  do {
+    if (*cursor >= end || shift >= 64) return false;
+    byte = *(*cursor)++;
+    if (shift == 63 && (byte & 0x7e) != 0 && (byte & 0x7e) != 0x7e)
+      return false;
+    value |= (uint64_t)(byte & 0x7f) << shift;
+    shift += 7;
+  } while (byte & 0x80);
+
+  if (shift < 64 && (byte & 0x40)) value |= (~UINT64_C(0)) << shift;
+  *out = (int64_t)value;
+  return true;
+}
+
+static bool apply_android_rela_section(int pid, int fd,
+                                       const struct elf_dyn_info *info,
+                                       struct maps_info *local_map,
+                                       struct maps_info *remote_map,
+                                       const char *const *needed_paths,
+                                       const ElfW(Phdr) *phdr, int phnum,
+                                       uintptr_t load_bias) {
+#if !defined(__aarch64__)
+  (void)pid; (void)fd; (void)info; (void)local_map; (void)remote_map;
+  (void)needed_paths; (void)phdr; (void)phnum; (void)load_bias;
+  return true;
+#else
+  if (!info || !info->android_rela_sz) return true;
+  if (info->android_rela_sz < 4 || info->android_rela_sz > 64U * 1024U * 1024U)
+    return false;
+
+  uint8_t *buffer = (uint8_t *)malloc(info->android_rela_sz);
+  if (!buffer) return false;
+  bool ok = false;
+  if (!read_loop_offset(fd, buffer, info->android_rela_sz,
+                        info->android_rela_off)) goto done;
+
+  const uint8_t *cursor = buffer;
+  const uint8_t *end = buffer + info->android_rela_sz;
+  if ((size_t)(end - cursor) < 4 || memcmp(cursor, "APS2", 4) != 0) {
+    LOGE("Invalid Android packed relocation magic");
+    goto done;
+  }
+  cursor += 4;
+
+  int64_t reloc_count_signed = 0, relocation_offset_signed = 0;
+  if (!decode_sleb128(&cursor, end, &reloc_count_signed) ||
+      !decode_sleb128(&cursor, end, &relocation_offset_signed) ||
+      reloc_count_signed < 0 || reloc_count_signed > 1000000 ||
+      relocation_offset_signed < 0) {
+    LOGE("Invalid Android packed relocation header");
+    goto done;
+  }
+
+  uint64_t reloc_offset = (uint64_t)relocation_offset_signed;
+  int64_t addend = 0;
+  uint64_t processed = 0;
+  enum {
+    GROUPED_BY_INFO = 1,
+    GROUPED_BY_OFFSET_DELTA = 2,
+    GROUPED_BY_ADDEND = 4,
+    GROUP_HAS_ADDEND = 8
+  };
+
+  while (processed < (uint64_t)reloc_count_signed) {
+    int64_t group_size_signed = 0, flags_signed = 0;
+    if (!decode_sleb128(&cursor, end, &group_size_signed) ||
+        !decode_sleb128(&cursor, end, &flags_signed) ||
+        group_size_signed <= 0 ||
+        (uint64_t)group_size_signed > (uint64_t)reloc_count_signed - processed ||
+        flags_signed < 0 || (flags_signed & ~15) != 0) {
+      LOGE("Invalid Android packed relocation group");
+      goto done;
+    }
+
+    uint64_t group_size = (uint64_t)group_size_signed;
+    unsigned flags = (unsigned)flags_signed;
+    if (!(flags & GROUP_HAS_ADDEND)) {
+      LOGE("AArch64 Android RELA group is missing addends");
+      goto done;
+    }
+
+    int64_t offset_delta_group = 0;
+    uint64_t info_group = 0;
+    if ((flags & GROUPED_BY_OFFSET_DELTA) &&
+        !decode_sleb128(&cursor, end, &offset_delta_group)) goto done;
+    if ((flags & GROUPED_BY_INFO)) {
+      int64_t encoded_info = 0;
+      if (!decode_sleb128(&cursor, end, &encoded_info) || encoded_info < 0)
+        goto done;
+      info_group = (uint64_t)encoded_info;
+    }
+    if ((flags & GROUPED_BY_ADDEND) &&
+        !decode_sleb128(&cursor, end, &addend)) goto done;
+
+    for (uint64_t i = 0; i < group_size; ++i) {
+      int64_t delta = offset_delta_group;
+      if (!(flags & GROUPED_BY_OFFSET_DELTA) &&
+          !decode_sleb128(&cursor, end, &delta)) goto done;
+      if (delta < 0 || reloc_offset > UINT64_MAX - (uint64_t)delta)
+        goto done;
+      reloc_offset += (uint64_t)delta;
+
+      uint64_t r_info = info_group;
+      if (!(flags & GROUPED_BY_INFO)) {
+        int64_t encoded_info = 0;
+        if (!decode_sleb128(&cursor, end, &encoded_info) || encoded_info < 0)
+          goto done;
+        r_info = (uint64_t)encoded_info;
+      }
+
+      if (!(flags & GROUPED_BY_ADDEND)) {
+        int64_t addend_delta = 0;
+        if (!decode_sleb128(&cursor, end, &addend_delta) ||
+            __builtin_add_overflow(addend, addend_delta, &addend))
+          goto done;
+      }
+
+      unsigned type = (unsigned)ELF_R_TYPE(r_info);
+      unsigned sym = (unsigned)ELF_R_SYM(r_info);
+      if (type == R_AARCH64_NONE) continue;
+      if (reloc_offset > UINTPTR_MAX - load_bias ||
+          !vaddr_range_in_load_segment(phdr, phnum, (ElfW(Addr))reloc_offset,
+                                       sizeof(ElfW(Addr)), true)) {
+        LOGE("Android packed relocation target is outside writable PT_LOAD");
+        goto done;
+      }
+
+      uintptr_t target = load_bias + (uintptr_t)reloc_offset;
+      ElfW(Addr) value = 0;
+      if (type == R_AARCH64_RELATIVE) {
+        if (sym != 0) goto done;
+        value = (ElfW(Addr))(load_bias + (uintptr_t)addend);
+      } else if (type == R_AARCH64_GLOB_DAT ||
+                 type == R_AARCH64_JUMP_SLOT ||
+                 type == R_AARCH64_ABS64) {
+        uintptr_t sym_addr = 0;
+        if (!resolve_symbol_addr(fd, info, local_map, remote_map,
+                                 needed_paths, phdr, phnum, load_bias,
+                                 sym, &sym_addr)) goto done;
+        value = sym_addr ? (ElfW(Addr))(sym_addr + (uintptr_t)addend) : 0;
+      } else {
+        LOGE("Unsupported AArch64 Android packed relocation type %u", type);
+        goto done;
+      }
+
+      if (!write_remote_addr(pid, target, value)) goto done;
+      processed++;
+    }
+  }
+
+  if (cursor != end) {
+    /* Padding is not part of APS2; trailing bytes usually indicate corruption. */
+    LOGE("Trailing bytes in Android packed relocation stream");
+    goto done;
+  }
+  ok = true;
+
+done:
+  free(buffer);
+  return ok;
+#endif
+}
+
 static bool apply_relocations(int pid, int fd, const struct elf_dyn_info *info,
                               struct maps_info *local_map, struct maps_info *remote_map,
                               const char *const *needed_paths, const ElfW(Phdr) *phdr,
@@ -984,6 +1171,11 @@ static bool apply_relocations(int pid, int fd, const struct elf_dyn_info *info,
   /* Relative relocations must be applied before symbol relocations. */
   if (!apply_relr_section(pid, fd, info, phdr, phnum, load_bias)) {
     LOGE("Failed to apply DT_RELR relocations");
+    return false;
+  }
+  if (!apply_android_rela_section(pid, fd, info, local_map, remote_map,
+                                  needed_paths, phdr, phnum, load_bias)) {
+    LOGE("Failed to apply Android packed RELA relocations");
     return false;
   }
 
