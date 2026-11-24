@@ -391,14 +391,13 @@ static void hyos_install_hooks(void) {
   struct hyos_main_base_lookup lookup = {0};
   dl_iterate_phdr(hyos_find_main_base, &lookup);
   uintptr_t base = lookup.base;
-  if (!base) {
-    LOGW("HyperOS could not locate hyos_spawner load bias");
-    return;
-  }
+  if (!base)
+    LOGW("HyperOS could not locate hyos_spawner load bias; trying inline hooks");
 
   if (!g_hyos_orig_setcontext) {
     void *original = NULL;
-    if (api_plt_hook((void *)base, "selinux_android_setcontext",
+    if (base &&
+        api_plt_hook((void *)base, "selinux_android_setcontext",
                      (void *)hyos_setcontext_hook, &original) == ZN_SUCCESS &&
         original) {
       g_hyos_orig_setcontext = (hyos_setcontext_fn)original;
@@ -423,7 +422,8 @@ static void hyos_install_hooks(void) {
 
   if (!g_hyos_orig_setname) {
     void *original = NULL;
-    if (api_plt_hook((void *)base, "pthread_setname_np",
+    if (base &&
+        api_plt_hook((void *)base, "pthread_setname_np",
                      (void *)hyos_setname_hook, &original) == ZN_SUCCESS &&
         original) {
       g_hyos_orig_setname = (hyos_setname_fn)original;
