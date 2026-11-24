@@ -326,6 +326,12 @@ def patch_csoloader_linker_lifetime(linker_path: Path) -> None:
             "bool linker_destroy(struct linker *linker);",
             "report unload refusal while handles remain open",
         )
+        header = replace_once(
+            header,
+            "void linker_abandon(struct linker *linker);",
+            "bool linker_abandon(struct linker *linker);",
+            "report abandon refusal while handles remain open",
+        )
         header_path.write_text(header)
 
     source = linker_path.read_text()
@@ -572,6 +578,48 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
             "unconditional linker open-handle guard",
         )
 
+    abandon_marker = "/* VREZYGISK_REFCOUNTED_LINKER_ABANDON */"
+    if abandon_marker not in source:
+        source = source.replace(
+            "void linker_abandon(struct linker *linker) {",
+            "bool linker_abandon(struct linker *linker) {",
+            1,
+        )
+        abandon_start = source.index("bool linker_abandon(struct linker *linker) {")
+        abandon_end = source.index("\nstatic size_t phdr_get_load_size", abandon_start)
+        abandon_chunk = source[abandon_start:abandon_end]
+        old_head = """bool linker_abandon(struct linker *linker) {
+  _linker_release_dependencies(linker, false, false);"""
+        new_head = """bool linker_abandon(struct linker *linker) {
+  if (!linker || !linker->img || _linker_has_open_handles(linker))
+    return false;
+  _linker_release_dependencies(linker, false, false);"""
+        if old_head not in abandon_chunk:
+            raise RuntimeError("linker abandon guard anchor missing")
+        abandon_chunk = abandon_chunk.replace(old_head, new_head, 1)
+        old_tail = """  linker->dep_count = 0;
+  linker->is_linked = false;
+  linker->main_map_size = 0;
+}"""
+        new_tail = """  free(linker->dependencies);
+  linker->dependencies = NULL;
+  linker->dep_capacity = 0;
+  linker->dep_count = 0;
+  linker->main_handle_refs = 0;
+  linker->is_linked = false;
+  linker->main_map_size = 0;
+  return true;
+}"""
+        if old_tail not in abandon_chunk:
+            raise RuntimeError("linker abandon cleanup anchor missing")
+        abandon_chunk = abandon_chunk.replace(old_tail, new_tail, 1)
+        source = source[:abandon_start] + abandon_chunk + source[abandon_end:]
+        source = source.replace(
+            "/* INFO: Internal functions END */",
+            "/* VREZYGISK_REFCOUNTED_LINKER_ABANDON */\n\n/* INFO: Internal functions END */",
+            1,
+        )
+
     deps_marker = "/* VREZYGISK_GROWABLE_LINKER_DEPENDENCIES */"
     if deps_marker not in source:
         source = replace_once(
@@ -744,6 +792,27 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
         csoloader = csoloader.replace(
             "  return true;\n}\n\n/* INFO: Free resources related to the library without unloading it */",
             "  return true;\n}\n\n/* VREZYGISK_REFCOUNTED_CSOLOADER_UNLOAD */\n\n/* INFO: Free resources related to the library without unloading it */",
+            1,
+        )
+        csoloader_path.write_text(csoloader)
+
+    abandon_api_marker = "/* VREZYGISK_REFCOUNTED_CSOLOADER_ABANDON */"
+    if abandon_api_marker not in csoloader:
+        csoloader = replace_once(
+            csoloader,
+            """bool csoloader_abandon(struct csoloader *lib) {
+  linker_abandon(&lib->linker);
+
+  free(lib->lib_path);""",
+            """bool csoloader_abandon(struct csoloader *lib) {
+  if (!lib || !linker_abandon(&lib->linker)) return false;
+
+  free(lib->lib_path);""",
+            "propagate linker abandon refusal",
+        )
+        csoloader = csoloader.replace(
+            "  return true;\n}\n\nvoid *csoloader_get_symbol",
+            "  return true;\n}\n\n/* VREZYGISK_REFCOUNTED_CSOLOADER_ABANDON */\n\nvoid *csoloader_get_symbol",
             1,
         )
         csoloader_path.write_text(csoloader)
