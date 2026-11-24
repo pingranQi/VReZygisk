@@ -476,7 +476,7 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
     if (handle == linker->img) return linker->img;
 
     for (int i = 0; i < linker->dep_count; i++) {
-      if (!linker->dependencies[i].is_manual_load || handle != linker->dependencies[i].img) continue;
+      if (handle != linker->dependencies[i].img) continue;
 
       return linker->dependencies[i].img;
     }
@@ -513,12 +513,18 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
         source = replace_once(source, image_from_handle,
                               image_from_handle + "\n\n" + ref_helper,
                               "per-image dlopen reference accounting")
-        source = replace_once(
-            source,
-            "if (img) return img;",
-            "if (img && _linker_adjust_handle_ref(linker, img, true)) return img;",
-            "acquire image handle on custom dlopen",
-        )
+        dlopen_start = source.index("static void *custom_dlopen(")
+        dlopen_end = source.index("static void *custom_dlsym(", dlopen_start)
+        dlopen_chunk = source[dlopen_start:dlopen_end]
+        if "if (img) return img;" in dlopen_chunk:
+            dlopen_chunk = dlopen_chunk.replace(
+                "if (img) return img;",
+                "if (img && _linker_adjust_handle_ref(linker, img, true)) return img;",
+                1,
+            )
+        elif "_linker_adjust_handle_ref(linker, img, true)" not in dlopen_chunk:
+            raise RuntimeError("custom dlopen handle acquisition anchor missing")
+        source = source[:dlopen_start] + dlopen_chunk + source[dlopen_end:]
         source = replace_once(
             source,
             """  /* INFO: If a handle is shared between modules, this will not be able to find it.*/
