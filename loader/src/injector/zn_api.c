@@ -220,8 +220,6 @@ static char g_hyos_captured_name[256];
 static bool g_hyos_has_captured_name;
 static hyos_setcontext_fn g_hyos_orig_setcontext;
 static hyos_setname_fn g_hyos_orig_setname;
-static void *g_hyos_selinux_handle;
-static void *g_hyos_libc_handle;
 
 static pid_t raw_getpid(void) {
   return (pid_t)syscall(SYS_getpid);
@@ -366,6 +364,7 @@ static void hyos_atfork_child(void) {
   g_hyos_captured_name_pid = 0;
   g_hyos_has_captured_name = false;
   g_hyos_captured_name[0] = '\0';
+  pthread_mutex_unlock(&g_zn_plti_mutex);
 }
 
 struct hyos_main_base_lookup {
