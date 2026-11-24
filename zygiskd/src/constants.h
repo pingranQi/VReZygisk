@@ -22,7 +22,8 @@ enum DaemonSocketAction {
   RemoveModule           = 8,
   ReadZnModules          = 9,
   RequestZnCompanionSocket = 10,
-  GetZnModuleFd = 11
+  GetZnModuleFd = 11,
+  RegisterZnCompanionBroker = 12
 };
 
 enum ProcessFlags: uint32_t {
