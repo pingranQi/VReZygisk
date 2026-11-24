@@ -312,11 +312,12 @@ static bool parse_dynamic(const struct image_view *v,
 }
 
 static bool version_name_for_index(const struct image_view *v,
+                                   const Elf64_Phdr *phdr, size_t phnum,
                                    const struct dynamic_info *di,
                                    uint16_t wanted_index,
                                    const char **out_name,
                                    uint32_t *out_hash) {
-  if (!v || !di || !out_name || !out_hash || !di->verdef ||
+  if (!v || !phdr || !di || !out_name || !out_hash || !di->verdef ||
       !di->verdef_count || wanted_index <= VER_NDX_GLOBAL ||
       wanted_index > VER_NDX_MASK) return false;
 
@@ -324,7 +325,7 @@ static bool version_name_for_index(const struct image_view *v,
   uint32_t found_hash = 0;
   uintptr_t cur = (uintptr_t)di->verdef;
   for (size_t i = 0; i < di->verdef_count; ++i) {
-    if (!range_ok(v, cur, sizeof(Elf64_Verdef))) return false;
+    if (!load_range_ok(v, phdr, phnum, cur, sizeof(Elf64_Verdef))) return false;
     const Elf64_Verdef *vd = (const Elf64_Verdef *)cur;
     if (vd->vd_version != VER_DEF_CURRENT || vd->vd_cnt == 0 ||
         vd->vd_cnt > MAX_VERSION_ENTRIES || vd->vd_aux < sizeof(Elf64_Verdef) ||
@@ -334,7 +335,7 @@ static bool version_name_for_index(const struct image_view *v,
     if (add_overflow_uintptr(cur, vd->vd_aux, &aux_addr)) return false;
     const char *primary_name = NULL;
     for (size_t j = 0; j < vd->vd_cnt; ++j) {
-      if (!range_ok(v, aux_addr, sizeof(Elf64_Verdaux))) return false;
+      if (!load_range_ok(v, phdr, phnum, aux_addr, sizeof(Elf64_Verdaux))) return false;
       const Elf64_Verdaux *aux = (const Elf64_Verdaux *)aux_addr;
       if (aux->vda_name >= di->strsz ||
           !memchr(di->strtab + aux->vda_name, '\0',
@@ -383,6 +384,8 @@ static bool symbol_runtime_address(const struct image_view *view,
     *out = (uintptr_t)sym->st_value;
     return true;
   }
+
+  if (sym->st_shndx >= SHN_LORESERVE) return false;
 
   uintptr_t value = (uintptr_t)sym->st_value;
   if ((Elf64_Addr)value != sym->st_value ||
@@ -450,7 +453,7 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
     uint16_t vi = di.versym[i] & VER_NDX_MASK;
     const char *candidate_version = NULL;
     uint32_t candidate_hash = 0;
-    if (!version_name_for_index(&view, &di, vi,
+    if (!version_name_for_index(&view, phdr, eh->e_phnum, &di, vi,
                                 &candidate_version, &candidate_hash)) continue;
     if (candidate_hash != wanted_hash ||
         strcmp(candidate_version, version_name) != 0) continue;
@@ -464,12 +467,13 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
 
 
 static bool version_requirement_for_index(const struct image_view *view,
+                                          const Elf64_Phdr *phdr, size_t phnum,
                                           const struct dynamic_info *di,
                                           uint16_t wanted_index,
                                           const char **out_version,
                                           const char **out_provider,
                                           uint32_t *out_hash) {
-  if (!view || !di || !di->verneed || !di->verneed_count ||
+  if (!view || !phdr || !di || !di->verneed || !di->verneed_count ||
       wanted_index <= VER_NDX_GLOBAL || !out_version ||
       !out_provider || !out_hash) return false;
 
@@ -479,7 +483,7 @@ static bool version_requirement_for_index(const struct image_view *view,
   uintptr_t need_addr = (uintptr_t)di->verneed;
 
   for (size_t i = 0; i < di->verneed_count; ++i) {
-    if (!range_ok(view, need_addr, sizeof(Elf64_Verneed))) return false;
+    if (!load_range_ok(view, phdr, phnum, need_addr, sizeof(Elf64_Verneed))) return false;
     const Elf64_Verneed *need = (const Elf64_Verneed *)need_addr;
     if (need->vn_version != VER_NEED_CURRENT || need->vn_cnt == 0 ||
         need->vn_cnt > MAX_VERSION_ENTRIES || need->vn_aux < sizeof(Elf64_Verneed) ||
@@ -493,7 +497,7 @@ static bool version_requirement_for_index(const struct image_view *view,
       return false;
 
     for (size_t j = 0; j < need->vn_cnt; ++j) {
-      if (!range_ok(view, aux_addr, sizeof(Elf64_Vernaux))) return false;
+      if (!load_range_ok(view, phdr, phnum, aux_addr, sizeof(Elf64_Vernaux))) return false;
       const Elf64_Vernaux *aux = (const Elf64_Vernaux *)aux_addr;
       if (aux->vna_name >= di->strsz ||
           !memchr(di->strtab + aux->vna_name, '\0',
@@ -564,7 +568,8 @@ uintptr_t elf_resolve_versioned_symbol(void *provider_base,
   const char *required_version = NULL;
   const char *required_provider = NULL;
   uint32_t required_hash = 0;
-  if (!version_requirement_for_index(&requester_view, &request, wanted,
+  if (!version_requirement_for_index(&requester_view, requester_phdr,
+                                     requester_eh->e_phnum, &request, wanted,
                                      &required_version, &required_provider,
                                      &required_hash) ||
       required_hash != elf_name_hash(required_version)) return 0;
