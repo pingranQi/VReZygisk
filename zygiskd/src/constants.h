@@ -19,7 +19,8 @@ enum DaemonSocketAction {
   GetModuleDir           = 5,
   ZygoteRestart          = 6,
   UpdateMountNamespace   = 7,
-  RemoveModule           = 8,\n  ReadZnModules          = 9
+  RemoveModule           = 8,
+  ReadZnModules          = 9
 };
 
 enum ProcessFlags: uint32_t {
