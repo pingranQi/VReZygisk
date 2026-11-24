@@ -6,6 +6,8 @@
 #include <link.h>
 #include <pthread.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/syscall.h>
 #include <plti.h>
 #include <limits.h>
@@ -35,6 +37,7 @@ struct zn_module_handle {
   void *dl_handle;
   char *module_id;
   char *library;
+  int companion_broker_fd;
 };
 
 static struct zn_module_handle **g_zn_handles;
@@ -128,9 +131,67 @@ static int api_unsupported_inline_unhook(void *target) {
   return ZN_FAILED;
 }
 
+static bool hyos_in_child(void);
+
+static int connect_zn_companion_via_broker(int broker_fd) {
+  if (broker_fd < 0) return -1;
+  int sockets[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) != 0) {
+    PLOGE("create ZN companion client socketpair");
+    return -1;
+  }
+
+  struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
+  (void)setsockopt(sockets[0], SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout));
+  if (write_fd(broker_fd, sockets[1]) != 1) {
+    LOGE("Failed sending ZN companion client FD through broker");
+    close(sockets[0]);
+    close(sockets[1]);
+    return -1;
+  }
+  close(sockets[1]);
+
+  uint8_t ack = 0;
+  if (read_uint8_t(sockets[0], &ack) != sizeof(ack) || ack != 1) {
+    LOGE("ZN companion broker did not acknowledge the connection");
+    close(sockets[0]);
+    return -1;
+  }
+
+  timeout.tv_sec = 0;
+  timeout.tv_usec = 0;
+  (void)setsockopt(sockets[0], SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout));
+  return sockets[0];
+}
+
+static int create_zn_companion_broker(const char *library) {
+  int sockets[2];
+  if (socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0, sockets) != 0) {
+    PLOGE("create ZN companion broker socketpair");
+    return -1;
+  }
+
+  struct timeval timeout = { .tv_sec = 3, .tv_usec = 0 };
+  (void)setsockopt(sockets[0], SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                   sizeof(timeout));
+  if (!rezygiskd_register_zn_companion_broker(library, sockets[1])) {
+    LOGW("Failed to register ZN companion broker for %s", library);
+    close(sockets[0]);
+    close(sockets[1]);
+    return -1;
+  }
+  close(sockets[1]);
+  LOGI("Registered inherited ZN companion broker for %s", library);
+  return sockets[0];
+}
+
 static int api_connect_companion(void *opaque) {
   const struct zn_module_handle *handle = opaque;
   if (!handle) return -1;
+  if (handle->companion_broker_fd >= 0 && hyos_in_child())
+    return connect_zn_companion_via_broker(handle->companion_broker_fd);
   return rezygiskd_connect_zn_companion(handle->manifest_index);
 }
 
@@ -683,6 +744,7 @@ bool zn_modules_load_for_current_process(void) {
     self->dl_handle = handle;
     self->module_id = strdup(entry->module_id);
     self->library = strdup(entry->library);
+    self->companion_broker_fd = -1;
     if (!self->module_id || !self->library ||
         g_zn_handle_count >= SIZE_MAX / sizeof(*g_zn_handles)) {
       LOGE("Failed to retain ZN module identity for %s", entry->module_id);
@@ -706,6 +768,11 @@ bool zn_modules_load_for_current_process(void) {
     }
     g_zn_handles = new_handles;
     g_zn_handles[g_zn_handle_count++] = self;
+
+    if (entry->companion && module->target_api_version >= 3 &&
+        is_hyos_spawner()) {
+      self->companion_broker_fd = create_zn_companion_broker(entry->library);
+    }
 
     LOGI("Loading ZN module %s (API v%d) for %s",
          entry->module_id, module->target_api_version, exe_path);
