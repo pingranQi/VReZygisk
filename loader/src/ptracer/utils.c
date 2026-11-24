@@ -179,7 +179,10 @@ void *find_func_addr_info(struct maps_info *local_info,
 
 void *find_func_addr(struct maps_info *local_info, struct maps_info *remote_info,
                      const char *module, const char *func) {
-  return find_func_addr_info(local_info, remote_info, module, func, NULL);
+  unsigned type = STT_NOTYPE;
+  void *address = find_func_addr_info(local_info, remote_info, module, func,
+                                      &type);
+  return type == STT_GNU_IFUNC ? NULL : address;
 }
 
 void *find_func_addr_version_info(struct maps_info *local_info,
@@ -212,8 +215,10 @@ void *find_func_addr_version(struct maps_info *local_info,
                              struct maps_info *remote_info,
                              const char *module, const char *func,
                              const char *version) {
-  return find_func_addr_version_info(local_info, remote_info, module, func,
-                                     version, NULL);
+  unsigned type = STT_NOTYPE;
+  void *address = find_func_addr_version_info(local_info, remote_info, module,
+                                              func, version, &type);
+  return type == STT_GNU_IFUNC ? NULL : address;
 }
 
 void align_stack(struct user_regs_struct *regs, long preserve) {
