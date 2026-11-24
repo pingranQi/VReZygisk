@@ -18,14 +18,130 @@ def replace_once(source: str, old: str, new: str, label: str) -> str:
     return source.replace(old, new, 1)
 
 
+
+def patch_csoloader_api(path: Path) -> None:
+    marker = "/* VREZYGISK_PREALLOCATE_LIBRARY_PATH */"
+    source = path.read_text()
+    if marker in source:
+        return
+
+    source = replace_once(
+        source,
+        """bool csoloader_load(struct csoloader *lib, const char *lib_path) {
+  struct loaded_dep dep_info = { 0 };
+  void *map_start = linker_load_library_manually(lib_path, &dep_info);
+  if (!map_start) {
+    LOGE("Failed to load library: %s", lib_path);
+
+    return false;
+  }
+
+  struct csoloader_elf *elf_image = csoloader_elf_create(lib_path, map_start);
+  if (!elf_image) {
+    LOGE("Failed to create ELF image for %s", lib_path);
+
+    if (dep_info.map_size > 0)
+      munmap(map_start, dep_info.map_size);
+
+    return false;
+  }
+
+  if (!linker_init(&lib->linker, elf_image)) {
+    LOGE("Failed to initialize linker for %s", lib_path);
+
+    csoloader_elf_destroy(elf_image);
+    if (dep_info.map_size > 0)
+      munmap(map_start, dep_info.map_size);
+
+    return false;
+  }
+
+  lib->linker.main_map_size = dep_info.map_size;
+
+  if (!linker_link(&lib->linker)) {
+    LOGE("Linker failed to link %s", lib_path);
+
+    linker_destroy(&lib->linker);
+
+    return false;
+  }
+
+  lib->img = elf_image;
+  lib->lib_path = strdup(lib_path);
+  if (!lib->lib_path) {
+    LOGE("Failed to duplicate library path string");
+
+    linker_destroy(&lib->linker);
+
+    return false;
+  }
+
+  return true;
+}""",
+        """bool csoloader_load(struct csoloader *lib, const char *lib_path) {
+  if (!lib || !lib_path || lib->img || lib->lib_path) return false;
+
+  /* Allocate all bookkeeping before mapping or executing module code. This
+   * ensures an allocation failure cannot trigger Bionic fallback after the
+   * custom loader has already run constructors. */
+  char *path_copy = strdup(lib_path);
+  if (!path_copy) {
+    LOGE("Failed to duplicate library path string");
+    return false;
+  }
+
+  struct loaded_dep dep_info = { 0 };
+  void *map_start = linker_load_library_manually(lib_path, &dep_info);
+  if (!map_start) {
+    LOGE("Failed to load library: %s", lib_path);
+    free(path_copy);
+    return false;
+  }
+
+  struct csoloader_elf *elf_image = csoloader_elf_create(lib_path, map_start);
+  if (!elf_image) {
+    LOGE("Failed to create ELF image for %s", lib_path);
+    if (dep_info.map_size > 0) munmap(map_start, dep_info.map_size);
+    free(path_copy);
+    return false;
+  }
+
+  if (!linker_init(&lib->linker, elf_image)) {
+    LOGE("Failed to initialize linker for %s", lib_path);
+    csoloader_elf_destroy(elf_image);
+    if (dep_info.map_size > 0) munmap(map_start, dep_info.map_size);
+    free(path_copy);
+    return false;
+  }
+
+  lib->linker.main_map_size = dep_info.map_size;
+  if (!linker_link(&lib->linker)) {
+    LOGE("Linker failed to link %s", lib_path);
+    linker_destroy(&lib->linker);
+    free(path_copy);
+    return false;
+  }
+
+  lib->img = elf_image;
+  lib->lib_path = path_copy;
+  return true;
+}
+
+/* VREZYGISK_PREALLOCATE_LIBRARY_PATH */""",
+        "preallocate CSOLoader path before constructors",
+    )
+    path.write_text(source)
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(f"usage: {sys.argv[0]} <CSOLoader/src/linker.c>", file=sys.stderr)
         return 2
 
     path = Path(sys.argv[1])
+    csoloader_path = path.with_name("csoloader.c")
     source = path.read_text()
     if MARKER in source:
+        patch_csoloader_api(csoloader_path)
         if REGISTRATION_MARKER not in source:
             source = replace_once(
                 source,
@@ -342,8 +458,9 @@ static size_t _linker_bump_tls_generation(void) {
         "TLS registration failure propagation",
     )
 
+    patch_csoloader_api(csoloader_path)
     path.write_text(source)
-    print(f"Applied VReZygisk TLS hardening to {path}")
+    print(f"Applied VReZygisk linker/TLS hardening to {path}")
     return 0
 
 
