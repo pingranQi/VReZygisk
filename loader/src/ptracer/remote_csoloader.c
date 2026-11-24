@@ -702,7 +702,7 @@ if (ELF_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
     return true;
   }
 
-  /* INFO: Search in DT_NEEDED libraries */
+  /* Search direct DT_NEEDED dependencies first, preserving declaration order. */
   for (size_t i = 0; i < info->needed_count; i++) {
     const char *mod_path = needed_paths ? needed_paths[i] : NULL;
     if (!mod_path) continue;
@@ -710,7 +710,49 @@ if (ELF_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
     void *addr = find_func_addr(local_map, remote_map, mod_path, name);
     if (addr) {
       *out_addr = (uintptr_t)addr;
+      return true;
+    }
+  }
 
+  /*
+   * Bionic's global scope also includes transitive dependencies and already
+   * loaded global images. The bootstrap mapper does not recursively load
+   * libraries, but it can search the target's resident ELF set after direct
+   * dependencies. De-duplicate offset-zero map entries to avoid repeated
+   * parsing of the same ELF.
+   */
+  for (size_t i = 0; i < remote_map->length; ++i) {
+    const struct map_entry *candidate = &remote_map->maps[i];
+    if (!candidate->path || candidate->path[0] == '\0' ||
+        candidate->offset != 0)
+      continue;
+
+    bool already_checked = false;
+    for (size_t j = 0; j < i; ++j) {
+      const struct map_entry *previous = &remote_map->maps[j];
+      if (previous->offset == 0 && previous->path &&
+          strcmp(previous->path, candidate->path) == 0) {
+        already_checked = true;
+        break;
+      }
+    }
+    if (already_checked) continue;
+
+    bool direct_dependency = false;
+    for (size_t j = 0; j < info->needed_count; ++j) {
+      const char *direct_path = needed_paths ? needed_paths[j] : NULL;
+      if (direct_path && strcmp(direct_path, candidate->path) == 0) {
+        direct_dependency = true;
+        break;
+      }
+    }
+    if (direct_dependency) continue;
+
+    void *addr = find_func_addr(local_map, remote_map, candidate->path, name);
+    if (addr) {
+      LOGD("Resolved %s from resident transitive/global image %s",
+           name, candidate->path);
+      *out_addr = (uintptr_t)addr;
       return true;
     }
   }
