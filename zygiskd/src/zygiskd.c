@@ -284,6 +284,86 @@ static int spawn_companion(char *restrict argv[], char *restrict name, int lib_f
   exit(0);
 }
 
+static int spawn_zn_companion(char *restrict argv[], const char *module_id,
+                                const char *library_path) {
+  int sockets[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == -1) {
+    LOGE("Failed creating ZN companion socket pair: %s", strerror(errno));
+    return -1;
+  }
+
+  int daemon_fd = sockets[0];
+  int companion_fd = sockets[1];
+  pid_t pid = fork();
+  if (pid < 0) {
+    LOGE("Failed forking ZN companion: %s", strerror(errno));
+    close(daemon_fd);
+    close(companion_fd);
+    return -1;
+  }
+
+  if (pid == 0) {
+    close(daemon_fd);
+    if (fcntl(companion_fd, F_SETFD, 0) == -1) {
+      LOGE("Failed clearing ZN companion FD_CLOEXEC: %s", strerror(errno));
+      close(companion_fd);
+      _exit(1);
+    }
+
+    const char *process = argv[0];
+    const char *last = strrchr(process, '/');
+    char process_name[256];
+    snprintf(process_name, sizeof(process_name), "%s-zn-%s",
+             last ? last + 1 : process, module_id);
+    char fd_string[32];
+    snprintf(fd_string, sizeof(fd_string), "%d", companion_fd);
+    char command[] = "zn-companion";
+    char *child_argv[] = {process_name, command, fd_string, NULL};
+    if (non_blocking_execv(ZYGISKD_PATH, child_argv) == -1) {
+      LOGE("Failed executing ZN companion: %s", strerror(errno));
+      close(companion_fd);
+      _exit(1);
+    }
+    _exit(0);
+  }
+
+  close(companion_fd);
+  int status = 0;
+  while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    LOGE("ZN companion launcher exited abnormally (status=%d)", status);
+    close(daemon_fd);
+    return -1;
+  }
+
+  int library_fd = open(library_path, O_RDONLY | O_CLOEXEC);
+  if (library_fd < 0) {
+    LOGE("Failed opening ZN companion library %s: %s",
+         library_path, strerror(errno));
+    close(daemon_fd);
+    return -1;
+  }
+
+  if (write_string(daemon_fd, module_id) < 0 ||
+      write_fd(daemon_fd, library_fd) < 0) {
+    LOGE("Failed sending ZN companion bootstrap data for %s", module_id);
+    close(library_fd);
+    close(daemon_fd);
+    return -1;
+  }
+  close(library_fd);
+
+  uint8_t response = 0;
+  if (read_uint8_t(daemon_fd, &response) != sizeof(response) || response != 1) {
+    LOGE("ZN companion module initialization rejected for %s", module_id);
+    close(daemon_fd);
+    return -2;
+  }
+
+  LOGI("Started ZN companion for module %s", module_id);
+  return daemon_fd;
+}
+
 /* WARNING: Dynamic memory based */
 void zygiskd_start(char *restrict argv[]) {
   /* INFO: When implementation is None or Multiple, it won't set the values
