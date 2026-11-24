@@ -135,7 +135,7 @@ def patch_csoloader_api(path: Path) -> None:
 
 
 def patch_csoloader_lifecycle(linker_path: Path) -> None:
-    header_path = linker_path.with_name("linker.h")
+    header_path = linker_path.parent.parent / "include" / "linker.h"
     header = header_path.read_text()
     header_marker = "/* VREZYGISK_IMAGE_LIFECYCLE */"
     if header_marker not in header:
