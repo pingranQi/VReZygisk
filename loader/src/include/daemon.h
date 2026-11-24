@@ -17,7 +17,8 @@ enum rezygiskd_actions {
   RemoveModule,
   ReadZnModules,
   RequestZnCompanionSocket,
-  GetZnModuleFd
+  GetZnModuleFd,
+  RegisterZnCompanionBroker
 };
 
 struct zygisk_modules {
