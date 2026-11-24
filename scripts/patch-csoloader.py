@@ -402,36 +402,13 @@ void linker_fork_child(void) {
   if (g_active_linkers_mutex_initialized)
     (void)pthread_mutex_unlock(&g_active_linkers_mutex);
 }"""
-    if registry_anchor in source:
-        source = replace_once(source, registry_anchor, registry_code,
-                              "thread-safe linker registry storage")
-    source = replace_once(
-        source,
-        """static void _linker_register(struct linker *linker) {
-  for (int i = 0; i < g_active_linker_count; i++) {
-    if (g_active_linkers[i] == linker) return;
-  }
-
-  if (g_active_linker_count >= MAX_ACTIVE_LINKERS) {
-    LOGF("Maximum active linker count (%d) exceeded", MAX_ACTIVE_LINKERS);
-
-    return;
-  }
-
-  g_active_linkers[g_active_linker_count++] = linker;
-}
-
-static void _linker_unregister(struct linker *linker) {
-  for (int i = 0; i < g_active_linker_count; i++) {
-    if (g_active_linkers[i] != linker) continue;
-
-    g_active_linkers[i] = g_active_linkers[--g_active_linker_count];
-    g_active_linkers[g_active_linker_count] = NULL;
-
-    return;
-  }
-}""",
-        """static bool _linker_register(struct linker *linker) {
+    registry_start = source.index("static size_t system_page_size;")
+    registry_end = source.index("static void _linker_register(", registry_start)
+    source = source[:registry_start] + registry_code + "\n\n" + source[registry_end:]
+    registry_functions_start = source.index("static void _linker_register(struct linker *linker) {")
+    registry_functions_end = source.index("#ifdef CSOLOADER_MAKE_LINKER_HOOKS",
+                                          registry_functions_start)
+    source = source[:registry_functions_start] + r"""static bool _linker_register(struct linker *linker) {
   if (!linker || !_linker_registry_lock()) return false;
   for (int i = 0; i < g_active_linker_count; i++) {
     if (g_active_linkers[i] == linker) {
@@ -458,10 +435,11 @@ static void _linker_unregister(struct linker *linker) {
     break;
   }
   _linker_registry_unlock();
-}""",
-        "thread-safe active linker registration",
-    )
+}
+
+""" + source[registry_functions_end:]
     soname_marker = "/* VREZYGISK_ELF_SONAME_IDENTITY */"
+
     if soname_marker not in source:
         basename = """static const char *_path_basename(const char *path) {
   if (!path) return "";
