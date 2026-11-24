@@ -376,7 +376,8 @@ static int spawn_zn_companion(char *restrict argv[],
 
   int daemon_fd = sockets[0];
   int companion_fd = sockets[1];
-  int child_fd = companion_fd;
+  int child_fd = 198;
+  while (child_fd == daemon_fd || child_fd == companion_fd) ++child_fd;
 
   const char *process = argv[0];
   const char *last = strrchr(process, '/');
