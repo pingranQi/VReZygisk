@@ -8,6 +8,8 @@
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <signal.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <pthread.h>
 
@@ -447,7 +449,7 @@ static int spawn_zn_companion(char *restrict argv[],
     LOGE("Failed opening ZN companion library %s: %s",
          module->library, strerror(errno));
     close(daemon_fd);
-    while (waitpid(pid, NULL, 0) == -1 && errno == EINTR) {}
+    terminate_zn_companion(pid);
     return -1;
   }
 
@@ -477,6 +479,32 @@ static int spawn_zn_companion(char *restrict argv[],
   return daemon_fd;
 }
 
+static bool wait_zn_companion_exit(pid_t pid, unsigned int timeout_ms) {
+  const struct timespec delay = { .tv_sec = 0, .tv_nsec = 10 * 1000 * 1000 };
+  for (unsigned int elapsed = 0; elapsed < timeout_ms; elapsed += 10) {
+    pid_t result = waitpid(pid, NULL, WNOHANG);
+    if (result == pid || (result < 0 && errno == ECHILD)) return true;
+    if (result < 0 && errno != EINTR) {
+      LOGW("waitpid(%d) failed: %s", pid, strerror(errno));
+      return false;
+    }
+    (void)nanosleep(&delay, NULL);
+  }
+  return false;
+}
+
+static void terminate_zn_companion(pid_t pid) {
+  if (pid <= 0 || wait_zn_companion_exit(pid, 250)) return;
+
+  LOGW("ZN companion pid=%d did not exit; sending SIGTERM", pid);
+  (void)kill(pid, SIGTERM);
+  if (wait_zn_companion_exit(pid, 500)) return;
+
+  LOGW("ZN companion pid=%d ignored SIGTERM; sending SIGKILL", pid);
+  (void)kill(pid, SIGKILL);
+  while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+}
+
 static void close_zn_companion(struct zn_module_entry *module) {
   if (!module) return;
   if (module->companion_fd >= 0) {
@@ -485,13 +513,8 @@ static void close_zn_companion(struct zn_module_entry *module) {
     module->companion_fd = -1;
   }
   if (module->companion_pid > 0) {
-    pid_t waited;
-    do {
-      waited = waitpid(module->companion_pid, NULL, 0);
-    } while (waited == -1 && errno == EINTR);
-    if (waited == module->companion_pid ||
-        (waited == -1 && errno == ECHILD))
-      module->companion_pid = -1;
+    terminate_zn_companion(module->companion_pid);
+    module->companion_pid = -1;
   }
 }
 
