@@ -515,10 +515,8 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
                               "per-image dlopen reference accounting")
         source = replace_once(
             source,
-            """      struct csoloader_elf *img = _linker_find_loaded_image(linker, filename);
-      if (img) return img;""",
-            """      struct csoloader_elf *img = _linker_find_loaded_image(linker, filename);
-      if (img && _linker_adjust_handle_ref(linker, img, true)) return img;""",
+            "if (img) return img;",
+            "if (img && _linker_adjust_handle_ref(linker, img, true)) return img;",
             "acquire image handle on custom dlopen",
         )
         source = replace_once(
