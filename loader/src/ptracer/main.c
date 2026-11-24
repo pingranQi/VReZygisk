@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
 
     return 0;
   } else if (argc >= 2 && strcmp(argv[1], "info") == 0) {
-    struct rezygisk_info info;
+    struct rezygisk_info info = {0};
     rezygiskd_get_info(&info);
 
     printf("Daemon process PID: %d\n", info.pid);
