@@ -1537,6 +1537,7 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
           LOGE("Failed to abandon CSOLoader module safely");
           should_unmap_zygisk = false;
         }
+        rz_module_sync_destroy(m);
         continue;
       }
 
@@ -1546,12 +1547,14 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
         csoloader_pin();
         all_cso_modules_unloaded = false;
         should_unmap_zygisk = false;
+        rz_module_sync_destroy(m);
         continue;
       }
     } else if (m->loader_backend == MODULE_LOADER_SYSTEM) {
       if (!rz_module_unload_requested(m)) {
         /* Intentional residency: keep the dlopen reference and its handle alive. */
         LOGD("Keeping system-linker module resident: %p", m->system_handle);
+        rz_module_sync_destroy(m);
         continue;
       }
 
@@ -1560,6 +1563,7 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
         LOGE("Failed to dlclose system-linker module: %s",
              error ? error : "invalid handle");
         should_unmap_zygisk = false;
+        rz_module_sync_destroy(m);
         continue;
       }
       m->system_handle = NULL;
