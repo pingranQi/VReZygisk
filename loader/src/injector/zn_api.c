@@ -5,6 +5,8 @@
 #include <elf.h>
 #include <link.h>
 #include <pthread.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
 #include <plti.h>
 #include <limits.h>
 #include <stdint.h>
@@ -40,6 +42,7 @@ static size_t g_zn_handle_count;
 
 static struct plti g_zn_plti;
 static bool g_zn_plti_initialized;
+static char g_main_executable_path[PATH_MAX];
 static pthread_mutex_t g_zn_plti_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct plti_target_lookup {
@@ -63,8 +66,15 @@ static int find_plti_target(struct dl_phdr_info *info, size_t size,
   }
   if ((uintptr_t)info->dlpi_addr != lookup->requested_base &&
       header != lookup->requested_base) return 0;
-  if (!info->dlpi_name || !*info->dlpi_name) return 0;
-  lookup->path = info->dlpi_name;
+  if (!info->dlpi_name || !*info->dlpi_name) {
+    ssize_t n = readlink("/proc/self/exe", g_main_executable_path,
+                         sizeof(g_main_executable_path) - 1);
+    if (n <= 0 || (size_t)n >= sizeof(g_main_executable_path)) return 0;
+    g_main_executable_path[n] = '\0';
+    lookup->path = g_main_executable_path;
+  } else {
+    lookup->path = info->dlpi_name;
+  }
   lookup->elf_header = header;
   lookup->found = true;
   return 1;
@@ -124,9 +134,224 @@ static int api_connect_companion(void *opaque) {
   return rezygiskd_connect_zn_companion(handle->manifest_index);
 }
 
+#define ZN_MAX_HYOS_MODULES 16
+
+typedef int (*hyos_setcontext_fn)(uid_t uid, int is_system_server,
+                                  const char *se_info, const char *package_name);
+typedef int (*hyos_setname_fn)(pthread_t thread, const char *name);
+
+static struct ZygiskNextHyosModule g_hyos_modules[ZN_MAX_HYOS_MODULES];
+static size_t g_hyos_module_count;
+static bool g_hyos_runtime_enabled;
+static bool g_hyos_fired;
+static bool g_hyos_atfork_registered;
+static pid_t g_hyos_spawner_pid;
+static char g_hyos_captured_name[256];
+static bool g_hyos_has_captured_name;
+static hyos_setcontext_fn g_hyos_orig_setcontext;
+static hyos_setname_fn g_hyos_orig_setname;
+
+static pid_t raw_getpid(void) {
+  return (pid_t)syscall(SYS_getpid);
+}
+
+static bool hyos_in_child(void) {
+  return g_hyos_spawner_pid > 0 && raw_getpid() != g_hyos_spawner_pid;
+}
+
+static bool is_hyos_spawner(void) {
+  char path[PATH_MAX];
+  ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 1);
+  if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+  path[n] = '\0';
+  const char *base = strrchr(path, '/');
+  base = base ? base + 1 : path;
+  return strcmp(base, "hyos_spawner") == 0;
+}
+
+static bool read_process_cmdline(char *out, size_t capacity) {
+  if (!out || capacity < 2) return false;
+  int fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  ssize_t n;
+  do {
+    n = read(fd, out, capacity - 1);
+  } while (n < 0 && errno == EINTR);
+  close(fd);
+  if (n <= 0) return false;
+  size_t length = strnlen(out, (size_t)n);
+  out[length] = '\0';
+  return length != 0;
+}
+
+static bool is_spawner_cmdline(const char *name) {
+  return !name || !*name || strcmp(name, "usap64") == 0 ||
+         strcmp(name, "usap32") == 0 || strcmp(name, "hyos_spawner") == 0;
+}
+
+static void hyos_deliver_app_specialized(const char *package_name,
+                                         const char *se_info) {
+  if (!hyos_in_child() || g_hyos_fired || g_hyos_module_count == 0) return;
+  g_hyos_fired = true;
+
+  char process_name[256] = {0};
+  char package_copy[256] = {0};
+  char se_info_copy[512] = {0};
+  if (package_name) snprintf(package_copy, sizeof(package_copy), "%s", package_name);
+  if (se_info) snprintf(se_info_copy, sizeof(se_info_copy), "%s", se_info);
+
+  char cmdline[256] = {0};
+  if (read_process_cmdline(cmdline, sizeof(cmdline)) &&
+      !is_spawner_cmdline(cmdline)) {
+    snprintf(process_name, sizeof(process_name), "%s", cmdline);
+  } else if (g_hyos_has_captured_name && g_hyos_captured_name[0]) {
+    size_t captured_len = strlen(g_hyos_captured_name);
+    size_t package_len = strlen(package_copy);
+    if (captured_len == 15 && package_len > captured_len &&
+        strcmp(package_copy + package_len - captured_len,
+               g_hyos_captured_name) == 0) {
+      snprintf(process_name, sizeof(process_name), "%s", package_copy);
+    } else {
+      snprintf(process_name, sizeof(process_name), "%s",
+               g_hyos_captured_name);
+    }
+  } else if (prctl(PR_GET_NAME, process_name, 0, 0, 0) != 0 ||
+             process_name[0] == '\0' || is_spawner_cmdline(process_name)) {
+    snprintf(process_name, sizeof(process_name), "%s",
+             package_copy[0] ? package_copy : "hyos_app");
+  }
+
+  const struct ZnHyosAppSpecializeArgs args = {
+    .process_name = process_name,
+    .package_name = package_copy,
+    .se_info = se_info_copy
+  };
+  LOGI("HyperOS app specialized: process=%s package=%s se_info=%s",
+       process_name, package_copy, se_info_copy);
+
+  for (size_t i = 0; i < g_hyos_module_count; ++i) {
+    if (g_hyos_modules[i].onAppSpecialized)
+      g_hyos_modules[i].onAppSpecialized(&args);
+  }
+}
+
+static int hyos_setcontext_hook(uid_t uid, int is_system_server,
+                                const char *se_info,
+                                const char *package_name) {
+  int result = g_hyos_orig_setcontext
+                   ? g_hyos_orig_setcontext(uid, is_system_server, se_info,
+                                            package_name)
+                   : -1;
+  if (result == 0) hyos_deliver_app_specialized(package_name, se_info);
+  else if (hyos_in_child() && !g_hyos_fired)
+    LOGW("HyperOS selinux_android_setcontext failed: %d", result);
+  return result;
+}
+
+static int hyos_setname_hook(pthread_t thread, const char *name) {
+  int result = g_hyos_orig_setname
+                   ? g_hyos_orig_setname(thread, name)
+                   : -1;
+  if (result == 0 && name && name[0] && hyos_in_child() &&
+      !g_hyos_fired && !g_hyos_has_captured_name &&
+      pthread_equal(thread, pthread_self())) {
+    snprintf(g_hyos_captured_name, sizeof(g_hyos_captured_name), "%s", name);
+    g_hyos_has_captured_name = true;
+    LOGD("HyperOS captured process name: %s", g_hyos_captured_name);
+  }
+  return result;
+}
+
+static void hyos_atfork_child(void) {
+  g_hyos_fired = false;
+  g_hyos_has_captured_name = false;
+  g_hyos_captured_name[0] = '\0';
+}
+
+static void hyos_install_hooks(void) {
+  if (!g_hyos_spawner_pid || !g_hyos_module_count) return;
+  uintptr_t base = 0;
+  struct dl_phdr_info *unused = NULL;
+  (void)unused;
+
+  /* Find the main executable's load bias. It is the ELF image containing
+   * the entry process, not libc/libselinux, so hooks are caller-scoped. */
+  struct main_base_lookup {
+    uintptr_t base;
+  } lookup = {0};
+  int find_main(struct dl_phdr_info *info, size_t size, void *opaque) {
+    (void)size;
+    struct main_base_lookup *out = opaque;
+    if (info->dlpi_name && info->dlpi_name[0]) return 0;
+    out->base = (uintptr_t)info->dlpi_addr;
+    return 1;
+  }
+  dl_iterate_phdr(find_main, &lookup);
+  base = lookup.base;
+  if (!base) {
+    LOGW("HyperOS could not locate hyos_spawner load bias");
+    return;
+  }
+
+  if (!g_hyos_orig_setcontext) {
+    void *original = NULL;
+    if (api_plt_hook((void *)base, "selinux_android_setcontext",
+                     (void *)hyos_setcontext_hook, &original) == ZN_SUCCESS) {
+      g_hyos_orig_setcontext = (hyos_setcontext_fn)original;
+      LOGI("HyperOS PLT hooked selinux_android_setcontext");
+    } else {
+      LOGW("HyperOS PLT hook failed for selinux_android_setcontext");
+    }
+  }
+
+  if (!g_hyos_orig_setname) {
+    void *original = NULL;
+    if (api_plt_hook((void *)base, "pthread_setname_np",
+                     (void *)hyos_setname_hook, &original) == ZN_SUCCESS) {
+      g_hyos_orig_setname = (hyos_setname_fn)original;
+      LOGI("HyperOS PLT hooked pthread_setname_np");
+    } else {
+      LOGW("HyperOS PLT hook failed for pthread_setname_np");
+    }
+  }
+}
+
+static int api_hyos_register_module(const void *opaque) {
+  if (!opaque || !g_hyos_runtime_enabled || !g_hyos_spawner_pid ||
+      raw_getpid() != g_hyos_spawner_pid) return ZN_FAILED;
+  const struct ZygiskNextHyosModule *module = opaque;
+  if (module->target_api_version < 1 ||
+      module->target_api_version > ZYGISK_NEXT_HYOS_API_VERSION ||
+      !module->onAppSpecialized ||
+      g_hyos_module_count >= ZN_MAX_HYOS_MODULES) {
+    LOGW("Rejecting invalid or unsupported HyperOS Runtime module");
+    return ZN_FAILED;
+  }
+
+  g_hyos_modules[g_hyos_module_count++] = *module;
+  if (!g_hyos_atfork_registered) {
+    if (pthread_atfork(NULL, NULL, hyos_atfork_child) == 0)
+      g_hyos_atfork_registered = true;
+  }
+  hyos_install_hooks();
+  LOGI("Registered HyperOS Runtime module (%zu)", g_hyos_module_count);
+  return ZN_SUCCESS;
+}
+
+static const struct ZygiskNextRuntime g_hyos_runtime = {
+  .type = ZN_RUNTIME_HYOS,
+  .api_version = ZYGISK_NEXT_HYOS_API_VERSION,
+  .registerModule = api_hyos_register_module
+};
+
 static const struct ZygiskNextRuntime *api_get_runtime(void) {
-  /* HyperOS Runtime is registered in a later integration stage. */
-  return NULL;
+  if (!is_hyos_spawner()) return NULL;
+  if (!g_hyos_runtime_enabled) {
+    g_hyos_spawner_pid = raw_getpid();
+    g_hyos_runtime_enabled = true;
+    LOGI("Detected HyperOS Rust Runtime spawner pid=%d", g_hyos_spawner_pid);
+  }
+  return &g_hyos_runtime;
 }
 
 static bool address_in_image(uintptr_t start, uintptr_t end,
