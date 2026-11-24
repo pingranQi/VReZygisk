@@ -1120,6 +1120,7 @@ static bool apply_android_rela_section(int pid, int fd,
 
       unsigned type = (unsigned)ELF_R_TYPE(r_info);
       unsigned sym = (unsigned)ELF_R_SYM(r_info);
+      processed++;
       if (type == R_AARCH64_NONE) continue;
       if (reloc_offset > UINTPTR_MAX - load_bias ||
           !vaddr_range_in_load_segment(phdr, phnum, (ElfW(Addr))reloc_offset,
@@ -1147,7 +1148,6 @@ static bool apply_android_rela_section(int pid, int fd,
       }
 
       if (!write_remote_addr(pid, target, value)) goto done;
-      processed++;
     }
   }
 
