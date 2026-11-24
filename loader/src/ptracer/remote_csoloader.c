@@ -686,6 +686,18 @@ cleanup:
   return success;
 }
 
+static const char *remote_soname(const char *path) {
+  if (!path) return NULL;
+  const char *base = position_after(path, '/');
+  return base ? base : path;
+}
+
+static bool same_remote_soname(const char *left, const char *right) {
+  const char *a = remote_soname(left);
+  const char *b = remote_soname(right);
+  return a && b && strcmp(a, b) == 0;
+}
+
 static void free_symbol_scope(char **paths, size_t count) {
   if (!paths) return;
   for (size_t i = 0; i < count; ++i) free(paths[i]);
@@ -767,10 +779,12 @@ static char **build_remote_symbol_scope(struct maps_info *remote_map,
   if (!paths) return NULL;
 
   for (size_t i = 0; i < direct_count; ++i) {
-    if (!direct_paths || !direct_paths[i]) continue;
+    /* A missing direct DT_NEEDED object makes the bootstrap dependency graph
+     * incomplete. Do not silently continue with a partially linked image. */
+    if (!direct_paths || !direct_paths[i]) goto fail;
     bool duplicate = false;
     for (size_t j = 0; j < *out_count; ++j)
-      if (strcmp(paths[j], direct_paths[i]) == 0) { duplicate = true; break; }
+      if (same_remote_soname(paths[j], direct_paths[i])) { duplicate = true; break; }
     if (duplicate) continue;
     if (*out_count == capacity) goto fail;
     paths[*out_count] = strdup(direct_paths[i]);
@@ -796,7 +810,9 @@ static char **build_remote_symbol_scope(struct maps_info *remote_map,
 
       bool duplicate = false;
       for (size_t j = 0; j < *out_count; ++j) {
-        if (strcmp(paths[j], dep_path) == 0) { duplicate = true; break; }
+        /* DT_NEEDED names identify a loaded object by SONAME; use that key
+         * rather than path strings so aliases/symlinks cannot duplicate it. */
+        if (same_remote_soname(paths[j], dep_path)) { duplicate = true; break; }
       }
       if (duplicate) continue;
       if (*out_count == capacity) {
