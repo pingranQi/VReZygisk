@@ -512,6 +512,7 @@ static bool zn_target_matches(const struct zn_module_list *targets,
                                                                   \
     LOGW("daemon" #abi " pid %d exited: %s", pid, status_str);    \
     status##abi.daemon_running = false;                           \
+    status##abi.daemon_pid = -1;                                  \
                                                                   \
     if (!status##abi.daemon_error_info) {                         \
       status##abi.daemon_error_info = strdup(status_str);         \
