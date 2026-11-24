@@ -13,7 +13,14 @@ VReZygisk currently has two distinct loading paths:
 
 Keep these paths separate in the design and test plans. They have different address spaces, dependency resolution constraints, and rollback requirements.
 
-## Findings
+## Implemented in this branch
+
+- Serialized CSOLoader lifecycle and symbol operations, active-image accounting, partial-load cleanup, and pre-constructor path allocation.
+- Bounded ELF64/AArch64 PT_DYNAMIC inspection; Bionic routing for PT_TLS and GNU symbol-versioned images.
+- Build-time hardening of CSOLoader TLS key creation, TLS allocation metadata, per-thread module generations, module-ID reuse and registration failure propagation.
+- Fail-closed remote bootstrap handling for unsupported standard/Android RELR, Android packed relocation, GNU versioning, PT_TLS and IFUNC metadata; defined-symbol bounds and SHN_ABS handling.
+
+### Remaining findings
 
 ### P0 — correctness and memory-safety gates
 
@@ -31,10 +38,10 @@ Keep these paths separate in the design and test plans. They have different addr
 
 ### P1 — ABI and linker compatibility
 
-- Add bounded, explicit support and tests for Android packed REL/RELA and RELR only after parser and relocation transaction design is complete.
-- Add GNU symbol versioning (`DT_VERSYM`, `DT_VERDEF`, `DT_VERNEED`) to symbol lookup; plain name matching is insufficient for versioned dependencies.
+- If the remote bootstrap mapper needs these formats, add bounded Android packed REL/RELA and RELR decoding with transactional rollback; until then its fail-closed rejection is intentional.
+- Add GNU symbol version selection to the custom backend only if Bionic fallback is no longer sufficient; the current in-process policy routes versioned images to Bionic.
 - Audit symbol scope and precedence: main image, ordered DT_NEEDED dependencies, global/weak symbols, visibility, symbol type, version, and duplicate names.
-- Audit IFUNC and IRELATIVE as executable resolver operations. They require a defined execution context, ordering, error handling and rollback; never substitute resolver `st_value` for the resolved address.
+- Audit the in-process IFUNC/IRELATIVE implementation with regression fixtures. The remote bootstrap mapper must continue rejecting these until it can execute resolvers in the target process with defined ordering and rollback.
 - Audit dependency recursion, cycles, duplicate SONAMEs, maximum dependency count, path provenance and missing dependency behavior.
 - Audit constructor/destructor order, `DT_INIT`/`DT_INIT_ARRAY`, `DT_FINI_ARRAY`/`DT_FINI`, partial constructor failure, and one-time finalization.
 
