@@ -49,8 +49,8 @@ Initialize the pinned revision:
 git submodule update --init --recursive loader/src/external/csoloader
 ```
 
-The loader Makefile applies the tracked TLS/lifecycle hardening patch before
-compiling the submodule. It validates TLS registration and allocation, and
+Python 3 is required for the build-time patch step. The loader Makefile applies
+the tracked TLS/lifecycle hardening patch before compiling the submodule. It validates TLS registration and allocation, and
 preallocates the loader's path bookkeeping before constructors. The patch is
 idempotent and is based on the pinned upstream revision; do not commit the
 modified submodule worktree as a new upstream revision.
