@@ -629,7 +629,16 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
 
     return NULL;
   }"""
-        ref_helper = r"""  static bool _linker_adjust_handle_ref(struct linker *linker,
+        ref_helper = r"""  static struct linker *_linker_find_owner_by_handle(void *handle) {
+    if (!handle || handle == RTLD_DEFAULT || handle == RTLD_NEXT) return NULL;
+    for (int i = 0; i < g_active_linker_count; ++i) {
+      struct linker *candidate = g_active_linkers[i];
+      if (_linker_image_from_handle(candidate, handle)) return candidate;
+    }
+    return NULL;
+  }
+
+  static bool _linker_adjust_handle_ref(struct linker *linker,
                                        struct csoloader_elf *img,
                                        bool acquire) {
     if (!linker || !img) return false;
@@ -728,8 +737,7 @@ static void *custom_dlsym(void *handle, const char *symbol) {
   if (!_linker_registry_lock())
     return original_dlsym ? original_dlsym(handle, symbol) : NULL;
 
-  struct linker *linker =
-      _linker_find_by_caller_address(__builtin_return_address(0));
+  struct linker *linker = _linker_find_owner_by_handle(handle);
   struct csoloader_elf *img = _linker_image_from_handle(linker, handle);
   if (img) {
     void *result = NULL;
@@ -750,8 +758,7 @@ static int custom_dlclose(void *handle) {
   if (!_linker_registry_lock())
     return original_dlclose ? original_dlclose(handle) : -1;
 
-  struct linker *linker =
-      _linker_find_by_caller_address(__builtin_return_address(0));
+  struct linker *linker = _linker_find_owner_by_handle(handle);
   struct csoloader_elf *img = _linker_image_from_handle(linker, handle);
   if (img) {
     bool released = _linker_adjust_handle_ref(linker, img, false);
