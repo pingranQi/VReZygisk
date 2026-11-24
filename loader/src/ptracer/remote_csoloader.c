@@ -21,6 +21,7 @@
 #include <link.h>
 #include <sys/syscall.h>
 #include <sys/auxv.h>
+#include <sys/system_properties.h>
 
 #undef SYS_mmap
 #define SYS_mmap LP_SELECT(__NR_mmap2, __NR_mmap)
@@ -1224,6 +1225,19 @@ static bool validate_verneed_table(int fd, const struct elf_dyn_info *info,
   return true;
 }
 
+static int get_device_api_level(void) {
+  char value[PROP_VALUE_MAX] = {0};
+  if (__system_property_get("ro.build.version.sdk", value) <= 0)
+    return 0;
+  int level = 0;
+  for (const char *p = value; *p; ++p) {
+    if (*p < '0' || *p > '9') return 0;
+    if (level > (INT_MAX - (*p - '0')) / 10) return 0;
+    level = level * 10 + (*p - '0');
+  }
+  return level;
+}
+
 struct remote_ifunc_args {
   unsigned long size;
   unsigned long hwcap;
@@ -1299,7 +1313,16 @@ static bool run_remote_ifunc_resolver(int pid, struct user_regs_struct *regs,
     (long)(ifunc_args.hwcap | (1ULL << 62)),
     (long)args_address
   };
-  uintptr_t resolved = remote_call(pid, regs, resolver, return_trap, call_args, 2);
+  int api_level = get_device_api_level();
+  if (api_level <= 0) {
+    LOGE("Unable to determine Android API level for IFUNC ABI selection");
+    goto restore;
+  }
+  /* Bionic passes (hwcap, __ifunc_arg_t*) only from API 30 onward.
+   * Earlier AArch64 releases invoke resolvers with no arguments. */
+  size_t resolver_arg_count = api_level >= 30 ? 2 : 0;
+  uintptr_t resolved = remote_call(pid, regs, resolver, return_trap,
+                                   call_args, resolver_arg_count);
   if (resolved == 0) {
     LOGE("Remote IFUNC resolver failed or returned a null address");
     goto restore;
