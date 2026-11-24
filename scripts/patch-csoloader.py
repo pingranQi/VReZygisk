@@ -408,6 +408,42 @@ def patch_csoloader_linker_lifetime(linker_path: Path) -> None:
   return NULL;
 }
 
+static bool _linker_image_has_gnu_versions(const struct csoloader_elf *img,
+                                           bool *out_has_versions) {
+  if (!img || !img->header || !out_has_versions ||
+      img->size < sizeof(ElfW(Ehdr))) return false;
+  *out_has_versions = false;
+  const ElfW(Ehdr) *eh = img->header;
+  if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 ||
+      eh->e_phentsize != sizeof(ElfW(Phdr)) || eh->e_phnum == 0 ||
+      eh->e_phoff > img->size ||
+      (size_t)eh->e_phnum > SIZE_MAX / sizeof(ElfW(Phdr)) ||
+      (size_t)eh->e_phnum * sizeof(ElfW(Phdr)) >
+          img->size - (size_t)eh->e_phoff) return false;
+
+  const ElfW(Phdr) *phdr =
+      (const ElfW(Phdr) *)((const uint8_t *)img->header + eh->e_phoff);
+  for (size_t i = 0; i < eh->e_phnum; ++i) {
+    if (phdr[i].p_type != PT_DYNAMIC) continue;
+    if (phdr[i].p_offset > img->size ||
+        phdr[i].p_filesz > img->size - (size_t)phdr[i].p_offset ||
+        phdr[i].p_filesz < sizeof(ElfW(Dyn)) ||
+        phdr[i].p_filesz % sizeof(ElfW(Dyn)) != 0) return false;
+    const ElfW(Dyn) *dyn =
+        (const ElfW(Dyn) *)((const uint8_t *)img->header + phdr[i].p_offset);
+    size_t count = (size_t)phdr[i].p_filesz / sizeof(ElfW(Dyn));
+    for (size_t j = 0; j < count; ++j) {
+      if (dyn[j].d_tag == DT_NULL) return true;
+      if (dyn[j].d_tag == (ElfW(Sxword))0x6ffffff0 ||
+          dyn[j].d_tag == (ElfW(Sxword))0x6ffffffc ||
+          dyn[j].d_tag == (ElfW(Sxword))0x6ffffffe)
+        *out_has_versions = true;
+    }
+    return false;
+  }
+  return false;
+}
+
 static bool _linker_image_matches_name(const struct csoloader_elf *img,
                                        const char *name) {
   if (!img || !img->elf || !name || !*name) return false;
@@ -707,6 +743,34 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
 
     struct loaded_dep *current_dep = &linker->dependencies[linker->dep_count];""",
             "dynamic dependency graph growth",
+        )
+        source = replace_once(
+            source,
+            """    linker->dep_count++;
+
+    if (current_dep->is_manual_load && current_dep->img->header->e_phoff > 0 && current_dep->img->header->e_phnum > 0) {""",
+            """    linker->dep_count++;
+
+    if (current_dep->is_manual_load) {
+      bool dependency_has_versions = false;
+      if (!_linker_image_has_gnu_versions(current_dep->img,
+                                          &dependency_has_versions)) {
+        LOGE("Malformed dynamic metadata in dependency %s",
+             current_dep->img->elf);
+        carray_destroy(loaded_libs);
+        return false;
+      }
+      if (dependency_has_versions) {
+        LOGE("Manual dependency %s requires GNU symbol versioning; "
+             "request Bionic fallback for the complete dependency closure",
+             current_dep->img->elf);
+        carray_destroy(loaded_libs);
+        return false;
+      }
+    }
+
+    if (current_dep->is_manual_load && current_dep->img->header->e_phoff > 0 && current_dep->img->header->e_phnum > 0) {""",
+            "fail closed on versioned manual dependencies",
         )
         source = replace_once(
             source,
