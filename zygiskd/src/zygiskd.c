@@ -331,6 +331,34 @@ static bool zn_peer_matches_target(int client_fd,
          strcmp(entry->target, base) == 0;
 }
 
+static bool zn_peer_is_hyos_spawner(int client_fd) {
+  struct ucred peer = {0};
+  socklen_t peer_size = sizeof(peer);
+  if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) != 0 ||
+      peer.uid != 0 || peer.pid <= 0) return false;
+
+  char proc_path[64];
+  snprintf(proc_path, sizeof(proc_path), "/proc/%d/exe", peer.pid);
+  char executable[PATH_MAX];
+  ssize_t n = readlink(proc_path, executable, sizeof(executable) - 1);
+  if (n <= 0 || (size_t)n >= sizeof(executable)) return false;
+  executable[n] = '\0';
+
+  static const char deleted_suffix[] = " (deleted)";
+  size_t length = strlen(executable);
+  const size_t deleted_length = sizeof(deleted_suffix) - 1;
+  if (length >= deleted_length &&
+      strcmp(executable + length - deleted_length, deleted_suffix) == 0) {
+    executable[length - deleted_length] = '\0';
+    length -= deleted_length;
+  }
+
+  static const char suffix[] = "/hyos_spawner";
+  const size_t suffix_length = sizeof(suffix) - 1;
+  return length >= suffix_length &&
+         strcmp(executable + length - suffix_length, suffix) == 0;
+}
+
 static int create_zn_module_memfd(const char *path) {
 #ifdef SYS_memfd_create
   int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -594,8 +622,9 @@ static bool register_zn_companion_broker(int client_fd,
   struct ucred peer = {0};
   socklen_t peer_size = sizeof(peer);
   if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) != 0 ||
-      peer.uid != 0) {
-    LOGW("Rejecting ZN companion broker registration from uid %u", peer.uid);
+      peer.uid != 0 || !zn_peer_is_hyos_spawner(client_fd)) {
+    LOGW("Rejecting ZN companion broker registration from uid %u pid=%d",
+         peer.uid, peer.pid);
     (void)write_uint8_t(client_fd, 0);
     return false;
   }
