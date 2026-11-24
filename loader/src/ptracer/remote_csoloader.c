@@ -908,10 +908,10 @@ static bool apply_relocations(int pid, int fd, const struct elf_dyn_info *info,
 
 bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *regs,
                                              struct maps_info *remote_map, struct maps_info *local_map,
-                                             const char *lib_path, uintptr_t *out_base,
+                                             const char *lib_path, const char *entry_symbol,\n                                             uintptr_t *out_base,
                                              size_t *out_total_size, uintptr_t *out_entry) {
   if (pid <= 0 || !regs || !remote_map || !local_map || !lib_path ||
-      !out_base || !out_total_size || !out_entry) {
+      !entry_symbol || !*entry_symbol || !out_base || !out_total_size || !out_entry) {
     LOGE("Invalid arguments to remote CSOLoader");
     return false;
   }
@@ -1346,7 +1346,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   }
 
   ElfW(Addr) entry_value = 0;
-  if (!find_dynsym_value(fd, &dinfo, "entry", &entry_value)) {
+  if (!find_dynsym_value(fd, &dinfo, entry_symbol, &entry_value)) {
     LOGE("Failed to resolve entry from ELF dynsym");
 
     free((void *)needed_paths);
