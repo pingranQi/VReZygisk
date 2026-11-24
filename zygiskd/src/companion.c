@@ -180,3 +180,137 @@ void companion_entry(int fd) {
 
     exit(0);
 }
+
+/*
+ * Zygisk Next companion ABI is intentionally separate from the ordinary
+ * zygisk_companion_entry(int) ABI. Keep the callbacks copied out of the
+ * library's exported structure so the dispatcher does not depend on its
+ * layout after initialization.
+ */
+struct zn_companion_module_abi {
+  int target_api_version;
+  void (*on_companion_loaded)(void);
+  void (*on_module_connected)(int fd);
+};
+
+struct zn_companion_callbacks {
+  void (*on_companion_loaded)(void);
+  void (*on_module_connected)(int fd);
+};
+
+struct zn_companion_thread_args {
+  int fd;
+  void (*callback)(int fd);
+};
+
+static void *zn_companion_client_thread(void *opaque) {
+  struct zn_companion_thread_args *args = opaque;
+  int client_fd = args->fd;
+  void (*callback)(int) = args->callback;
+  free(args);
+
+  if (callback) callback(client_fd);
+  else close(client_fd);
+  return NULL;
+}
+
+static bool load_zn_companion_module(int library_fd,
+                                     struct zn_companion_callbacks *callbacks) {
+  char path[64];
+  snprintf(path, sizeof(path), "/proc/self/fd/%d", library_fd);
+  void *handle = dlopen(path, RTLD_NOW);
+  if (!handle) {
+    LOGE("ZN companion dlopen failed: %s", dlerror());
+    return false;
+  }
+
+  struct zn_companion_module_abi *module =
+      (struct zn_companion_module_abi *)dlsym(handle, "zn_companion_module");
+  if (!module) {
+    LOGE("ZN companion symbol zn_companion_module not found: %s", dlerror());
+    dlclose(handle);
+    return false;
+  }
+  if (module->target_api_version < 1 || module->target_api_version > 4) {
+    LOGE("ZN companion API version %d is unsupported",
+         module->target_api_version);
+    dlclose(handle);
+    return false;
+  }
+
+  callbacks->on_companion_loaded = module->on_companion_loaded;
+  callbacks->on_module_connected = module->on_module_connected;
+  /* Keep handle resident: callbacks point into this image for process life. */
+  return true;
+}
+
+/* Daemon child entry for the ZN companion ABI. */
+void zn_companion_entry(int fd) {
+  char module_id[256];
+  if (read_string(fd, module_id, sizeof(module_id)) < 0) {
+    LOGE("ZN companion failed to read module id");
+    close(fd);
+    _exit(1);
+  }
+
+  int library_fd = read_fd(fd);
+  if (library_fd < 0) {
+    LOGE("ZN companion failed to receive library fd");
+    close(fd);
+    _exit(1);
+  }
+
+  struct zn_companion_callbacks callbacks = {0};
+  bool loaded = load_zn_companion_module(library_fd, &callbacks);
+  close(library_fd);
+
+  uint8_t response = loaded ? 1 : 0;
+  if (write_uint8_t(fd, response) != sizeof(response) || !loaded) {
+    LOGE("ZN companion initialization failed for %s", module_id);
+    close(fd);
+    _exit(loaded ? 1 : 0);
+  }
+
+  LOGI("ZN companion ready for module %s", module_id);
+  if (callbacks.on_companion_loaded) callbacks.on_companion_loaded();
+
+  struct sigaction sa = { .sa_handler = SIG_IGN };
+  sigaction(SIGPIPE, &sa, NULL);
+
+  while (check_unix_socket(fd, true)) {
+    int client_fd = read_fd(fd);
+    if (client_fd < 0) {
+      LOGE("ZN companion failed to receive client fd");
+      break;
+    }
+
+    uint8_t ack = 1;
+    if (write_uint8_t(client_fd, ack) != sizeof(ack)) {
+      LOGE("ZN companion failed to acknowledge client fd");
+      close(client_fd);
+      continue;
+    }
+
+    struct zn_companion_thread_args *args = malloc(sizeof(*args));
+    if (!args) {
+      PLOGE("allocate ZN companion thread args");
+      close(client_fd);
+      continue;
+    }
+    args->fd = client_fd;
+    args->callback = callbacks.on_module_connected;
+
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, zn_companion_client_thread, args) != 0) {
+      LOGE("Failed to create ZN companion client thread");
+      close(client_fd);
+      free(args);
+      continue;
+    }
+    pthread_detach(thread);
+  }
+
+  close(fd);
+  LOGI("ZN companion for %s exited", module_id);
+  _exit(0);
+}
