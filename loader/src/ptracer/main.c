@@ -12,6 +12,14 @@ int main(int argc, char **argv) {
     init_monitor();
 
     return 0;
+  } else if (argc >= 3 && strcmp(argv[1], "trace-zn") == 0) {
+      long pid = strtol(argv[2], 0, 0);
+      if (!trace_zn_target((int)pid)) {
+        LOGE("ZN target injection failed for pid %ld; target will be resumed", pid);
+        kill((pid_t)pid, SIGCONT);
+        return 1;
+      }
+      return 0;
   } else if (argc >= 3 && strcmp(argv[1], "trace") == 0) {
       bool do_restart = false;
 
@@ -100,6 +108,7 @@ int main(int argc, char **argv) {
       "Available commands:\n"
       " - monitor\n"
       " - trace <pid> [--restart]\n"
+      " - trace-zn <pid>\n"
       " - ctl <start|stop|exit>\n"
       " - version: Shows the version of ReZygisk.\n"
       " - info: Shows information about the created daemon/injection.\n"
