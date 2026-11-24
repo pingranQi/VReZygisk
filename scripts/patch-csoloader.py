@@ -315,6 +315,7 @@ def patch_csoloader_linker_lifetime(linker_path: Path) -> None:
 
   size_t main_map_size;
   bool is_linked;
+  bool is_closing;
   size_t main_handle_refs;
   enum linker_image_state main_lifecycle_state;
   /* VREZYGISK_LINKER_OBJECT_REFS */""",
@@ -335,6 +336,119 @@ def patch_csoloader_linker_lifetime(linker_path: Path) -> None:
         header_path.write_text(header)
 
     source = linker_path.read_text()
+    source = replace_once(
+        source,
+        "#include <limits.h>",
+        "#include <limits.h>\n#include <pthread.h>",
+        "thread-safe linker registry",
+    )
+    registry_anchor = """static size_t system_page_size;
+
+#define MAX_ACTIVE_LINKERS 16
+static struct linker *g_active_linkers[MAX_ACTIVE_LINKERS];
+static int g_active_linker_count = 0;"""
+    registry_code = r"""static size_t system_page_size;
+
+#define MAX_ACTIVE_LINKERS 256
+static struct linker *g_active_linkers[MAX_ACTIVE_LINKERS];
+static int g_active_linker_count = 0;
+static pthread_mutex_t g_active_linkers_mutex;
+static pthread_once_t g_active_linkers_mutex_once = PTHREAD_ONCE_INIT;
+static int g_active_linkers_mutex_error = 0;
+static bool g_active_linkers_mutex_initialized = false;
+
+static void _linker_registry_init_once(void) {
+  pthread_mutexattr_t attr;
+  int error = pthread_mutexattr_init(&attr);
+  if (error == 0) error = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  if (error == 0) error = pthread_mutex_init(&g_active_linkers_mutex, &attr);
+  if (error == 0) g_active_linkers_mutex_initialized = true;
+  if (error == 0 || error != 0) (void)pthread_mutexattr_destroy(&attr);
+  g_active_linkers_mutex_error = error;
+}
+
+static bool _linker_registry_lock(void) {
+  int error = pthread_once(&g_active_linkers_mutex_once,
+                           _linker_registry_init_once);
+  if (error != 0 || g_active_linkers_mutex_error != 0) return false;
+  return pthread_mutex_lock(&g_active_linkers_mutex) == 0;
+}
+
+static void _linker_registry_unlock(void) {
+  (void)pthread_mutex_unlock(&g_active_linkers_mutex);
+}
+
+void linker_fork_prepare(void) {
+  if (g_active_linkers_mutex_initialized)
+    (void)pthread_mutex_lock(&g_active_linkers_mutex);
+}
+void linker_fork_parent(void) {
+  if (g_active_linkers_mutex_initialized)
+    (void)pthread_mutex_unlock(&g_active_linkers_mutex);
+}
+void linker_fork_child(void) {
+  if (g_active_linkers_mutex_initialized)
+    (void)pthread_mutex_unlock(&g_active_linkers_mutex);
+}"""
+    if registry_anchor in source:
+        source = replace_once(source, registry_anchor, registry_code,
+                              "thread-safe linker registry storage")
+    source = replace_once(
+        source,
+        """static void _linker_register(struct linker *linker) {
+  for (int i = 0; i < g_active_linker_count; i++) {
+    if (g_active_linkers[i] == linker) return;
+  }
+
+  if (g_active_linker_count >= MAX_ACTIVE_LINKERS) {
+    LOGF("Maximum active linker count (%d) exceeded", MAX_ACTIVE_LINKERS);
+
+    return;
+  }
+
+  g_active_linkers[g_active_linker_count++] = linker;
+}
+
+static void _linker_unregister(struct linker *linker) {
+  for (int i = 0; i < g_active_linker_count; i++) {
+    if (g_active_linkers[i] != linker) continue;
+
+    g_active_linkers[i] = g_active_linkers[--g_active_linker_count];
+    g_active_linkers[g_active_linker_count] = NULL;
+
+    return;
+  }
+}""",
+        """static bool _linker_register(struct linker *linker) {
+  if (!linker || !_linker_registry_lock()) return false;
+  for (int i = 0; i < g_active_linker_count; i++) {
+    if (g_active_linkers[i] == linker) {
+      _linker_registry_unlock();
+      return true;
+    }
+  }
+  if (g_active_linker_count >= MAX_ACTIVE_LINKERS) {
+    LOGE("Maximum active linker count (%d) exceeded", MAX_ACTIVE_LINKERS);
+    _linker_registry_unlock();
+    return false;
+  }
+  g_active_linkers[g_active_linker_count++] = linker;
+  _linker_registry_unlock();
+  return true;
+}
+
+static void _linker_unregister(struct linker *linker) {
+  if (!_linker_registry_lock()) return;
+  for (int i = 0; i < g_active_linker_count; i++) {
+    if (g_active_linkers[i] != linker) continue;
+    g_active_linkers[i] = g_active_linkers[--g_active_linker_count];
+    g_active_linkers[g_active_linker_count] = NULL;
+    break;
+  }
+  _linker_registry_unlock();
+}""",
+        "thread-safe active linker registration",
+    )
     soname_marker = "/* VREZYGISK_ELF_SONAME_IDENTITY */"
     if soname_marker not in source:
         basename = """static const char *_path_basename(const char *path) {
