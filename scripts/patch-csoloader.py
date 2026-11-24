@@ -510,9 +510,11 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
   }
 
 """
-        source = replace_once(source, image_from_handle,
-                              image_from_handle + "\n\n" + ref_helper,
-                              "per-image dlopen reference accounting")
+        image_start = source.index("static struct csoloader_elf *_linker_image_from_handle(")
+        image_end = source.index("\n  }", image_start) + len("\n  }")
+        image_chunk = source[image_start:image_end]
+        if "_linker_adjust_handle_ref" not in source:
+            source = source[:image_end] + "\n\n" + ref_helper.rstrip() + source[image_end:]
         dlopen_start = source.index("static void *custom_dlopen(")
         dlopen_end = source.index("static void *custom_dlsym(", dlopen_start)
         dlopen_chunk = source[dlopen_start:dlopen_end]
