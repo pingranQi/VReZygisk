@@ -329,8 +329,11 @@ static int spawn_zn_companion(char *restrict argv[], const char *module_id,
 
   close(companion_fd);
   int status = 0;
-  while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
-  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+  pid_t waited;
+  do {
+    waited = waitpid(pid, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  if (waited != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
     LOGE("ZN companion launcher exited abnormally (status=%d)", status);
     close(daemon_fd);
     return -1;
