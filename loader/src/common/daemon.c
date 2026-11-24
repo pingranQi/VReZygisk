@@ -275,6 +275,80 @@ void free_modules(struct zygisk_modules *modules) {
   modules->modules_count = 0;
 }
 
+bool rezygiskd_read_zn_modules(struct zn_module_list *modules) {
+  if (!modules) return false;
+  modules->items = NULL;
+  modules->count = 0;
+
+  int fd = rezygiskd_connect(1);
+  if (fd == -1) return false;
+
+  if (write_uint8_t(fd, (uint8_t)ReadZnModules) != sizeof(uint8_t)) {
+    LOGE("Failed to request ZN module inventory");
+    close(fd);
+    return false;
+  }
+
+  size_t count = 0;
+  if (read_size_t(fd, &count) != (ssize_t)sizeof(count) || count > 512 ||
+      count > SIZE_MAX / sizeof(*modules->items)) {
+    LOGE("Invalid ZN module inventory count: %zu", count);
+    close(fd);
+    return false;
+  }
+
+  if (count == 0) {
+    close(fd);
+    return true;
+  }
+
+  modules->items = calloc(count, sizeof(*modules->items));
+  if (!modules->items) {
+    PLOGE("allocating ZN module inventory");
+    close(fd);
+    return false;
+  }
+
+  for (size_t i = 0; i < count; ++i) {
+    struct zn_module_info *entry = &modules->items[i];
+    entry->module_id = read_string(fd);
+    entry->target = read_string(fd);
+    entry->library = read_string(fd);
+    uint8_t target_type = 0;
+    uint8_t companion = 0;
+
+    if (!entry->module_id || !entry->target || !entry->library ||
+        read_uint8_t(fd, &target_type) != sizeof(target_type) ||
+        read_uint8_t(fd, &companion) != sizeof(companion) ||
+        (target_type != ZN_TARGET_NAME && target_type != ZN_TARGET_PATH) ||
+        companion > 1) {
+      LOGE("Malformed ZN module inventory entry %zu", i);
+      modules->count = i + 1;
+      rezygiskd_free_zn_modules(modules);
+      close(fd);
+      return false;
+    }
+    entry->target_type = target_type;
+    entry->companion = companion != 0;
+    modules->count = i + 1;
+  }
+
+  close(fd);
+  return true;
+}
+
+void rezygiskd_free_zn_modules(struct zn_module_list *modules) {
+  if (!modules) return;
+  for (size_t i = 0; i < modules->count; ++i) {
+    free(modules->items[i].module_id);
+    free(modules->items[i].target);
+    free(modules->items[i].library);
+  }
+  free(modules->items);
+  modules->items = NULL;
+  modules->count = 0;
+}
+
 int rezygiskd_connect_companion(size_t index) {
   int fd = rezygiskd_connect(1);
   if (fd == -1) return -1;
