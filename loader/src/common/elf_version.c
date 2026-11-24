@@ -414,6 +414,76 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
 }
 
 
+static bool version_requirement_for_index(const struct image_view *view,
+                                          const struct dynamic_info *di,
+                                          uint16_t wanted_index,
+                                          const char **out_version,
+                                          const char **out_provider,
+                                          uint32_t *out_hash) {
+  if (!view || !di || !di->verneed || !di->verneed_count ||
+      wanted_index <= VER_NDX_GLOBAL || !out_version ||
+      !out_provider || !out_hash) return false;
+
+  const char *found_version = NULL;
+  const char *found_provider = NULL;
+  uint32_t found_hash = 0;
+  uintptr_t need_addr = (uintptr_t)di->verneed;
+
+  for (size_t i = 0; i < di->verneed_count; ++i) {
+    if (!range_ok(view, need_addr, sizeof(Elf64_Verneed))) return false;
+    const Elf64_Verneed *need = (const Elf64_Verneed *)need_addr;
+    if (need->vn_version != VER_NEED_CURRENT || need->vn_cnt == 0 ||
+        need->vn_cnt > 64 || need->vn_aux < sizeof(Elf64_Verneed) ||
+        need->vn_file >= di->strsz ||
+        !memchr(di->strtab + need->vn_file, '\0',
+                di->strsz - need->vn_file)) return false;
+
+    const char *provider = di->strtab + need->vn_file;
+    uintptr_t aux_addr;
+    if (add_overflow_uintptr(need_addr, need->vn_aux, &aux_addr))
+      return false;
+
+    for (size_t j = 0; j < need->vn_cnt; ++j) {
+      if (!range_ok(view, aux_addr, sizeof(Elf64_Vernaux))) return false;
+      const Elf64_Vernaux *aux = (const Elf64_Vernaux *)aux_addr;
+      if (aux->vna_name >= di->strsz ||
+          !memchr(di->strtab + aux->vna_name, '\0',
+                  di->strsz - aux->vna_name)) return false;
+
+      const char *version = di->strtab + aux->vna_name;
+      if (aux->vna_hash != elf_name_hash(version)) return false;
+      if ((aux->vna_other & VER_NDX_MASK) == wanted_index) {
+        if (found_version) return false;
+        found_version = version;
+        found_provider = provider;
+        found_hash = aux->vna_hash;
+      }
+
+      if (j + 1 < need->vn_cnt) {
+        uintptr_t next_aux;
+        if (!aux->vna_next ||
+            add_overflow_uintptr(aux_addr, aux->vna_next, &next_aux) ||
+            next_aux <= aux_addr) return false;
+        aux_addr = next_aux;
+      }
+    }
+
+    if (i + 1 < di->verneed_count) {
+      uintptr_t next;
+      if (!need->vn_next ||
+          add_overflow_uintptr(need_addr, need->vn_next, &next) ||
+          next <= need_addr) return false;
+      need_addr = next;
+    }
+  }
+
+  if (!found_version || !found_provider) return false;
+  *out_version = found_version;
+  *out_provider = found_provider;
+  *out_hash = found_hash;
+  return true;
+}
+
 uintptr_t elf_resolve_versioned_symbol(void *provider_base,
                                        void *requester_base,
                                        size_t requester_symbol_index,
@@ -432,60 +502,42 @@ uintptr_t elf_resolve_versioned_symbol(void *provider_base,
       !request.versym || !request.verneed || !request.verneed_count ||
       requester_symbol_index >= request.symbol_count) return 0;
 
+  const Elf64_Sym *request_sym = &request.symtab[requester_symbol_index];
+  if (request_sym->st_shndx != SHN_UNDEF ||
+      request_sym->st_name >= request.strsz) return 0;
+  const char *requested_name = request.strtab + request_sym->st_name;
+  if (!memchr(requested_name, '\0', request.strsz - request_sym->st_name) ||
+      strcmp(requested_name, symbol_name) != 0) return 0;
+
   uint16_t wanted = request.versym[requester_symbol_index] & VER_NDX_MASK;
   if (wanted <= VER_NDX_GLOBAL) return 0;
 
-  uintptr_t need_addr = (uintptr_t)request.verneed;
-  for (size_t i = 0; i < request.verneed_count; ++i) {
-    if (!range_ok(&requester_view, need_addr, sizeof(Elf64_Verneed))) return 0;
-    const Elf64_Verneed *need = (const Elf64_Verneed *)need_addr;
-    if (need->vn_version != VER_NEED_CURRENT || !need->vn_aux) return 0;
+  const char *required_version = NULL;
+  const char *required_provider = NULL;
+  uint32_t required_hash = 0;
+  if (!version_requirement_for_index(&requester_view, &request, wanted,
+                                     &required_version, &required_provider,
+                                     &required_hash) ||
+      required_hash != elf_name_hash(required_version)) return 0;
 
-    uintptr_t aux_addr;
-    if (add_overflow_uintptr(need_addr, need->vn_aux, &aux_addr)) return 0;
-    for (size_t j = 0; j < need->vn_cnt; ++j) {
-      if (!range_ok(&requester_view, aux_addr, sizeof(Elf64_Vernaux))) return 0;
-      const Elf64_Vernaux *aux = (const Elf64_Vernaux *)aux_addr;
-      if ((aux->vna_other & VER_NDX_MASK) == wanted) {
-        size_t str_size = request.strsz;
-        if (aux->vna_name >= str_size || need->vn_file >= str_size) return 0;
-        const char *required_version = request.strtab + aux->vna_name;
-        const char *required_provider = request.strtab + need->vn_file;
-        if (!memchr(required_version, '\0', str_size - aux->vna_name) ||
-            !memchr(required_provider, '\0', str_size - need->vn_file) ||
-            aux->vna_hash != elf_name_hash(required_version)) return 0;
+  struct image_view provider_view = {0};
+  const Elf64_Ehdr *provider_eh = NULL;
+  const Elf64_Phdr *provider_phdr = NULL;
+  if (!image_bounds(provider_base, &provider_view,
+                    &provider_eh, &provider_phdr)) return 0;
 
-        struct image_view provider_view = {0};
-        const Elf64_Ehdr *provider_eh = NULL;
-        const Elf64_Phdr *provider_phdr = NULL;
-        if (!image_bounds(provider_base, &provider_view,
-                          &provider_eh, &provider_phdr)) return 0;
-        struct dynamic_info provider = {0};
-        if (!parse_dynamic(&provider_view, provider_eh, provider_phdr, &provider))
-          return 0;
+  struct dynamic_info provider = {0};
+  if (!parse_dynamic(&provider_view, provider_eh, provider_phdr, &provider))
+    return 0;
 
-        /* If the provider advertises DT_SONAME, enforce the VERNEED owner. */
-        if (provider.has_soname) {
-          size_t provider_str_size = provider.strsz;
-          if (provider.soname_offset >= provider_str_size) return 0;
-          const char *soname = provider.strtab + provider.soname_offset;
-          if (!memchr(soname, '\0', provider_str_size - provider.soname_offset) ||
-              strcmp(soname, required_provider) != 0) return 0;
-        }
-        return elf_find_versioned_symbol(provider_base, symbol_name,
-                                         required_version);
-      }
-      if (!aux->vna_next) break;
-      uintptr_t next;
-      if (add_overflow_uintptr(aux_addr, aux->vna_next, &next) ||
-          next <= aux_addr) return 0;
-      aux_addr = next;
-    }
-    if (!need->vn_next) break;
-    uintptr_t next;
-    if (add_overflow_uintptr(need_addr, need->vn_next, &next) ||
-        next <= need_addr) return 0;
-    need_addr = next;
+  /* DT_VERNEED.vn_file identifies the provider's SONAME, not its pathname. */
+  if (provider.has_soname) {
+    if (provider.soname_offset >= provider.strsz) return 0;
+    const char *soname = provider.strtab + provider.soname_offset;
+    if (!memchr(soname, '\0', provider.strsz - provider.soname_offset) ||
+        strcmp(soname, required_provider) != 0) return 0;
   }
-  return 0;
+
+  return elf_find_versioned_symbol(provider_base, symbol_name,
+                                   required_version);
 }
