@@ -155,6 +155,19 @@ enum module_loader_backend {
   MODULE_LOADER_SYSTEM
 };
 
+enum module_lifecycle_state {
+  MODULE_STATE_NEW = 0,
+  MODULE_STATE_LOADING,
+  MODULE_STATE_IMAGE_LOADED,
+  MODULE_STATE_ENTRY_RUNNING,
+  MODULE_STATE_REGISTERED,
+  MODULE_STATE_ACTIVE,
+  MODULE_STATE_CLOSING,
+  MODULE_STATE_RETAINED,
+  MODULE_STATE_UNLOADED,
+  MODULE_STATE_FAILED
+};
+
 struct rezygisk_module {
   struct rezygisk_abi abi;
   struct rezygisk_api api;
@@ -169,6 +182,7 @@ struct rezygisk_module {
   void (*zygisk_module_entry)(void *, void *);
 
   bool unload;
+  enum module_lifecycle_state lifecycle_state;
 
   /* Host-side execution lease: unload waits until all module callbacks return. */
   pthread_mutex_t call_mutex;
@@ -189,6 +203,7 @@ static inline bool rz_module_sync_init(struct rezygisk_module *m) {
   }
   m->active_calls = 0;
   m->call_closing = false;
+  m->lifecycle_state = MODULE_STATE_NEW;
   m->call_sync_initialized = true;
   return true;
 }
@@ -196,7 +211,9 @@ static inline bool rz_module_sync_init(struct rezygisk_module *m) {
 static inline bool rz_module_call_enter(struct rezygisk_module *m) {
   if (!m || !m->call_sync_initialized) return false;
   if (pthread_mutex_lock(&m->call_mutex) != 0) return false;
-  bool allowed = !m->call_closing;
+  bool allowed = !m->call_closing &&
+      m->lifecycle_state != MODULE_STATE_UNLOADED &&
+      m->lifecycle_state != MODULE_STATE_FAILED;
   if (allowed) m->active_calls++;
   pthread_mutex_unlock(&m->call_mutex);
   return allowed;
@@ -215,6 +232,7 @@ static inline bool rz_module_sync_close_and_wait(struct rezygisk_module *m) {
   if (!m || !m->call_sync_initialized) return false;
   if (pthread_mutex_lock(&m->call_mutex) != 0) return false;
   m->call_closing = true;
+  m->lifecycle_state = MODULE_STATE_CLOSING;
   while (m->active_calls != 0) {
     int error = pthread_cond_wait(&m->call_cond, &m->call_mutex);
     if (error != 0) {
@@ -231,6 +249,7 @@ static inline void rz_module_sync_destroy(struct rezygisk_module *m) {
   (void)rz_module_sync_close_and_wait(m);
   pthread_cond_destroy(&m->call_cond);
   pthread_mutex_destroy(&m->call_mutex);
+  m->lifecycle_state = MODULE_STATE_UNLOADED;
   m->call_sync_initialized = false;
 }
 
@@ -246,6 +265,35 @@ static inline void rz_module_sync_destroy(struct rezygisk_module *m) {
     SOURCES:
      - https://clang.llvm.org/extra/clang-tidy/checks/misc/definitions-in-headers.html
 */
+static inline bool rz_module_set_state(struct rezygisk_module *m,
+                                       enum module_lifecycle_state state) {
+  if (!m || !m->call_sync_initialized ||
+      pthread_mutex_lock(&m->call_mutex) != 0) return false;
+  bool allowed = !m->call_closing &&
+      state != MODULE_STATE_CLOSING && state != MODULE_STATE_UNLOADED;
+  if (allowed) m->lifecycle_state = state;
+  pthread_mutex_unlock(&m->call_mutex);
+  return allowed;
+}
+
+static inline bool rz_module_request_unload(struct rezygisk_module *m) {
+  if (!m || !m->call_sync_initialized ||
+      pthread_mutex_lock(&m->call_mutex) != 0) return false;
+  bool allowed = !m->call_closing &&
+      m->lifecycle_state != MODULE_STATE_UNLOADED;
+  if (allowed) m->unload = true;
+  pthread_mutex_unlock(&m->call_mutex);
+  return allowed;
+}
+
+static inline bool rz_module_unload_requested(struct rezygisk_module *m) {
+  if (!m || !m->call_sync_initialized ||
+      pthread_mutex_lock(&m->call_mutex) != 0) return false;
+  bool requested = m->unload;
+  pthread_mutex_unlock(&m->call_mutex);
+  return requested;
+}
+
 static inline void rz_module_call_on_load(struct rezygisk_module *m, void *env) {
   if (!m->zygisk_module_entry || !rz_module_call_enter(m)) return;
   m->zygisk_module_entry((void *)&m->api, env);
