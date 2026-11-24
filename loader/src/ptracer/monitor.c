@@ -769,12 +769,14 @@ void sigchld_listener_callback() {
 
                   PLOGE("exec");
 
-                  kill(pid, SIGKILL);
+                  if (zn_target) kill(pid, SIGCONT);
+                  else kill(pid, SIGKILL);
                   exit(1);
                 } else if (p == -1) {
                   PLOGE("fork");
 
-                  kill(pid, SIGKILL);
+                  if (zn_target) kill(pid, SIGCONT);
+                  else kill(pid, SIGKILL);
                 }
               }
             }
