@@ -1,82 +1,143 @@
 # ReZygisk
 
-[Español(Argentina)](/READMEs/README_es-AR.md)|[Bahasa Indonesia](/READMEs/README_id-ID.md)|[Português Brasileiro](/READMEs/README_pt-BR.md)|[Українська](/READMEs/README_uk-UA.md)|[Tiếng Việt](/READMEs/README_vi-VN.md)|[فارسی](/READMEs/README_fa-IR.md)|[简体中文](/READMEs/README_zh-CN.md)
+[English](#english) | [简体中文](#简体中文)
 
-ReZygisk is a fork of Zygisk Next, a standalone implementation of Zygisk, providing Zygisk API support for KernelSU, APatch and Magisk.
+---
 
-The codebase has been rewritten to C entirely, bringing not only a much cleaner codebase that is easier to follow, but also lighter and faster binaries. Custom linkers also have been introduced to future-proof ReZygisk against future detections, not using system linker at all in normal circunstances, defeating any linker-based detection.
+## English
 
-## Why?
+ReZygisk is a standalone implementation of the Zygisk API, forked from Zygisk Next. It provides Zygisk compatibility for **KernelSU, APatch, and Magisk**.
 
-The latest releases of Zygisk Next are not open-source, reserving entirely the code for its developers. Not only does that limit our ability to contribute to the project, but also impossibilities the audit of the code, which is a major security concern, as Zygisk Next is a module that runs with superuser (root) privileges, having access to the entire system.
+The codebase is written in C and uses a custom linker to reduce reliance on the system linker. ReZygisk is designed to be lightweight and to keep its implementation auditable.
 
-The Zygisk Next developers are famous and trusted in the Android community, however, this doesn't mean that the code is not malicious or vulnerable. We (PerformanC) understand they have their reasons to keep the code closed-source, but we believe the contrary.
+### Features
 
-## Advantages
+- Standalone Zygisk API implementation.
+- Compatible with KernelSU, APatch, and Magisk.
+- ARM64-only runtime and build targets (**arm64-v8a**).
+- Custom linker support.
+- Runtime state and detected Zygisk module names are reported in the root manager's module description.
+- No WebUI component.
 
-- FOSS (Forever)
+### Compatibility
 
-## Dependencies
+| Item | Support |
+|---|---|
+| ABI | ARM64 (arm64-v8a) only |
+| KernelSU | Supported |
+| APatch | Supported |
+| Magisk | Supported; built-in Zygisk must be disabled |
+| 32-bit ARM / x86 / x86_64 | Not supported |
 
-| Tool            | Description                            |
-|-----------------|----------------------------------------|
-| `Android NDK`   | Native Development Kit for Android     |
+The build system and installer reject non-ARM64 targets. The ptracer uses AArch64 register layouts and supports 64-bit Zygote injection only.
 
-### C Dependencies
+### Installation
 
-| Dependency  | Description                   |
-|-------------|-------------------------------|
-| `PLTI`      | Simple PLT Hook for Android   |
-| `CSOLoader` | SOTA Linux custom linker      |
+1. Download the latest **Release** ZIP from the project's [GitHub Actions](https://github.com/pingranQi/VReZygisk/actions) artifacts or a published release.
+   - **Release** is recommended for normal use. It uses optimized binaries and reduced logging.
+   - **Debug** includes additional logging and is intended for troubleshooting.
+2. Open the Modules section in KernelSU, APatch, or Magisk and install the ZIP.
+3. If using Magisk, disable Magisk's built-in **Zygisk** option to avoid conflicts.
+4. Reboot the device.
 
-## Installation
+### Verify the installation
 
-### 1. Select the right zip
+After rebooting, check ReZygisk's module description in your root manager. It reports monitor and 64-bit Zygisk status, for example:
 
-The selection of the build/zip is important, as it will determine how hidden and stable ReZygisk will be. This, however, is not a hard task:
+**[Monitor: ✅, ReZygisk 64-bit: ✅] Standalone implementation of Zygisk.**
 
-- `release` should be the one chosen for most cases, it removes app-level logging and offers more optimized binaries.
-- `debug`, however, offers the opposite, with heavy logging and no optimizations, For this reason, **you should only use it for debugging purposes** and **when obtaining logs for creating an Issue**.
+The exact status text may vary by runtime state.
 
-As for branches, you should always use the `main` branch, unless told otherwise by the developers, or if you want to test upcoming features and are aware of the risks involved.
+### Build
 
-### 2. Flash the zip
+**Required toolchain:** Android NDK.
 
-After choosing the right build, you should flash it using your current root manager, like Magisk or KernelSU. You can do this by going to the `Modules` section of your root manager and selecting the zip you downloaded.
+The project build configuration targets **arm64-v8a** only. Attempts to select another ABI are rejected by the build system.
 
-After flashing, check the installation logs to ensure there are no errors, and if everything is fine, you can reboot your device.
+Third-party native dependencies:
 
-> [!WARNING]
-> Magisk users should disable built-in Zygisk, as it will conflict with ReZygisk. This can be done by going to the `Settings` section of Magisk and disabling the `Zygisk` option.
+| Dependency | Purpose |
+|---|---|
+| PLTI | PLT hooking for Android |
+| CSOLoader | Custom Linux linker |
 
-### 3. Verify the installation
+### Troubleshooting
 
-After rebooting, you can verify if ReZygisk is working properly by checking the module description in the `Modules` section of your root manager. The description should indicate that the necessary daemons are running. The ARM64-only build reports the 64-bit Zygote status, for example: `[Monitor: ✅, ReZygisk 64-bit: ✅] Standalone implementation of Zygisk.`
+- **Magisk reports a Zygisk conflict:** disable Magisk's built-in Zygisk and reboot.
+- **The module does not report a running monitor:** check the module installation log and Android logs for startup errors.
+- **A Zygisk module does not load:** confirm that the module supports 64-bit processes and inspect the ReZygisk debug build logs.
+- **Installation is rejected due to ABI:** this build supports ARM64 devices only.
 
-## Build profile
+### License
 
-This forked build targets **ARM64 (`arm64-v8a`) only**. The build system rejects non-ARM64 targets, the installer rejects non-ARM64 devices, and the ptracer only supports AArch64 register layouts and 64-bit Zygote injection. Runtime status and detected Zygisk module names are shown directly in the root manager's module description.
+ReZygisk is licensed under [AGPL-3.0](./LICENSE). See the [Open Source Initiative](https://opensource.org/license/agpl-v3/) for license information.
 
-## Translation
+---
 
-There are currently two different ways to contribute translations for ReZygisk:
+## 简体中文
 
-- For translations of the README, you can create a new file in the `READMEs` folder, following the naming convention of `README_<language>.md`, where `<language>` is the language code (e.g., `README_pt-BR.md` for Brazilian Portuguese), and open a pull request to the `main` branch with your changes.
-- For translations of the ReZygisk, you should first contribute to our [Crowdin](https://crowdin.com/project/rezygisk). Once approved retrieve the `.json` file from there and open a pull request with your changes -- adding the `.json` file to the `webroot/lang` folder and your credits to the `TRANSLATOR.md` file, in alphabetic order.
+ReZygisk 是从 Zygisk Next 分支出来的 Zygisk API 独立实现，为 **KernelSU、APatch 和 Magisk** 提供 Zygisk 兼容支持。
 
-## Support
+项目使用 C 语言实现，并引入自定义链接器以减少对系统链接器的依赖。ReZygisk 以轻量化和代码可审计性为设计目标。
 
-For any question related to ReZygisk or other PerformanC projects, feel free to join any of the following channels below:
+### 功能特性
 
-- Discord Channel: [PerformanC](https://discord.gg/uPveNfTuCJ)
-- ReZygisk Telegram Channel: [@rezygisk](https://t.me/rezygisk)
-- PerformanC Telegram Channel: [@performancorg](https://t.me/performancorg)
-- PerformanC Signal Group: [@performanc](https://signal.group/#CjQKID3SS8N5y4lXj3VjjGxVJnzNsTIuaYZjj3i8UhipAS0gEhAedxPjT5WjbOs6FUuXptcT)
+- 独立实现 Zygisk API。
+- 兼容 KernelSU、APatch 和 Magisk。
+- 仅支持 ARM64 架构（**arm64-v8a**）。
+- 支持自定义链接器。
+- Root 管理器的模块描述会显示运行状态和检测到的 Zygisk 模块名称。
+- 不包含 WebUI。
 
-## Contribution
+### 兼容性
 
-It is mandatory to follow PerformanC's [Contribution Guidelines](https://github.com/PerformanC/contributing) to contribute to ReZygisk. Following its Security Policy, Code of Conduct, and syntax standard.
+| 项目 | 支持情况 |
+|---|---|
+| ABI | 仅 ARM64（arm64-v8a） |
+| KernelSU | 支持 |
+| APatch | 支持 |
+| Magisk | 支持，但必须关闭内置 Zygisk |
+| ARM 32 位 / x86 / x86_64 | 不支持 |
 
-## License
+构建系统和安装脚本会拒绝非 ARM64 目标。ptracer 仅使用 AArch64 寄存器布局，并且只支持向 64 位 Zygote 注入。
 
-ReZygisk is licensed under [AGPL 3.0](./LICENSE). You can read more about it on [Open Source Initiative](https://opensource.org/licenses/AGPL-3.0).
+### 安装
+
+1. 从项目的 [GitHub Actions](https://github.com/pingranQi/VReZygisk/actions) 构建产物或正式发布页面下载最新的 **Release** ZIP。
+   - **Release**：日常使用推荐版本，启用二进制优化并减少日志输出。
+   - **Debug**：包含更详细的日志，仅建议用于问题排查。
+2. 打开 KernelSU、APatch 或 Magisk 的“模块”页面，选择 ZIP 文件并安装。
+3. 如果使用 Magisk，必须关闭 Magisk 内置的 **Zygisk**，避免发生冲突。
+4. 重启设备。
+
+### 验证安装
+
+重启后，在 Root 管理器的模块描述中检查 ReZygisk 的运行状态。描述会显示 monitor 和 64 位 Zygisk 状态，例如：
+
+**[Monitor: ✅, ReZygisk 64-bit: ✅] Standalone implementation of Zygisk.**
+
+具体状态文本可能随运行状态变化。
+
+### 构建
+
+**所需工具链：** Android NDK。
+
+项目构建配置仅面向 **arm64-v8a**。如果尝试选择其他 ABI，构建系统会直接拒绝。
+
+第三方 Native 依赖：
+
+| 依赖项 | 用途 |
+|---|---|
+| PLTI | Android PLT Hook |
+| CSOLoader | Linux 自定义链接器 |
+
+### 故障排查
+
+- **Magisk 提示 Zygisk 冲突：** 关闭 Magisk 内置 Zygisk，然后重启设备。
+- **模块描述未显示 monitor 正常运行：** 检查模块安装日志和 Android 日志中的启动错误。
+- **Zygisk 模块无法加载：** 确认目标模块支持 64 位进程，并检查 ReZygisk Debug 版本的日志。
+- **安装时提示 ABI 不受支持：** 当前构建仅支持 ARM64 设备。
+
+### 许可证
+
+ReZygisk 使用 [AGPL-3.0](./LICENSE) 许可证。许可证详情参见 [Open Source Initiative](https://opensource.org/license/agpl-v3/)。
