@@ -30,16 +30,17 @@ There are two separate loading paths and they must not be conflated:
   specialization callbacks.
 - GNU symbol versioning is not implemented by the pinned CSOLoader, so the
   integration detects its dynamic tags and delegates those images to Bionic.
-- The ptracer's bootstrap ELF mapper is a separate implementation. It currently
-  rejects PT_TLS images and GNU IFUNC symbols rather than pretending that
-  `st_value` is the resolved IFUNC address. IRELATIVE and TLS relocation
-  families are not implemented there. Such images cannot be made safe merely
-  by the in-process `dlopen()` fallback because the bootstrap mapper runs
-  before that loader exists in the target.
+- The ptracer's bootstrap ELF mapper is a separate implementation. It supports
+  standard and Android RELR, Android APS2 packed RELA, and executes AArch64
+  IFUNC/IRELATIVE resolvers inside the stopped target process. It still rejects
+  PT_TLS, TLS relocation families, Android packed REL, and unsupported
+  architecture relocation types. Its resolver calling convention and cleanup
+  require Android device validation.
 
-Do not claim complete TLS/IFUNC support for the ptracer mapper. Extending it
-requires correct target-thread TLS setup and execution of resolver functions
-inside the target process, with rollback and constructor ordering tested.
+Do not claim complete TLS support for the ptracer mapper. IFUNC/IRELATIVE
+support is implemented using target-process execution, but must be validated
+on-device for target auxv/HWCAP, stack ABI, signal-stop verification,
+reentrancy and abnormal resolver termination.
 
 ## Updating the dependency
 
@@ -49,11 +50,12 @@ Initialize the pinned revision:
 git submodule update --init --recursive loader/src/external/csoloader
 ```
 
-Python 3 is required for the build-time patch step. The loader Makefile applies
-the tracked TLS/lifecycle hardening patch before compiling the submodule. It validates TLS registration and allocation, and
-preallocates the loader's path bookkeeping before constructors. The patch is
-idempotent and is based on the pinned upstream revision; do not commit the
-modified submodule worktree as a new upstream revision.
+Python 3 is required for the build-time patch step. The loader Makefile applies the tracked TLS/lifecycle hardening patch before
+compiling the submodule. It validates TLS registration and allocation,
+preallocates path bookkeeping before constructors, and adds per-image
+constructor/destructor state to prevent duplicate initialization/finalization.
+The patch is idempotent and is based on the pinned upstream revision; do not
+commit the modified submodule worktree as a new upstream revision.
 
 Inspect the current pin:
 
@@ -101,9 +103,13 @@ Before advancing the pinned revision, validate at least:
 The pinned CSOLoader implements emulated TLS, RELR, Android packed relocation,
 IFUNC and IRELATIVE handling. The build applies
 `scripts/patch-csoloader.py` to harden TLS key creation, per-thread registration,
-module-ID reuse generations, alignment and offset validation, and TLS
-registration failure propagation. Its emulated TLS is not a substitute for
-Bionic's native TLS ABI, so VReZygisk routes PT_TLS images to Bionic for now.
-GNU symbol versioning is likewise delegated to Bionic. A failed custom load is allowed to fall back to Bionic only when cleanup
+module-ID reuse generations, alignment and offset validation, TLS registration
+failure propagation, and per-image constructor/destructor state. Its emulated
+TLS is not a substitute for Bionic's native TLS ABI, so VReZygisk routes PT_TLS
+images to Bionic for now. GNU symbol versioning in the in-process CSOLoader is
+likewise delegated to Bionic. The ptracer bootstrap path has a separate
+version-aware undefined-symbol resolver based on `DT_VERSYM`/`DT_VERNEED`
+and local Bionic `dlvsym()`; it is not a complete replacement for Bionic's
+global namespace and version lookup rules. A failed custom load is allowed to fall back to Bionic only when cleanup
 is complete and module code has not started; a successful custom load must
 always be released with `csoloader_unload()`, never `dlclose()`.
