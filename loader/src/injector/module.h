@@ -232,7 +232,7 @@ static inline void rz_module_sync_destroy(struct rezygisk_module *m) {
   pthread_cond_destroy(&m->call_cond);
   pthread_mutex_destroy(&m->call_mutex);
   m->call_sync_initialized = false;
-};
+}
 
 /*
     INFO: What follows are function definitions to be included wherever necessary.
@@ -291,7 +291,7 @@ static inline void rz_module_call_pre_app_specialize(struct rezygisk_module *m, 
       struct app_specialize_args_v4 versioned_args;
       memcpy(&versioned_args, args, sizeof(struct app_specialize_args_v4));
 
-      m->abi.pre_app_specialize(m->abi.impl, &versioned_args);
+      if (rz_module_call_enter(m)) { m->abi.pre_app_specialize(m->abi.impl, &versioned_args); rz_module_call_leave(m); }
 
       break;
     }
@@ -342,7 +342,7 @@ static inline void rz_module_call_post_app_specialize(struct rezygisk_module *m,
       struct app_specialize_args_v4 versioned_args;
       memcpy(&versioned_args, args, sizeof(struct app_specialize_args_v4));
 
-      m->abi.post_app_specialize(m->abi.impl, &versioned_args);
+      if (rz_module_call_enter(m)) { m->abi.post_app_specialize(m->abi.impl, &versioned_args); rz_module_call_leave(m); }
 
       break;
     }
