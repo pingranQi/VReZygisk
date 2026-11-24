@@ -1367,10 +1367,14 @@ static bool load_modules_only(void) {
      * the custom linker cannot handle a device-/module-specific ELF feature.
      * A system handle is never stored in struct csoloader.
      */
-    if (!requires_system_linker(lib_path) && csoloader_load_serialized(&module->lib, lib_path)) {
+    bool force_system_linker = requires_system_linker(lib_path);
+    if (!force_system_linker && csoloader_load_serialized(&module->lib, lib_path)) {
       module->loader_backend = MODULE_LOADER_CSO;
     } else {
-      LOGW("CSOLoader rejected [%s]; retrying with the system linker", lib_path);
+      if (force_system_linker)
+        LOGI("Routing [%s] directly to Bionic linker by ELF compatibility policy", lib_path);
+      else
+        LOGW("CSOLoader rejected [%s]; retrying with the system linker", lib_path);
       dlerror();
       module->system_handle = dlopen(lib_path, RTLD_NOW | RTLD_LOCAL);
       if (!module->system_handle) {
