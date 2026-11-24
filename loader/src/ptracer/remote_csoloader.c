@@ -1136,8 +1136,10 @@ static bool run_remote_ifunc_resolver(int pid, struct user_regs_struct *regs,
   uintptr_t gadget = find_syscall_gadget(pid, remote_map);
   if (!gadget) return false;
 
+  if (page_size > SIZE_MAX / 2) return false;
+  const size_t scratch_size = page_size * 2;
   long mmap_args[6] = {
-    0, (long)page_size, PROT_READ | PROT_WRITE,
+    0, (long)scratch_size, PROT_READ | PROT_WRITE,
     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
   };
   long mapped = remote_syscall(pid, regs, gadget, SYS_mmap, mmap_args, 6);
@@ -1147,6 +1149,8 @@ static bool run_remote_ifunc_resolver(int pid, struct user_regs_struct *regs,
   }
   uintptr_t scratch = (uintptr_t)mapped;
   uintptr_t args_address = scratch + page_size / 2;
+  uintptr_t return_trap = scratch + page_size;
+  const uint32_t brk_instruction = 0xd4200000; /* brk #0 */
   struct remote_ifunc_args ifunc_args = {
     .size = sizeof(struct remote_ifunc_args),
     .hwcap = getauxval(AT_HWCAP),
@@ -1156,8 +1160,20 @@ static bool run_remote_ifunc_resolver(int pid, struct user_regs_struct *regs,
   struct user_regs_struct saved = *regs;
 
   if (write_proc(pid, args_address, &ifunc_args, sizeof(ifunc_args)) !=
-      (ssize_t)sizeof(ifunc_args)) {
-    LOGE("Failed to write remote IFUNC argument block");
+      (ssize_t)sizeof(ifunc_args) ||
+      write_proc(pid, return_trap, &brk_instruction,
+                 sizeof(brk_instruction)) != (ssize_t)sizeof(brk_instruction)) {
+    LOGE("Failed to write remote IFUNC argument block or return trap");
+    goto cleanup;
+  }
+
+  long protect_args[3] = {
+    (long)return_trap, (long)page_size, PROT_READ | PROT_EXEC
+  };
+  long protect_result = remote_syscall(pid, regs, gadget, SYS_mprotect,
+                                       protect_args, 3);
+  if (remote_syscall_failed(protect_result)) {
+    LOGE("Failed to protect remote IFUNC return trap: %ld", protect_result);
     goto cleanup;
   }
 
@@ -1166,7 +1182,7 @@ static bool run_remote_ifunc_resolver(int pid, struct user_regs_struct *regs,
     (long)(ifunc_args.hwcap | (1ULL << 62)),
     (long)args_address
   };
-  uintptr_t resolved = remote_call(pid, regs, resolver, 0, call_args, 2);
+  uintptr_t resolved = remote_call(pid, regs, resolver, return_trap, call_args, 2);
   if (resolved == 0) {
     LOGE("Remote IFUNC resolver failed or returned a null address");
     goto restore;
@@ -1182,7 +1198,7 @@ restore:
   }
 
 cleanup: {
-    long unmap_args[2] = { (long)scratch, (long)page_size };
+    long unmap_args[2] = { (long)scratch, (long)scratch_size };
     long unmap_result = remote_syscall(pid, regs, gadget, SYS_munmap,
                                        unmap_args, 2);
     if (unmap_result != 0) {
