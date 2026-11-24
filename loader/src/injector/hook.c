@@ -1484,7 +1484,7 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
       if (!csoloader_unload_serialized(&m->lib)) {
         LOGE("Failed to unload CSOLoader module [%s]",
              m->lib.lib_path ? m->lib.lib_path : "(unknown)");
-        csoloader_pinned = true;
+        csoloader_pin();
         all_cso_modules_unloaded = false;
         should_unmap_zygisk = false;
         continue;
