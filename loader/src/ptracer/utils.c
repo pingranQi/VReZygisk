@@ -347,13 +347,15 @@ uintptr_t remote_call(int pid, struct user_regs_struct *regs, uintptr_t func_add
     return 0;
   }
 
-  if (WSTOPSIG(status) == SIGSEGV) {
+  int stop_signal = WSTOPSIG(status);
+  bool expected_return = (stop_signal == SIGTRAP && return_addr != 0) ||
+                         (stop_signal == SIGSEGV && return_addr == 0);
+  if (expected_return) {
     if ((uintptr_t)regs->REG_IP != return_addr) {
-      LOGE("wrong return addr %p", (void *) regs->REG_IP);
-
+      LOGE("wrong return addr %p (expected %p)",
+           (void *)regs->REG_IP, (void *)return_addr);
       return 0;
     }
-
     return regs->REG_RET;
   } else {
     char status_str[64];
