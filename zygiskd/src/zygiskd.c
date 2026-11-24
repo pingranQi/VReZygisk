@@ -25,6 +25,7 @@ struct Module {
 struct Context {
   struct Module *modules;
   size_t len;
+  struct zn_module_list zn_modules;
 };
 
 struct rzd_msg_header {
@@ -147,7 +148,8 @@ static void load_modules(struct Context *restrict context) {
   closedir(dir);
 }
 
-static void free_modules(struct Context *restrict context) {\n  zn_modules_free(&context->zn_modules);
+static void free_modules(struct Context *restrict context) {
+  zn_modules_free(&context->zn_modules);
   for (size_t i = 0; i < context->len; i++) {
     free(context->modules[i].name);
     if (context->modules[i].companion >= 0) close(context->modules[i].companion);
@@ -316,7 +318,12 @@ void zygiskd_start(char *restrict argv[]) {
 
     exit(EXIT_FAILURE);
   } else {
-    load_modules(&context);\n    if (!zn_modules_load(PATH_MODULES_DIR, &context.zn_modules)) {\n      LOGW("Failed scanning ZN module manifests");\n    } else {\n      LOGI("Discovered %zu ZN module target(s)", context.zn_modules.count);\n    }
+    load_modules(&context);
+    if (!zn_modules_load(PATH_MODULES_DIR, &context.zn_modules)) {
+      LOGW("Failed scanning ZN module manifests");
+    } else {
+      LOGI("Discovered %zu ZN module target(s)", context.zn_modules.count);
+    }
 
     size_t info_len = sizeof(struct rzd_info_payload);
     for (size_t i = 0; i < context.len; i++) {
