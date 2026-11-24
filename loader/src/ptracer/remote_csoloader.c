@@ -235,23 +235,6 @@ static bool vaddr_to_offset(const ElfW(Phdr) *phdr, int phnum, ElfW(Addr) vaddr,
   return false;
 }
 
-/* INFO: Find the full path of a loaded module by its soname in remote maps. */
-static const char *find_remote_module_path(struct maps_info *remote_map, const char *soname) {
-  for (size_t i = 0; i < remote_map->length; i++) {
-    const struct map_entry *m = &remote_map->maps[i];
-
-    if (!m->path) continue;
-    if (m->offset != 0) continue;
-
-    const char *filename = position_after(m->path, '/');
-    if (!filename) filename = m->path;
-
-    if (strcmp(filename, soname) == 0) return m->path;
-  }
-
-  return NULL;
-}
-
 struct elf_dyn_info {
   off_t dyn_off;
   size_t dyn_sz;
@@ -287,6 +270,8 @@ struct elf_dyn_info {
   char *strtab;
   size_t needed_count;
   size_t *needed_str_offsets;
+  size_t soname_offset;
+  bool has_soname;
 };
 
 static void elf_dyn_info_destroy(struct elf_dyn_info *info) {
@@ -463,6 +448,10 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       case DT_PLTREL:    out->pltrel_type = (int)dyn[i].d_un.d_val; break;
       case DT_GNU_HASH:  gnu_hash_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
       case DT_HASH:      sysv_hash_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
+      case DT_SONAME:
+        out->soname_offset = (size_t)dyn[i].d_un.d_val;
+        out->has_soname = true;
+        break;
       case DT_NEEDED: {
         if (needed_str_offsets && needed_i < needed_count)
           needed_str_offsets[needed_i++] = (size_t)dyn[i].d_un.d_val;
@@ -612,6 +601,15 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
     }
   }
 
+  if (out->has_soname &&
+      (out->soname_offset >= strsz ||
+       out->strtab[out->soname_offset] == '\0' ||
+       !memchr(out->strtab + out->soname_offset, '\0',
+               strsz - out->soname_offset))) {
+    LOGE("Invalid or unterminated DT_SONAME string offset");
+    goto cleanup;
+  }
+
   if (syment != sizeof(ElfW(Sym)) ||
       (rel_sz && rel_sz % sizeof(ElfW(Rel)) != 0) ||
       (rela_sz && rela_sz % sizeof(ElfW(Rela)) != 0) ||
@@ -724,18 +722,6 @@ cleanup:
   return success;
 }
 
-static const char *remote_soname(const char *path) {
-  if (!path) return NULL;
-  const char *base = position_after(path, '/');
-  return base ? base : path;
-}
-
-static bool same_remote_soname(const char *left, const char *right) {
-  const char *a = remote_soname(left);
-  const char *b = remote_soname(right);
-  return a && b && strcmp(a, b) == 0;
-}
-
 static void free_symbol_scope(char **paths, size_t count) {
   if (!paths) return;
   for (size_t i = 0; i < count; ++i) free(paths[i]);
@@ -801,6 +787,81 @@ static bool read_dependency_dynamic_info(const char *path, int *out_fd,
   return true;
 }
 
+/* Read the ELF's actual DT_SONAME. A basename is only a fallback for
+ * objects that do not publish DT_SONAME; it is never treated as an SONAME
+ * when the dynamic tag exists. */
+static bool read_remote_soname(const char *path, char *out, size_t out_size,
+                               bool *has_soname) {
+  if (!path || !out || out_size == 0 || !has_soname) return false;
+  out[0] = '\0';
+  *has_soname = false;
+
+  int fd = -1;
+  ElfW(Ehdr) eh;
+  ElfW(Phdr) *phdr = NULL;
+  struct elf_dyn_info info;
+  if (!read_dependency_dynamic_info(path, &fd, &eh, &phdr, &info))
+    return false;
+
+  bool ok = true;
+  if (info.has_soname) {
+    const char *value = info.strtab + info.soname_offset;
+    size_t length = strlen(value);
+    if (length == 0 || length >= out_size) {
+      ok = false;
+    } else {
+      memcpy(out, value, length + 1);
+      *has_soname = true;
+    }
+  }
+
+  elf_dyn_info_destroy(&info);
+  free(phdr);
+  close(fd);
+  return ok;
+}
+
+static bool same_remote_soname(const char *left, const char *right) {
+  if (!left || !right) return false;
+  if (strcmp(left, right) == 0) return true;
+
+  struct stat left_st, right_st;
+  if (stat(left, &left_st) == 0 && stat(right, &right_st) == 0 &&
+      left_st.st_dev == right_st.st_dev &&
+      left_st.st_ino == right_st.st_ino) return true;
+
+  char left_name[PATH_MAX], right_name[PATH_MAX];
+  bool left_has = false, right_has = false;
+  if (!read_remote_soname(left, left_name, sizeof(left_name), &left_has) ||
+      !read_remote_soname(right, right_name, sizeof(right_name), &right_has))
+    return false;
+  return left_has && right_has && strcmp(left_name, right_name) == 0;
+}
+
+/* Resolve DT_NEEDED against actual DT_SONAME values in the target's maps. */
+static const char *find_remote_module_path(struct maps_info *remote_map,
+                                           const char *soname) {
+  if (!remote_map || !soname || !*soname) return NULL;
+  for (size_t i = 0; i < remote_map->length; ++i) {
+    const struct map_entry *m = &remote_map->maps[i];
+    if (!m->path || m->offset != 0 || m->path[0] != '/') continue;
+
+    char candidate[PATH_MAX];
+    bool has_soname = false;
+    if (!read_remote_soname(m->path, candidate, sizeof(candidate),
+                            &has_soname)) continue;
+    if (has_soname) {
+      if (strcmp(candidate, soname) == 0) return m->path;
+      continue;
+    }
+
+    const char *base = position_after(m->path, '/');
+    if (!base) base = m->path;
+    if (strcmp(base, soname) == 0) return m->path;
+  }
+  return NULL;
+}
+
 /*
  * Build the ordered breadth-first DT_NEEDED scope. Bionic's global lookup
  * scope places all direct dependencies before their transitive dependencies.
@@ -810,9 +871,9 @@ static char **build_remote_symbol_scope(struct maps_info *remote_map,
                                         const char *const *direct_paths,
                                         size_t direct_count,
                                         size_t *out_count) {
-  if (!remote_map || !out_count || direct_count > 256) return NULL;
+  if (!remote_map || !out_count || direct_count > 4096) return NULL;
   *out_count = 0;
-  size_t capacity = 256;
+  size_t capacity = direct_count > 16 ? direct_count : 16;
   char **paths = (char **)calloc(capacity, sizeof(char *));
   if (!paths) return NULL;
 
@@ -824,7 +885,15 @@ static char **build_remote_symbol_scope(struct maps_info *remote_map,
     for (size_t j = 0; j < *out_count; ++j)
       if (same_remote_soname(paths[j], direct_paths[i])) { duplicate = true; break; }
     if (duplicate) continue;
-    if (*out_count == capacity) goto fail;
+    if (*out_count == capacity) {
+      size_t next_capacity = capacity <= 2048 ? capacity * 2 : 4096;
+      if (next_capacity <= capacity) goto fail;
+      char **grown = (char **)realloc(paths, next_capacity * sizeof(char *));
+      if (!grown) goto fail;
+      memset(grown + capacity, 0, (next_capacity - capacity) * sizeof(char *));
+      paths = grown;
+      capacity = next_capacity;
+    }
     paths[*out_count] = strdup(direct_paths[i]);
     if (!paths[*out_count]) goto fail;
     (*out_count)++;
@@ -869,6 +938,25 @@ static char **build_remote_symbol_scope(struct maps_info *remote_map,
       }
       if (duplicate) continue;
       if (*out_count == capacity) {
+        size_t next_capacity = capacity <= 2048 ? capacity * 2 : 4096;
+        if (next_capacity <= capacity) {
+          elf_dyn_info_destroy(&dep_info);
+          free(phdr);
+          close(fd);
+          goto fail;
+        }
+        char **grown = (char **)realloc(paths, next_capacity * sizeof(char *));
+        if (!grown) {
+          elf_dyn_info_destroy(&dep_info);
+          free(phdr);
+          close(fd);
+          goto fail;
+        }
+        memset(grown + capacity, 0, (next_capacity - capacity) * sizeof(char *));
+        paths = grown;
+        capacity = next_capacity;
+      }
+      if (*out_count >= capacity) {
         elf_dyn_info_destroy(&dep_info);
         free(phdr);
         close(fd);
