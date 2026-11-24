@@ -451,7 +451,7 @@ struct zn_broker_thread_args {
   struct Context *context;
   size_t module_index;
   int broker_fd;
-  char **argv;
+  char *restrict *argv;
 };
 
 static void *zn_companion_broker_thread(void *opaque) {
@@ -459,7 +459,7 @@ static void *zn_companion_broker_thread(void *opaque) {
   struct Context *context = args->context;
   const size_t index = args->module_index;
   const int broker_fd = args->broker_fd;
-  char **argv = args->argv;
+  char *restrict *argv = args->argv;
   free(args);
 
   LOGI("ZN companion broker started for manifest index %zu", index);
@@ -506,7 +506,7 @@ static void *zn_companion_broker_thread(void *opaque) {
 
 static bool register_zn_companion_broker(int client_fd,
                                          struct Context *context,
-                                         char **argv) {
+                                         char *restrict argv[]) {
   struct ucred peer = {0};
   socklen_t peer_size = sizeof(peer);
   if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) != 0 ||
