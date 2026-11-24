@@ -19,7 +19,7 @@
 #include <sys/stat.h>
 
 #include "elf_util.h"
-#include "elf_version.h"
+#include "../common/elf_version.h"
 
 #include "utils.h"
 
