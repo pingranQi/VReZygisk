@@ -989,6 +989,8 @@ static bool get_symbol_version_requirement(int fd,
         !memchr(info->strtab + need.vn_file, '\0', info->strsz - need.vn_file))
       return false;
 
+    if (need.vn_aux == 0 || need_addr > UINTPTR_MAX - need.vn_aux)
+      return false;
     ElfW(Addr) aux_addr = need_addr + need.vn_aux;
     for (size_t j = 0; j < need.vn_cnt; ++j) {
       off_t aux_off = 0;
@@ -1035,6 +1037,8 @@ static bool validate_verdef_table(int fd, const struct elf_dyn_info *info,
         !read_loop_offset(fd, &def, sizeof(def), def_off) ||
         def.vd_version != 1 || def.vd_cnt == 0 || def.vd_cnt > 4096)
       return false;
+    if (def.vd_aux == 0 || def_addr > UINTPTR_MAX - def.vd_aux)
+      return false;
     ElfW(Addr) aux_addr = def_addr + def.vd_aux;
     for (size_t j = 0; j < def.vd_cnt; ++j) {
       off_t aux_off = 0;
@@ -1055,6 +1059,48 @@ static bool validate_verdef_table(int fd, const struct elf_dyn_info *info,
       if (def.vd_next == 0 || def_addr > UINTPTR_MAX - def.vd_next)
         return false;
       def_addr += def.vd_next;
+    }
+  }
+  return true;
+}
+
+static bool validate_verneed_table(int fd, const struct elf_dyn_info *info,
+                                    const ElfW(Phdr) *phdr, int phnum) {
+  if (!info || info->verneed_num == 0) return true;
+  ElfW(Addr) need_addr = info->verneed_vaddr;
+  for (size_t i = 0; i < info->verneed_num; ++i) {
+    off_t need_off = 0;
+    struct gnu_verneed need;
+    if (!vaddr_to_offset(phdr, phnum, need_addr, sizeof(need), &need_off) ||
+        !read_loop_offset(fd, &need, sizeof(need), need_off) ||
+        need.vn_version != 1 || need.vn_cnt == 0 || need.vn_cnt > 4096 ||
+        need.vn_file >= info->strsz ||
+        !memchr(info->strtab + need.vn_file, '\0',
+                info->strsz - need.vn_file) ||
+        need.vn_aux == 0 || need_addr > UINTPTR_MAX - need.vn_aux)
+      return false;
+
+    ElfW(Addr) aux_addr = need_addr + need.vn_aux;
+    for (size_t j = 0; j < need.vn_cnt; ++j) {
+      off_t aux_off = 0;
+      struct gnu_vernaux aux;
+      if (!vaddr_to_offset(phdr, phnum, aux_addr, sizeof(aux), &aux_off) ||
+          !read_loop_offset(fd, &aux, sizeof(aux), aux_off) ||
+          aux.vna_name >= info->strsz ||
+          !memchr(info->strtab + aux.vna_name, '\0',
+                  info->strsz - aux.vna_name) ||
+          (aux.vna_other & 0x7fff) <= 1)
+        return false;
+      if (j + 1 < need.vn_cnt) {
+        if (aux.vna_next == 0 || aux_addr > UINTPTR_MAX - aux.vna_next)
+          return false;
+        aux_addr += aux.vna_next;
+      }
+    }
+    if (i + 1 < info->verneed_num) {
+      if (need.vn_next == 0 || need_addr > UINTPTR_MAX - need.vn_next)
+        return false;
+      need_addr += need.vn_next;
     }
   }
   return true;
@@ -2121,6 +2167,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
   struct elf_dyn_info dinfo;
   if (!elf_load_dyn_info(fd, &eh, phdr, &dinfo) ||
+      !validate_verneed_table(fd, &dinfo, phdr, eh.e_phnum) ||
       !validate_verdef_table(fd, &dinfo, phdr, eh.e_phnum)) {
     LOGE("Failed to load or validate ELF dynamic/version metadata");
 
