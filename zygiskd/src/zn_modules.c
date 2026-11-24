@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include "zn_modules.h"
 
 #include <elf.h>
