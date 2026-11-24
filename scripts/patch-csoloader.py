@@ -721,6 +721,70 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
             "if (_linker_is_library_loaded(linker, lib_name)) {",
             "dependency lookup by DT_NEEDED SONAME",
         )
+        hooks_start = source.index("static void *custom_dlopen(")
+        hooks_end = source.index("#endif /* CSOLOADER_MAKE_LINKER_HOOKS */",
+                                 hooks_start)
+        hooks_code = r"""static void *custom_dlopen(const char *filename, int flags) {
+  void *(*original_dlopen)(const char *, int) =
+      (void *(*)(const char *, int))_linker_get_original_libdl_symbol("dlopen");
+  if (!filename) return original_dlopen ? original_dlopen(filename, flags) : NULL;
+  if (!_linker_registry_lock())
+    return original_dlopen ? original_dlopen(filename, flags) : NULL;
+
+  struct linker *linker =
+      _linker_find_by_caller_address(__builtin_return_address(0));
+  if (linker && !linker->is_closing) {
+    struct csoloader_elf *img = _linker_find_loaded_image(linker, filename);
+    if (img && _linker_adjust_handle_ref(linker, img, true)) {
+      _linker_registry_unlock();
+      return img;
+    }
+  }
+  _linker_registry_unlock();
+  return original_dlopen ? original_dlopen(filename, flags) : NULL;
+}
+
+static void *custom_dlsym(void *handle, const char *symbol) {
+  void *(*original_dlsym)(void *, const char *) =
+      (void *(*)(void *, const char *))_linker_get_original_libdl_symbol("dlsym");
+  if (!_linker_registry_lock())
+    return original_dlsym ? original_dlsym(handle, symbol) : NULL;
+
+  struct linker *linker =
+      _linker_find_by_caller_address(__builtin_return_address(0));
+  struct csoloader_elf *img = _linker_image_from_handle(linker, handle);
+  if (img) {
+    void *result = NULL;
+    if (symbol) {
+      result = (void *)csoloader_elf_symb_address_exported(img, symbol);
+      if (!result) result = (void *)csoloader_elf_symb_address(img, symbol);
+    }
+    _linker_registry_unlock();
+    return result;
+  }
+  _linker_registry_unlock();
+  return original_dlsym ? original_dlsym(handle, symbol) : NULL;
+}
+
+static int custom_dlclose(void *handle) {
+  int (*original_dlclose)(void *) =
+      (int (*)(void *))_linker_get_original_libdl_symbol("dlclose");
+  if (!_linker_registry_lock())
+    return original_dlclose ? original_dlclose(handle) : -1;
+
+  struct linker *linker =
+      _linker_find_by_caller_address(__builtin_return_address(0));
+  struct csoloader_elf *img = _linker_image_from_handle(linker, handle);
+  if (img) {
+    bool released = _linker_adjust_handle_ref(linker, img, false);
+    _linker_registry_unlock();
+    return released ? 0 : -1;
+  }
+  _linker_registry_unlock();
+  return original_dlclose ? original_dlclose(handle) : -1;
+}
+"""
+        source = source[:hooks_start] + hooks_code + source[hooks_end:]
 
     open_handles_marker = "/* VREZYGISK_OPEN_HANDLE_GUARD */"
     if open_handles_marker not in source:
@@ -946,21 +1010,26 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
         destroy_end = source.index("\n/* INFO: Free resources related to the library without unloading it */",
                                   destroy_start)
         source = source[:destroy_start] + r"""bool linker_destroy(struct linker *linker) {
-  if (!linker || !linker->img) return false;
-  if (_linker_has_open_handles(linker)) {
-    LOGE("Refusing to unload %s while custom dlopen handles remain open",
-         linker->img->elf);
-    return false;
-  }
+  if (!linker || !linker->img || !_linker_registry_lock()) return false;
+  linker->is_closing = true;
+  _linker_registry_unlock();
 
-  void *main_base = linker->img->base;
-  size_t main_map_size = linker->main_map_size;
   if (linker->is_linked) {
     _linker_call_destructors(linker->img, &linker->main_lifecycle_state);
     unregister_eh_frame_for_library(linker->img);
     unregister_custom_library_for_backtrace(linker->img);
   }
 
+  if (!_linker_registry_lock()) return false;
+  if (_linker_has_open_handles(linker)) {
+    LOGE("Refusing to unmap %s while custom dlopen handles remain open",
+         linker->img->elf);
+    _linker_registry_unlock();
+    return false;
+  }
+
+  void *main_base = linker->img->base;
+  size_t main_map_size = linker->main_map_size;
   _linker_release_dependencies(linker, true, linker->is_linked);
   _linker_unregister(linker);
   _linker_unregister_tls_segment((struct loaded_dep *)linker);
@@ -975,6 +1044,7 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
   linker->main_handle_refs = 0;
   linker->is_linked = false;
   linker->main_map_size = 0;
+  _linker_registry_unlock();
   return true;
 }
 """ + source[destroy_end:]
