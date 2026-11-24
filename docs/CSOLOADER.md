@@ -24,7 +24,9 @@ There are two separate loading paths and they must not be conflated:
   CSOLoader images and `dlclose()` for Bionic handles.
 - CSOLoader public lifecycle operations are serialized by a recursive
   process-wide mutex because the pinned dependency maintains global linker
-  and TLS registries. The lock is not held across module entry points or
+  and TLS registries. A successful-image counter prevents global deinit while
+  another custom image remains loaded; failed partial loads are cleaned up
+  when no image is active. The lock is not held across module entry points or
   specialization callbacks.
 - GNU symbol versioning is not implemented by the pinned CSOLoader, so the
   integration detects its dynamic tags and delegates those images to Bionic.
