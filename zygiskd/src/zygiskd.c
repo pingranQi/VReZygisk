@@ -765,11 +765,13 @@ void zygiskd_start(char *restrict argv[]) {
           context.modules[i].companion = -1;
         }
 
+        pthread_mutex_lock(&context.zn_mutex);
         for (size_t i = 0; i < context.zn_modules.count; ++i) {
           if (context.zn_modules.items[i].companion_fd < 0) continue;
           close(context.zn_modules.items[i].companion_fd);
           context.zn_modules.items[i].companion_fd = -1;
         }
+        pthread_mutex_unlock(&context.zn_mutex);
 
         break;
       }
