@@ -5,6 +5,7 @@ on:
     branches:
       - feature/csoloader-hardening
       - optimize/hiding-memory-concurrency
+      - feature/linker-overhaul-arm64
   pull_request:
   merge_group:
   workflow_dispatch:
