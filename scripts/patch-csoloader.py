@@ -817,8 +817,12 @@ static int custom_dlclose(void *handle) {
         old_head = """bool linker_abandon(struct linker *linker) {
   _linker_release_dependencies(linker, false, false);"""
         new_head = """bool linker_abandon(struct linker *linker) {
-  if (!linker || !linker->img || _linker_has_open_handles(linker))
+  if (!linker || !linker->img || !_linker_registry_lock()) return false;
+  if (_linker_has_open_handles(linker)) {
+    _linker_registry_unlock();
     return false;
+  }
+  linker->is_closing = true;
   _linker_release_dependencies(linker, false, false);"""
         if old_head not in abandon_chunk:
             raise RuntimeError("linker abandon guard anchor missing")
@@ -834,6 +838,7 @@ static int custom_dlclose(void *handle) {
   linker->main_handle_refs = 0;
   linker->is_linked = false;
   linker->main_map_size = 0;
+  _linker_registry_unlock();
   return true;
 }"""
         if old_tail not in abandon_chunk:
