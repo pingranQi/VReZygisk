@@ -16,7 +16,6 @@ struct zn_inline_hook_record {
   void *handler;
   void *stub;
   void *owner_base;
-  void **original_out;
   void *internal_original;
   struct zn_inline_hook_record *next;
 };
@@ -97,7 +96,6 @@ int zn_inline_hook(void *target, void *handler, void **original,
   record->target = target;
   record->handler = handler;
   record->owner_base = owner_base;
-  record->original_out = original;
 
   pthread_mutex_lock(&g_hook_mutex);
   void **original_slot = original ? original : &record->internal_original;
