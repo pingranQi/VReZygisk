@@ -467,6 +467,44 @@ static bool ensure_daemon_created(void) {
   return true;
 }
 
+static bool refresh_zn_targets(struct zn_module_list *targets) {
+  rezygiskd_free_zn_modules(targets);
+  if (!ensure_daemon_created()) return false;
+  if (!rezygiskd_read_zn_modules(targets)) {
+    LOGD("ZN manifest inventory is not available yet");
+    return false;
+  }
+  return true;
+}
+
+static bool zn_target_matches(const struct zn_module_list *targets,
+                              const char *program) {
+  if (!targets || !program || !*program) return false;
+
+  char normalized[PATH_MAX];
+  if (snprintf(normalized, sizeof(normalized), "%s", program) >=
+      (int)sizeof(normalized)) return false;
+
+  static const char deleted_suffix[] = " (deleted)";
+  size_t length = strlen(normalized);
+  const size_t suffix_length = sizeof(deleted_suffix) - 1;
+  if (length >= suffix_length &&
+      strcmp(normalized + length - suffix_length, deleted_suffix) == 0)
+    normalized[length - suffix_length] = '\0';
+
+  const char *base = strrchr(normalized, '/');
+  base = base ? base + 1 : normalized;
+
+  for (size_t i = 0; i < targets->count; ++i) {
+    const struct zn_module_info *entry = &targets->items[i];
+    if (entry->target_type == ZN_TARGET_PATH &&
+        strcmp(entry->target, normalized) == 0) return true;
+    if (entry->target_type == ZN_TARGET_NAME &&
+        strcmp(entry->target, base) == 0) return true;
+  }
+  return false;
+}
+
 #define CHECK_DAEMON_EXIT(abi)                                    \
   if (status##abi.supported && pid == status##abi.daemon_pid) {   \
     char status_str[64];                                          \
@@ -676,14 +714,22 @@ void sigchld_listener_callback() {
           LOGV("%d program %s", pid, program);
 
           const char *tracer = NULL;
+          bool zn_target = false;
+          struct zn_module_list zn_targets = {0};
           do {
             if (tracing_state != TRACING) {
               LOGD("Stopped injecting %d because status is not set to tracing", pid);
-
               break;
             }
 
             PRE_INJECT_64
+
+            if (tracer == NULL && refresh_zn_targets(&zn_targets) &&
+                zn_target_matches(&zn_targets, program)) {
+              tracer = "./bin/zygisk-ptrace64";
+              zn_target = true;
+              LOGI("Matched ZN manifest target: %s (pid %d)", program, pid);
+            }
 
             if (tracer != NULL) {
               LOGD("Stopping %d (program: %s, tracer: %s)", pid, program, tracer);
@@ -709,13 +755,17 @@ void sigchld_listener_callback() {
                   char pid_str[32];
                   sprintf(pid_str, "%d", pid);
 
-                  LOGI("exec tracer command: %s trace %s", tracer, pid_str);
+                  const char *command = zn_target ? "trace-zn" : "trace";
+                  LOGI("exec tracer command: %s %s %s", tracer, command, pid_str);
 
-                  /* INFO: Only restart companions if it's not the first time */
-                  if (count_zygote64 > 1)
-                    execl(tracer, basename(tracer), "trace", pid_str, "--restart", NULL);
-                  else
-                    execl(tracer, basename(tracer), "trace", pid_str, NULL);
+                  if (zn_target) {
+                    execl(tracer, basename(tracer), command, pid_str, NULL);
+                  } else if (count_zygote64 > 1) {
+                    /* Restart ordinary Zygisk companions only on zygote restart. */
+                    execl(tracer, basename(tracer), command, pid_str, "--restart", NULL);
+                  } else {
+                    execl(tracer, basename(tracer), command, pid_str, NULL);
+                  }
 
                   PLOGE("exec");
 
@@ -729,6 +779,7 @@ void sigchld_listener_callback() {
               }
             }
           } while (false);
+          rezygiskd_free_zn_modules(&zn_targets);
         } else {
           char status_str[64];
           parse_status(sigchld_status, status_str, sizeof(status_str));
