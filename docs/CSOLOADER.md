@@ -13,11 +13,18 @@ build; builds must not fetch a moving upstream branch.
 
 There are two separate loading paths and they must not be conflated:
 
-- Modules loaded inside the injected `libzygisk.so` process first use CSOLoader.
-  If CSOLoader rejects an image, the injector retries it with bionic
-  `dlopen(RTLD_NOW | RTLD_LOCAL)`. The matching release operation is
-  `csoloader_unload()` for CSOLoader images and `dlclose()` for bionic
-  handles.
+- Modules loaded inside the injected `libzygisk.so` process use a bounded
+  ELF feature probe before CSOLoader. Images with `PT_TLS`, GNU symbol-version
+  tags, Android packed relocation tags, or RELR tags are routed directly to
+  Bionic. Other images try CSOLoader first and fall back to Bionic on a clean
+  pre-execution failure. The probe validates ELF64/AArch64 identity, program
+  header bounds, the file-backed `PT_DYNAMIC` mapping and its `DT_NULL`
+  terminator. The matching release operation is `csoloader_unload()` for
+  CSOLoader images and `dlclose()` for Bionic handles.
+- CSOLoader public lifecycle operations are serialized by a recursive
+  process-wide mutex because the pinned dependency maintains global linker
+  and TLS registries. The lock is not held across module entry points or
+  specialization callbacks.
 - The ptracer's bootstrap ELF mapper is a separate implementation. It currently
   rejects PT_TLS images and GNU IFUNC symbols rather than pretending that
   `st_value` is the resolved IFUNC address. IRELATIVE and TLS relocation
@@ -80,7 +87,9 @@ Before advancing the pinned revision, validate at least:
   abandon semantics.
 - Android API-level and ABI matrix on real bionic runtimes.
 
-The upstream implementation documents TLS and IFUNC support, but those feature
-claims are not a substitute for this project's regression tests. A failed
-custom load is allowed to fall back to bionic; a successful custom load must
+The pinned CSOLoader implements emulated TLS and IFUNC handling, but those
+features are not a substitute for Bionic's native TLS ABI or resolver
+compatibility testing. VReZygisk therefore routes PT_TLS images to Bionic for
+now. A failed custom load is allowed to fall back to Bionic only when cleanup
+is complete and module code has not started; a successful custom load must
 always be released with `csoloader_unload()`, never `dlclose()`.
