@@ -268,26 +268,26 @@ static void hyos_atfork_child(void) {
   g_hyos_captured_name[0] = '\0';
 }
 
+struct hyos_main_base_lookup {
+  uintptr_t base;
+};
+
+static int hyos_find_main_base(struct dl_phdr_info *info, size_t size,
+                               void *opaque) {
+  (void)size;
+  struct hyos_main_base_lookup *lookup = opaque;
+  if (info->dlpi_name && info->dlpi_name[0]) return 0;
+  lookup->base = (uintptr_t)info->dlpi_addr;
+  return 1;
+}
+
 static void hyos_install_hooks(void) {
   if (!g_hyos_spawner_pid || !g_hyos_module_count) return;
-  uintptr_t base = 0;
-  struct dl_phdr_info *unused = NULL;
-  (void)unused;
 
-  /* Find the main executable's load bias. It is the ELF image containing
-   * the entry process, not libc/libselinux, so hooks are caller-scoped. */
-  struct main_base_lookup {
-    uintptr_t base;
-  } lookup = {0};
-  int find_main(struct dl_phdr_info *info, size_t size, void *opaque) {
-    (void)size;
-    struct main_base_lookup *out = opaque;
-    if (info->dlpi_name && info->dlpi_name[0]) return 0;
-    out->base = (uintptr_t)info->dlpi_addr;
-    return 1;
-  }
-  dl_iterate_phdr(find_main, &lookup);
-  base = lookup.base;
+  /* Hook only the hyos_spawner executable's PLT callers. */
+  struct hyos_main_base_lookup lookup = {0};
+  dl_iterate_phdr(hyos_find_main_base, &lookup);
+  uintptr_t base = lookup.base;
   if (!base) {
     LOGW("HyperOS could not locate hyos_spawner load bias");
     return;
