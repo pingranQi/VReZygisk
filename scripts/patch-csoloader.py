@@ -344,18 +344,16 @@ def patch_csoloader_linker_lifetime(linker_path: Path) -> None:
         header_path.write_text(header)
 
     source = linker_path.read_text()
-    source = replace_once(
-        source,
-        "#include <limits.h>",
-        "#include <limits.h>\n#include <pthread.h>",
-        "thread-safe linker registry",
-    )
-    registry_anchor = """static size_t system_page_size;
-
-#define MAX_ACTIVE_LINKERS 16
-static struct linker *g_active_linkers[MAX_ACTIVE_LINKERS];
-static int g_active_linker_count = 0;"""
-    registry_code = r"""static size_t system_page_size;
+    registry_marker = "/* VREZYGISK_THREAD_SAFE_LINKER_REGISTRY */"
+    if registry_marker not in source:
+        if "#include <pthread.h>" not in source:
+            source = replace_once(
+                source,
+                "#include <limits.h>",
+                "#include <limits.h>\n#include <pthread.h>",
+                "thread-safe linker registry",
+            )
+        registry_code = r"""static size_t system_page_size;
 
 #define MAX_ACTIVE_LINKERS 256
 static struct linker *g_active_linkers[MAX_ACTIVE_LINKERS];
@@ -401,14 +399,16 @@ void linker_fork_parent(void) {
 void linker_fork_child(void) {
   if (g_active_linkers_mutex_initialized)
     (void)pthread_mutex_unlock(&g_active_linkers_mutex);
-}"""
-    registry_start = source.index("static size_t system_page_size;")
-    registry_end = source.index("static void _linker_register(", registry_start)
-    source = source[:registry_start] + registry_code + "\n\n" + source[registry_end:]
-    registry_functions_start = source.index("static void _linker_register(struct linker *linker) {")
-    registry_functions_end = source.index("#ifdef CSOLOADER_MAKE_LINKER_HOOKS",
-                                          registry_functions_start)
-    source = source[:registry_functions_start] + r"""static bool _linker_register(struct linker *linker) {
+}
+
+/* VREZYGISK_THREAD_SAFE_LINKER_REGISTRY */"""
+        registry_start = source.index("static size_t system_page_size;")
+        registry_end = source.index("static void _linker_register(", registry_start)
+        source = source[:registry_start] + registry_code + "\n\n" + source[registry_end:]
+        registry_functions_start = source.index("static void _linker_register(struct linker *linker) {")
+        registry_functions_end = source.index("#ifdef CSOLOADER_MAKE_LINKER_HOOKS",
+                                              registry_functions_start)
+        source = source[:registry_functions_start] + r"""static bool _linker_register(struct linker *linker) {
   if (!linker || !_linker_registry_lock()) return false;
   for (int i = 0; i < g_active_linker_count; i++) {
     if (g_active_linkers[i] == linker) {
