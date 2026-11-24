@@ -333,6 +333,14 @@ def patch_csoloader_linker_lifetime(linker_path: Path) -> None:
             "bool linker_abandon(struct linker *linker);",
             "report abandon refusal while handles remain open",
         )
+        header = header.replace(
+            "bool linker_abandon(struct linker *linker);",
+            "bool linker_abandon(struct linker *linker);\n"
+            "void linker_fork_prepare(void);\n"
+            "void linker_fork_parent(void);\n"
+            "void linker_fork_child(void);",
+            1,
+        )
         header_path.write_text(header)
 
     source = linker_path.read_text()
@@ -360,10 +368,14 @@ static bool g_active_linkers_mutex_initialized = false;
 static void _linker_registry_init_once(void) {
   pthread_mutexattr_t attr;
   int error = pthread_mutexattr_init(&attr);
-  if (error == 0) error = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  if (error != 0) {
+    g_active_linkers_mutex_error = error;
+    return;
+  }
+  error = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
   if (error == 0) error = pthread_mutex_init(&g_active_linkers_mutex, &attr);
+  (void)pthread_mutexattr_destroy(&attr);
   if (error == 0) g_active_linkers_mutex_initialized = true;
-  if (error == 0 || error != 0) (void)pthread_mutexattr_destroy(&attr);
   g_active_linkers_mutex_error = error;
 }
 
@@ -807,7 +819,14 @@ static bool _linker_image_matches_name(const struct csoloader_elf *img,
   linker->dependencies = dependencies;
   memset(&linker->tls_indices, 0, sizeof(linker->tls_indices));
 
-  _linker_register(linker);
+  linker->is_closing = false;
+  if (!_linker_register(linker)) {
+    free(linker->dependencies);
+    linker->dependencies = NULL;
+    linker->dep_capacity = 0;
+    linker->img = NULL;
+    return false;
+  }
   return true;
 }
 
@@ -976,8 +995,29 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
         makefile += "\n" + hooks_marker + "\n"
         makefile_path.write_text(makefile)
 
+    csoloader_header_path = linker_path.parent.parent / "include" / "csoloader.h"
+    csoloader_header = csoloader_header_path.read_text()
+    csoloader_fork_marker = "/* VREZYGISK_LINKER_FORK_COORDINATION */"
+    if csoloader_fork_marker not in csoloader_header:
+        csoloader_header += (
+            "\nvoid csoloader_fork_prepare(void);\n"
+            "void csoloader_fork_parent(void);\n"
+            "void csoloader_fork_child(void);\n"
+            + csoloader_fork_marker + "\n"
+        )
+        csoloader_header_path.write_text(csoloader_header)
+
     csoloader_path = linker_path.with_name("csoloader.c")
     csoloader = csoloader_path.read_text()
+    fork_wrapper_marker = "/* VREZYGISK_LINKER_FORK_COORDINATION */"
+    if fork_wrapper_marker not in csoloader:
+        csoloader += (
+            "\nvoid csoloader_fork_prepare(void) { linker_fork_prepare(); }\n"
+            "void csoloader_fork_parent(void) { linker_fork_parent(); }\n"
+            "void csoloader_fork_child(void) { linker_fork_child(); }\n"
+            + fork_wrapper_marker + "\n"
+        )
+        csoloader_path.write_text(csoloader)
     unload_marker = "/* VREZYGISK_REFCOUNTED_CSOLOADER_UNLOAD */"
     if unload_marker not in csoloader:
         csoloader = replace_once(
