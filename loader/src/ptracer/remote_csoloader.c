@@ -1080,7 +1080,8 @@ cleanup: {
 }
 
 /* INFO: Resolve a symbol address - either local or from DT_NEEDED libraries. */
-static bool resolve_symbol_addr(int fd, const struct elf_dyn_info *info,
+static bool resolve_symbol_addr(int pid, struct user_regs_struct *regs, int fd,
+                                const struct elf_dyn_info *info,
                                 struct maps_info *local_map, struct maps_info *remote_map,
                                 const char *const *needed_paths, const ElfW(Phdr) *phdr,
                                 int phnum, uintptr_t load_bias, size_t sym_idx,
@@ -1092,12 +1093,6 @@ static bool resolve_symbol_addr(int fd, const struct elf_dyn_info *info,
       sym_idx > (size_t)INT64_MAX / info->syment ||
       !read_loop_offset(fd, &sym, sizeof(sym), info->symtab_off + (off_t)(sym_idx * info->syment)))
     return false;
-
-  /* IFUNC symbols require executing their resolver; never treat st_value as final. */
-if (ELF_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
-    LOGE("Remote CSOLoader does not implement GNU IFUNC resolvers");
-    return false;
-  }
 
   /* TLS symbols require target-thread TLS setup, which this bootstrap
    * mapper deliberately does not provide. */
@@ -1122,7 +1117,13 @@ if (ELF_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
       LOGE("Defined symbol is outside a valid PT_LOAD range");
       return false;
     }
-    *out_addr = (uintptr_t)load_bias + (uintptr_t)sym.st_value;
+    uintptr_t symbol_address = (uintptr_t)load_bias + (uintptr_t)sym.st_value;
+    if (ELF_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
+      LOGD("Executing target-process IFUNC resolver at %p", (void *)symbol_address);
+      return run_remote_ifunc_resolver(pid, regs, remote_map,
+                                       symbol_address, out_addr);
+    }
+    *out_addr = symbol_address;
     return true;
   }
 
@@ -1207,7 +1208,8 @@ static bool read_remote_addr(int pid, uintptr_t addr, ElfW(Addr) *out) {
 }
 
 /* INFO: Process RELA-format relocations from a given offset/size. */
-static bool apply_rela_section(int pid, int fd, const struct elf_dyn_info *info,
+static bool apply_rela_section(int pid, struct user_regs_struct *regs, int fd,
+                               const struct elf_dyn_info *info,
                                struct maps_info *local_map, struct maps_info *remote_map,
                                const char *const *needed_paths, const ElfW(Phdr) *phdr, int phnum, uintptr_t load_bias,
                                off_t rela_off, size_t rela_sz) {
@@ -1237,9 +1239,17 @@ static bool apply_rela_section(int pid, int fd, const struct elf_dyn_info *info,
     #if defined(__aarch64__)
       if (type == R_AARCH64_RELATIVE) {
         value = (ElfW(Addr))load_bias + (ElfW(Addr))r.r_addend;
+      } else if (type == R_AARCH64_IRELATIVE) {
+        uintptr_t resolver = 0;
+        if (sym != 0 || (uintptr_t)r.r_addend > UINTPTR_MAX - load_bias)
+          return false;
+        resolver = load_bias + (uintptr_t)r.r_addend;
+        if (!run_remote_ifunc_resolver(pid, regs, remote_map, resolver,
+                                       (uintptr_t *)&value))
+          return false;
       } else if (type == R_AARCH64_GLOB_DAT || type == R_AARCH64_JUMP_SLOT || type == R_AARCH64_ABS64) {
         uintptr_t sym_addr = 0;
-        if (!resolve_symbol_addr(fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, sym, &sym_addr))
+        if (!resolve_symbol_addr(pid, regs, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, sym, &sym_addr))
           return false;
 
         value = sym_addr ? (ElfW(Addr))sym_addr + (ElfW(Addr))r.r_addend : 0;
@@ -1432,7 +1442,7 @@ static bool decode_sleb128(const uint8_t **cursor, const uint8_t *end,
   return true;
 }
 
-static bool apply_android_rela_section(int pid, int fd,
+static bool apply_android_rela_section(int pid, struct user_regs_struct *regs, int fd,
                                        const struct elf_dyn_info *info,
                                        struct maps_info *local_map,
                                        struct maps_info *remote_map,
@@ -1551,6 +1561,11 @@ static bool apply_android_rela_section(int pid, int fd,
       if (type == R_AARCH64_RELATIVE) {
         if (sym != 0) goto done;
         value = (ElfW(Addr))(load_bias + (uintptr_t)addend);
+      } else if (type == R_AARCH64_IRELATIVE) {
+        if (sym != 0) goto done;
+        uintptr_t resolver = load_bias + (uintptr_t)addend;
+        if (!run_remote_ifunc_resolver(pid, regs, remote_map, resolver,
+                                       (uintptr_t *)&value)) goto done;
       } else if (type == R_AARCH64_GLOB_DAT ||
                  type == R_AARCH64_JUMP_SLOT ||
                  type == R_AARCH64_ABS64) {
@@ -1581,7 +1596,8 @@ done:
 #endif
 }
 
-static bool apply_relocations(int pid, int fd, const struct elf_dyn_info *info,
+static bool apply_relocations(int pid, struct user_regs_struct *regs, int fd,
+                              const struct elf_dyn_info *info,
                               struct maps_info *local_map, struct maps_info *remote_map,
                               const char *const *needed_paths, const ElfW(Phdr) *phdr,
                               int phnum, uintptr_t load_bias) {
@@ -1590,7 +1606,7 @@ static bool apply_relocations(int pid, int fd, const struct elf_dyn_info *info,
     LOGE("Failed to apply DT_RELR relocations");
     return false;
   }
-  if (!apply_android_rela_section(pid, fd, info, local_map, remote_map,
+  if (!apply_android_rela_section(pid, regs, fd, info, local_map, remote_map,
                                   needed_paths, phdr, phnum, load_bias)) {
     LOGE("Failed to apply Android packed RELA relocations");
     return false;
@@ -1598,13 +1614,13 @@ static bool apply_relocations(int pid, int fd, const struct elf_dyn_info *info,
 
   /* INFO: Process RELA section */
   if (info->rela_sz && info->rela_off) {
-    if (!apply_rela_section(pid, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->rela_off, info->rela_sz))
+    if (!apply_rela_section(pid, regs, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->rela_off, info->rela_sz))
       return false;
   }
 
   /* INFO: Process REL section */
   if (info->rel_sz && info->rel_off) {
-    if (!apply_rel_section(pid, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->rel_off, info->rel_sz))
+    if (!apply_rel_section(pid, regs, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->rel_off, info->rel_sz))
       return false;
   }
 
@@ -2042,7 +2058,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   dinfo.needed_count = symbol_scope_count;
 
   /* INFO: Apply all relocations */
-  if (!apply_relocations(pid, fd, &dinfo, local_map, remote_map, needed_paths, phdr, eh.e_phnum, load_bias)) {
+  if (!apply_relocations(pid, regs, fd, &dinfo, local_map, remote_map, needed_paths, phdr, eh.e_phnum, load_bias)) {
     LOGE("Failed to apply relocations");
 
     free_symbol_scope(needed_paths, symbol_scope_count);
