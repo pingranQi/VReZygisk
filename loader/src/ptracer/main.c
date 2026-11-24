@@ -89,16 +89,42 @@ int main(int argc, char **argv) {
       }
     }
 
-    if (info.modules.modules_count != 0) {
-      printf("Modules: %zu\n", info.modules.modules_count);
+    struct zn_module_list zn_modules = {0};
+    bool zn_available = rezygiskd_read_zn_modules(&zn_modules);
 
-      for (size_t i = 0; i < info.modules.modules_count; i++) {
-        printf(" - %s\n", info.modules.modules[i]);
+    printf("Zygisk modules: %zu\n", info.modules.modules_count);
+    for (size_t i = 0; i < info.modules.modules_count; i++) {
+      bool hybrid = false;
+      for (size_t j = 0; zn_available && j < zn_modules.count; j++) {
+        if (strcmp(info.modules.modules[i], zn_modules.items[j].module_id) == 0) {
+          hybrid = true;
+          break;
+        }
       }
-    } else {
-      printf("Modules: N/A\n");
+      printf(" - %s%s\n", info.modules.modules[i], hybrid ? " [Hybrid]" : "");
     }
 
+    if (zn_available) {
+      printf("ZN targets: %zu\n", zn_modules.count);
+      for (size_t i = 0; i < zn_modules.count; i++) {
+        const struct zn_module_info *entry = &zn_modules.items[i];
+        bool hybrid = false;
+        for (size_t j = 0; j < info.modules.modules_count; j++) {
+          if (strcmp(info.modules.modules[j], entry->module_id) == 0) {
+            hybrid = true;
+            break;
+          }
+        }
+        printf(" - %s%s -> %s (%s, library=%s, companion=%s)\n",
+               entry->module_id, hybrid ? " [Hybrid]" : "", entry->target,
+               entry->target_type == ZN_TARGET_PATH ? "path" : "name",
+               entry->library, entry->companion ? "yes" : "no");
+      }
+    } else {
+      printf("ZN targets: unavailable (daemon not ready)\n");
+    }
+
+    rezygiskd_free_zn_modules(&zn_modules);
     free_rezygisk_info(&info);
 
     return 0;
