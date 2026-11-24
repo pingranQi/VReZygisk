@@ -834,8 +834,10 @@ static char **build_remote_symbol_scope(struct maps_info *remote_map,
     ElfW(Ehdr) eh;
     ElfW(Phdr) *phdr = NULL;
     struct elf_dyn_info dep_info;
-    if (!read_dependency_dynamic_info(paths[i], &fd, &eh, &phdr, &dep_info))
-      continue;
+    if (!read_dependency_dynamic_info(paths[i], &fd, &eh, &phdr, &dep_info)) {
+      LOGE("Unable to inspect transitive dependency metadata: %s", paths[i]);
+      goto fail;
+    }
 
     for (size_t n = 0; n < dep_info.needed_count; ++n) {
       size_t off = dep_info.needed_str_offsets[n];
@@ -843,7 +845,20 @@ static char **build_remote_symbol_scope(struct maps_info *remote_map,
       const char *soname = dep_info.strtab + off;
       if (!memchr(soname, '\0', dep_info.strsz - off)) continue;
       const char *dep_path = find_remote_module_path(remote_map, soname);
-      if (!dep_path) continue;
+      if (!dep_path) {
+        /* Android's libdl and private linker sonames can be linker aliases
+         * rather than independently mapped ELF objects. Other missing
+         * dependencies make the ordered lookup scope incomplete. */
+        if (strcmp(soname, "libdl.so") == 0 ||
+            strcmp(soname, "ld-android.so") == 0)
+          continue;
+        LOGE("Missing mapped transitive dependency %s required by %s",
+             soname, paths[i]);
+        elf_dyn_info_destroy(&dep_info);
+        free(phdr);
+        close(fd);
+        goto fail;
+      }
 
       bool duplicate = false;
       for (size_t j = 0; j < *out_count; ++j) {
