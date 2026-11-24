@@ -2,6 +2,7 @@
 #define VREZYGISK_ELF_VERSION_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /*
  * Resolve an explicitly versioned, defined ELF64 symbol in an already mapped
