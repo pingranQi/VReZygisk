@@ -6,9 +6,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 
 #include <linux/limits.h>
+#include <linux/memfd.h>
 #include <unistd.h>
 
 #include "constants.h"
@@ -282,6 +285,81 @@ static int spawn_companion(char *restrict argv[], char *restrict name, int lib_f
   }
 
   exit(0);
+}
+
+/*
+ * Copy a root-readable module image into an anonymous sealed file before
+ * passing it to an app-domain process. This avoids requiring the receiver to
+ * traverse /data/adb/modules and avoids exposing the original module path.
+ */
+static int create_zn_module_memfd(const char *path) {
+#ifdef SYS_memfd_create
+  int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (source < 0) {
+    LOGE("Failed opening ZN module image %s: %s", path, strerror(errno));
+    return -1;
+  }
+
+  struct stat st;
+  if (fstat(source, &st) != 0 || !S_ISREG(st.st_mode) ||
+      st.st_size <= 0 || (uint64_t)st.st_size > (256ULL * 1024 * 1024)) {
+    LOGE("Rejecting invalid ZN module image size/type: %s", path);
+    close(source);
+    return -1;
+  }
+
+  int image = (int)syscall(SYS_memfd_create, "zn_module",
+                           MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  if (image < 0) {
+    LOGE("memfd_create for %s failed: %s", path, strerror(errno));
+    close(source);
+    return -1;
+  }
+
+  char buffer[16384];
+  bool ok = true;
+  for (;;) {
+    ssize_t n = read(source, buffer, sizeof(buffer));
+    if (n == 0) break;
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      ok = false;
+      break;
+    }
+
+    ssize_t offset = 0;
+    while (offset < n) {
+      ssize_t written = write(image, buffer + offset, (size_t)(n - offset));
+      if (written < 0 && errno == EINTR) continue;
+      if (written <= 0) {
+        ok = false;
+        break;
+      }
+      offset += written;
+    }
+    if (!ok) break;
+  }
+
+  close(source);
+  if (!ok || lseek(image, 0, SEEK_SET) < 0) {
+    LOGE("Failed copying ZN module image %s: %s", path, strerror(errno));
+    close(image);
+    return -1;
+  }
+
+  if (fcntl(image, F_ADD_SEALS,
+            F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
+    LOGE("Failed sealing ZN module image %s: %s", path, strerror(errno));
+    close(image);
+    return -1;
+  }
+  return image;
+#else
+  (void)path;
+  errno = ENOSYS;
+  LOGE("memfd_create is unavailable in this build");
+  return -1;
+#endif
 }
 
 static int spawn_zn_companion(char *restrict argv[], const char *module_id,
@@ -611,6 +689,30 @@ void zygiskd_start(char *restrict argv[]) {
           }
         }
 
+        break;
+      }
+      case GetZnModuleFd: {
+        size_t index = 0;
+        ssize_t ret = read_size_t(client_fd, &index);
+        ASSURE_SIZE_READ("GetZnModuleFd", "index", ret,
+                         sizeof(index), break);
+
+        if (index >= context.zn_modules.count) {
+          LOGW("Invalid ZN module index for image request: %zu", index);
+          break;
+        }
+
+        const struct zn_module_entry *entry = &context.zn_modules.items[index];
+        int image_fd = create_zn_module_memfd(entry->library);
+        if (image_fd < 0) break;
+
+        ret = write_fd(client_fd, image_fd);
+        close(image_fd);
+        if (ret != 1) {
+          LOGE("Failed sending ZN module image fd for %s", entry->module_id);
+        } else {
+          LOGD("Passed sealed ZN module image for %s", entry->module_id);
+        }
         break;
       }
       case RequestZnCompanionSocket: {
