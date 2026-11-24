@@ -643,8 +643,9 @@ static bool find_dynsym_value(int fd, const struct elf_dyn_info *info, const cha
 /* INFO: Resolve a symbol address - either local or from DT_NEEDED libraries. */
 static bool resolve_symbol_addr(int fd, const struct elf_dyn_info *info,
                                 struct maps_info *local_map, struct maps_info *remote_map,
-                                const char *const *needed_paths, uintptr_t load_bias,
-                                size_t sym_idx, uintptr_t *out_addr) {
+                                const char *const *needed_paths, const ElfW(Phdr) *phdr,
+                                int phnum, uintptr_t load_bias, size_t sym_idx,
+                                uintptr_t *out_addr) {
   ElfW(Sym) sym;
 
   if (!info || !out_addr || info->syment != sizeof(ElfW(Sym)) ||
@@ -659,10 +660,30 @@ if (ELF_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
     return false;
   }
 
-  /* INFO: Defined symbol - use load_bias + value */
-  if (sym.st_shndx != SHN_UNDEF) {
-    *out_addr = (uintptr_t)load_bias + (uintptr_t)sym.st_value;
+  /* TLS symbols require target-thread TLS setup, which this bootstrap
+   * mapper deliberately does not provide. */
+  if (ELF_ST_TYPE(sym.st_info) == STT_TLS) {
+    LOGE("TLS symbol relocation is unsupported by remote CSOLoader");
+    return false;
+  }
 
+  /* Absolute symbols are not relative to the image load bias. */
+  if (sym.st_shndx == SHN_ABS) {
+    *out_addr = (uintptr_t)sym.st_value;
+    return true;
+  }
+
+  /* Reject reserved section indices and validate the full symbol extent. */
+  if (sym.st_shndx != SHN_UNDEF) {
+    size_t symbol_size = sym.st_size ? (size_t)sym.st_size : 1;
+    if (sym.st_shndx >= SHN_LORESERVE ||
+        (uintptr_t)sym.st_value > UINTPTR_MAX - load_bias ||
+        !vaddr_range_in_load_segment(phdr, phnum, sym.st_value,
+                                     symbol_size, false)) {
+      LOGE("Defined symbol is outside a valid PT_LOAD range");
+      return false;
+    }
+    *out_addr = (uintptr_t)load_bias + (uintptr_t)sym.st_value;
     return true;
   }
 
@@ -756,7 +777,7 @@ static bool apply_rela_section(int pid, int fd, const struct elf_dyn_info *info,
         value = (ElfW(Addr))load_bias + (ElfW(Addr))r.r_addend;
       } else if (type == R_AARCH64_GLOB_DAT || type == R_AARCH64_JUMP_SLOT || type == R_AARCH64_ABS64) {
         uintptr_t sym_addr = 0;
-        if (!resolve_symbol_addr(fd, info, local_map, remote_map, needed_paths, load_bias, sym, &sym_addr))
+        if (!resolve_symbol_addr(fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, sym, &sym_addr))
           return false;
 
         value = sym_addr ? (ElfW(Addr))sym_addr + (ElfW(Addr))r.r_addend : 0;
@@ -770,7 +791,7 @@ static bool apply_rela_section(int pid, int fd, const struct elf_dyn_info *info,
         value = (ElfW(Addr))load_bias + (ElfW(Addr))r.r_addend;
       } else if (type == R_X86_64_GLOB_DAT || type == R_X86_64_JUMP_SLOT || type == R_X86_64_64) {
         uintptr_t sym_addr = 0;
-        if (!resolve_symbol_addr(fd, info, local_map, remote_map, needed_paths, load_bias, sym, &sym_addr))
+        if (!resolve_symbol_addr(fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, sym, &sym_addr))
           return false;
 
         value = sym_addr ? (ElfW(Addr))sym_addr + (ElfW(Addr))r.r_addend : 0;
@@ -824,7 +845,7 @@ static bool apply_rel_section(int pid, int fd, const struct elf_dyn_info *info,
         value = (ElfW(Addr))load_bias + addend;
       } else if (type == R_ARM_GLOB_DAT || type == R_ARM_JUMP_SLOT || type == R_ARM_ABS32) {
         uintptr_t sym_addr = 0;
-        if (!resolve_symbol_addr(fd, info, local_map, remote_map, needed_paths, load_bias, sym, &sym_addr))
+        if (!resolve_symbol_addr(fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, sym, &sym_addr))
           return false;
 
         if (sym_addr == 0) value = 0;
@@ -847,7 +868,7 @@ static bool apply_rel_section(int pid, int fd, const struct elf_dyn_info *info,
         value = (ElfW(Addr))load_bias + addend;
       } else if (type == R_386_GLOB_DAT || type == R_386_JMP_SLOT || type == R_386_32) {
         uintptr_t sym_addr = 0;
-        if (!resolve_symbol_addr(fd, info, local_map, remote_map, needed_paths, load_bias, sym, &sym_addr))
+        if (!resolve_symbol_addr(fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, sym, &sym_addr))
           return false;
 
         if (sym_addr == 0) value = 0;
