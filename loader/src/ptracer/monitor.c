@@ -999,6 +999,8 @@ static bool update_status(const char *message) {
     fprintf(json, ",\n");
     const struct environment_information *inventory = &environment_information64;
     fprintf(json, "  \"modules\": {\n");
+    fprintf(json, "    \"zn_inventory_available\": %s,\n",
+            inventory->zn_inventory_available ? "true" : "false");
     fprintf(json, "    \"zygisk\": [");
     for (uint32_t i = 0; i < inventory->modules_len; ++i) {
       if (i) fprintf(json, ", ");
@@ -1051,7 +1053,11 @@ static bool update_status(const char *message) {
       if (status64.supported) {
         fprintf(json, "    \"64\": {\n");
         fprintf(json, "      \"state\": %d,\n", status64.daemon_running);
-        if (status64.daemon_error_info) fprintf(json, "      \"reason\": \"%s\",\n", status64.daemon_error_info);
+        if (status64.daemon_error_info) {
+          fprintf(json, "      \"reason\": ");
+          write_json_string(json, status64.daemon_error_info);
+          fprintf(json, ",\n");
+        }
         fprintf(json, "      \"modules\": [");
 
         if (environment_information64.modules) for (uint32_t i = 0; i < environment_information64.modules_len; i++) {
@@ -1068,7 +1074,11 @@ static bool update_status(const char *message) {
       if (status32.supported) {
         fprintf(json, "    \"32\": {\n");
         fprintf(json, "      \"state\": %d,\n", status32.daemon_running);
-        if (status32.daemon_error_info) fprintf(json, "      \"reason\": \"%s\",\n", status32.daemon_error_info);
+        if (status32.daemon_error_info) {
+          fprintf(json, "      \"reason\": ");
+          write_json_string(json, status32.daemon_error_info);
+          fprintf(json, ",\n");
+        }
         fprintf(json, "      \"modules\": [");
 
         if (environment_information32.modules) for (uint32_t i = 0; i < environment_information32.modules_len; i++) {
