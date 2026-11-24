@@ -171,6 +171,12 @@ static void csoloader_unlock(void) {
   if (error != 0) LOGE("Failed to unlock CSOLoader state: %d", error);
 }
 
+static void csoloader_pin(void) {
+  if (!csoloader_lock()) return;
+  csoloader_pinned = true;
+  csoloader_unlock();
+}
+
 static bool csoloader_load_serialized(struct csoloader *lib, const char *path) {
   if (!csoloader_lock()) return false;
   bool loaded = csoloader_load(lib, path);
