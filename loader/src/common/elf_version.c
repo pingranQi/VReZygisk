@@ -473,8 +473,11 @@ uintptr_t elf_find_versioned_symbol_info(void *image_base,
 uintptr_t elf_find_versioned_symbol(void *image_base,
                                     const char *symbol_name,
                                     const char *version_name) {
-  return elf_find_versioned_symbol_info(image_base, symbol_name,
-                                        version_name, NULL);
+  unsigned type = STT_NOTYPE;
+  uintptr_t address = elf_find_versioned_symbol_info(
+      image_base, symbol_name, version_name, &type);
+  /* This legacy API returns a final address, not an IFUNC resolver. */
+  return type == STT_GNU_IFUNC ? 0 : address;
 }
 
 uintptr_t elf_find_symbol_info(void *image_base, const char *symbol_name,
