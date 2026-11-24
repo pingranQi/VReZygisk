@@ -59,7 +59,10 @@ struct dynamic_info {
   const Elf64_Verneed *verneed;
   size_t verneed_count;
   size_t soname_offset;
+  size_t strsz;
+  size_t syment;
   size_t symbol_count;
+  bool has_soname;
 };
 
 static bool range_ok(const struct image_view *v, uintptr_t p, size_t n) {
@@ -194,12 +197,23 @@ static bool parse_dynamic(const struct image_view *v,
   bool terminated = false;
 
   uintptr_t hash_addr = 0, gnu_hash_addr = 0;
+  bool have_strsz = false, have_syment = false;
   for (size_t i = 0; i < count; ++i) {
     if (dyn[i].d_tag == DT_NULL) { terminated = true; break; }
     uintptr_t p = dynamic_pointer(v, dyn[i].d_un.d_ptr);
     switch (dyn[i].d_tag) {
       case DT_SYMTAB: di->symtab = (const Elf64_Sym *)p; break;
       case DT_STRTAB: di->strtab = (const char *)p; break;
+      case DT_STRSZ:
+        if (dyn[i].d_un.d_val > SIZE_MAX) return false;
+        di->strsz = (size_t)dyn[i].d_un.d_val;
+        have_strsz = true;
+        break;
+      case DT_SYMENT:
+        if (dyn[i].d_un.d_val > SIZE_MAX) return false;
+        di->syment = (size_t)dyn[i].d_un.d_val;
+        have_syment = true;
+        break;
       case DT_HASH: hash_addr = p; break;
       case DT_GNU_HASH: gnu_hash_addr = p; break;
       case DT_VERSYM: di->versym = (const Elf64_Half *)p; break;
@@ -207,14 +221,25 @@ static bool parse_dynamic(const struct image_view *v,
       case DT_VERDEFNUM: di->verdef_count = (size_t)dyn[i].d_un.d_val; break;
       case DT_VERNEED: di->verneed = (const Elf64_Verneed *)p; break;
       case DT_VERNEEDNUM: di->verneed_count = (size_t)dyn[i].d_un.d_val; break;
-      case DT_SONAME: di->soname_offset = (size_t)dyn[i].d_un.d_val; break;
+      case DT_SONAME:
+        if (dyn[i].d_un.d_val > SIZE_MAX) return false;
+        di->soname_offset = (size_t)dyn[i].d_un.d_val;
+        di->has_soname = true;
+        break;
       default: break;
     }
   }
-  if (!terminated || !di->symtab || !di->strtab) return false;
+  if (!terminated || !di->symtab || !di->strtab ||
+      !have_strsz || !have_syment || di->syment != sizeof(Elf64_Sym) ||
+      di->strsz == 0) return false;
   if (hash_addr) {
     const uint32_t *h = (const uint32_t *)hash_addr;
     if (!range_ok(v, hash_addr, 2 * sizeof(uint32_t))) return false;
+    if (h[0] == 0 || h[0] > (1U << 20) || h[1] == 0 ||
+        h[1] > (1U << 24)) return false;
+    size_t hash_words = 2U + (size_t)h[0] + (size_t)h[1];
+    if (hash_words > SIZE_MAX / sizeof(uint32_t) ||
+        !range_ok(v, hash_addr, hash_words * sizeof(uint32_t))) return false;
     di->symbol_count = h[1];
   } else if (gnu_hash_addr) {
     di->symbol_count = gnu_hash_symbol_count(v, (const uint32_t *)gnu_hash_addr);
@@ -232,7 +257,10 @@ static bool parse_dynamic(const struct image_view *v,
       !range_ok(v, (uintptr_t)di->verdef, sizeof(Elf64_Verdef)))) return false;
   if (di->verneed_count && (!di->verneed ||
       !range_ok(v, (uintptr_t)di->verneed, sizeof(Elf64_Verneed)))) return false;
-  if (di->soname_offset >= v->end - (uintptr_t)di->strtab) return false;
+  if (di->has_soname &&
+      (di->soname_offset >= di->strsz ||
+       !memchr(di->strtab + di->soname_offset, '\0',
+               di->strsz - di->soname_offset))) return false;
   return true;
 }
 
@@ -255,7 +283,7 @@ static bool version_name_for_index(const struct image_view *v,
         !range_ok(v, aux_addr, sizeof(Elf64_Verdaux))) return false;
     const Elf64_Verdaux *aux = (const Elf64_Verdaux *)aux_addr;
     if ((vd->vd_ndx & VER_NDX_MASK) == wanted_index) {
-      size_t maxstr = v->end - (uintptr_t)di->strtab;
+      size_t maxstr = di->strsz;
       if (aux->vda_name >= maxstr) return false;
       const char *name = di->strtab + aux->vda_name;
       if (!memchr(name, '\0', maxstr - aux->vda_name)) return false;
@@ -303,7 +331,7 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
         type == STT_TLS || type == STT_GNU_IFUNC) continue;
 
     const char *name = di.strtab + sym->st_name;
-    size_t maxstr = view.end - (uintptr_t)di.strtab;
+    size_t maxstr = di.strsz;
     if (!memchr(name, '\0', maxstr - sym->st_name) ||
         strcmp(name, symbol_name) != 0) continue;
 
@@ -358,7 +386,7 @@ uintptr_t elf_resolve_versioned_symbol(void *provider_base,
       if (!range_ok(&requester_view, aux_addr, sizeof(Elf64_Vernaux))) return 0;
       const Elf64_Vernaux *aux = (const Elf64_Vernaux *)aux_addr;
       if ((aux->vna_other & VER_NDX_MASK) == wanted) {
-        size_t str_size = requester_view.end - (uintptr_t)request.strtab;
+        size_t str_size = request.strsz;
         if (aux->vna_name >= str_size || need->vn_file >= str_size) return 0;
         const char *required_version = request.strtab + aux->vna_name;
         const char *required_provider = request.strtab + need->vn_file;
@@ -376,8 +404,8 @@ uintptr_t elf_resolve_versioned_symbol(void *provider_base,
           return 0;
 
         /* If the provider advertises DT_SONAME, enforce the VERNEED owner. */
-        if (provider.soname_offset) {
-          size_t provider_str_size = provider_view.end - (uintptr_t)provider.strtab;
+        if (provider.has_soname) {
+          size_t provider_str_size = provider.strsz;
           if (provider.soname_offset >= provider_str_size) return 0;
           const char *soname = provider.strtab + provider.soname_offset;
           if (!memchr(soname, '\\0', provider_str_size - provider.soname_offset) ||
