@@ -132,6 +132,132 @@ def patch_csoloader_api(path: Path) -> None:
     )
     path.write_text(source)
 
+
+
+def patch_csoloader_lifecycle(linker_path: Path) -> None:
+    header_path = linker_path.with_name("linker.h")
+    header = header_path.read_text()
+    header_marker = "/* VREZYGISK_IMAGE_LIFECYCLE */"
+    if header_marker not in header:
+        header = replace_once(
+            header,
+            """struct loaded_dep {
+  /* INFO: DO NOT change this 2 members from order. Keep consistent with linker structure */
+  struct csoloader_elf *img;
+  struct tls_indices_data tls_indices;
+
+  bool is_manual_load;""",
+            """enum linker_image_state {
+  LINKER_IMAGE_UNINITIALIZED = 0,
+  LINKER_IMAGE_CONSTRUCTING,
+  LINKER_IMAGE_CONSTRUCTED,
+  LINKER_IMAGE_FINALIZING,
+  LINKER_IMAGE_FINALIZED
+};
+
+/* VREZYGISK_IMAGE_LIFECYCLE */
+struct loaded_dep {
+  /* INFO: DO NOT change this 2 members from order. Keep consistent with linker structure */
+  struct csoloader_elf *img;
+  struct tls_indices_data tls_indices;
+
+  enum linker_image_state lifecycle_state;
+  bool is_manual_load;""",
+            "dependency constructor/destructor state",
+        )
+        header = replace_once(
+            header,
+            """  size_t main_map_size;
+  bool is_linked;""",
+            """  size_t main_map_size;
+  bool is_linked;
+  enum linker_image_state main_lifecycle_state;""",
+            "main image constructor/destructor state",
+        )
+        header_path.write_text(header)
+
+    source = linker_path.read_text()
+    source_marker = "/* VREZYGISK_CONSTRUCTOR_STATE_MACHINE */"
+    if source_marker not in source:
+        source = replace_once(
+            source,
+            """static void _linker_call_constructors(struct csoloader_elf *img) {
+  if (img->init_func) {""",
+            """static void _linker_call_constructors(struct csoloader_elf *img,
+                                       enum linker_image_state *state) {
+  if (!img || !state || *state != LINKER_IMAGE_UNINITIALIZED) return;
+  *state = LINKER_IMAGE_CONSTRUCTING;
+
+  if (img->init_func) {""",
+            "constructor state entry",
+        )
+        source = replace_once(
+            source,
+            """  }
+}
+
+static void _linker_call_destructors(struct csoloader_elf *img) {
+  if (img->fini_array) {""",
+            """  }
+
+  *state = LINKER_IMAGE_CONSTRUCTED;
+}
+
+static void _linker_call_destructors(struct csoloader_elf *img,
+                                     enum linker_image_state *state) {
+  if (!img || !state || *state != LINKER_IMAGE_CONSTRUCTED) return;
+  *state = LINKER_IMAGE_FINALIZING;
+
+  if (img->fini_array) {""",
+            "constructor/destructor state transition",
+        )
+        source = replace_once(
+            source,
+            """    img->fini_func();
+  }
+}
+
+static const char *_path_basename""",
+            """    img->fini_func();
+  }
+
+  *state = LINKER_IMAGE_FINALIZED;
+}
+
+/* VREZYGISK_CONSTRUCTOR_STATE_MACHINE */
+static const char *_path_basename""",
+            "destructor finalization state",
+        )
+
+        source = source.replace(
+            "_linker_call_destructors(dep->img);",
+            "_linker_call_destructors(dep->img, &dep->lifecycle_state);",
+        )
+        source = source.replace(
+            "_linker_call_destructors(linker->img);",
+            "_linker_call_destructors(linker->img, &linker->main_lifecycle_state);",
+        )
+        source = source.replace(
+            "_linker_call_constructors(dep->img);",
+            "_linker_call_constructors(dep->img, &dep->lifecycle_state);",
+        )
+        source = source.replace(
+            "_linker_call_constructors(linker->img);",
+            "_linker_call_constructors(linker->img, &linker->main_lifecycle_state);",
+        )
+        source = replace_once(
+            source,
+            """  linker->is_linked = false;
+  linker->main_map_size = 0;
+  linker->dep_count = 0;""",
+            """  linker->is_linked = false;
+  linker->main_map_size = 0;
+  linker->main_lifecycle_state = LINKER_IMAGE_UNINITIALIZED;
+  linker->dep_count = 0;""",
+            "initialize main image lifecycle",
+        )
+        linker_path.write_text(source)
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(f"usage: {sys.argv[0]} <CSOLoader/src/linker.c>", file=sys.stderr)
@@ -142,6 +268,7 @@ def main() -> int:
     source = path.read_text()
     if MARKER in source:
         patch_csoloader_api(csoloader_path)
+        patch_csoloader_lifecycle(path)
         if REGISTRATION_MARKER not in source:
             source = replace_once(
                 source,
@@ -460,6 +587,7 @@ static size_t _linker_bump_tls_generation(void) {
 
     patch_csoloader_api(csoloader_path)
     path.write_text(source)
+    patch_csoloader_lifecycle(path)
     print(f"Applied VReZygisk linker/TLS hardening to {path}")
     return 0
 
