@@ -5,6 +5,7 @@ on:
     branches:
       - feature/csoloader-hardening
       - optimize/hiding-memory-concurrency
+      - znapi-hyperos-runtime
   pull_request:
   merge_group:
   workflow_dispatch:
