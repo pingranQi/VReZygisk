@@ -55,7 +55,7 @@ def main() -> int:
       return false;
     }
   }
-  ${REGISTRATION_MARKER}""",
+  /* VREZYGISK_TLS_REGISTRATION_FAILURE_GUARD */""",
                 "TLS registration failure propagation",
             )
             path.write_text(source)
@@ -338,7 +338,7 @@ static size_t _linker_bump_tls_generation(void) {
       return false;
     }
   }
-  ${REGISTRATION_MARKER}""",
+  /* VREZYGISK_TLS_REGISTRATION_FAILURE_GUARD */""",
         "TLS registration failure propagation",
     )
 
