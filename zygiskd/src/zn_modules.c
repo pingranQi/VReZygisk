@@ -111,7 +111,7 @@ static bool validate_library(const char *module_dir, const char *relative_or_abs
 static bool append_entry(struct zn_module_list *list,
                          const struct zn_module_entry *entry) {
   if (list->count >= ZN_MAX_ENTRIES) return false;
-  if (list->count == SIZE_MAX / sizeof(*list->items)) return false;
+  if (list->count >= SIZE_MAX / sizeof(*list->items)) return false;
   struct zn_module_entry *items =
       realloc(list->items, (list->count + 1) * sizeof(*list->items));
   if (!items) return false;
@@ -175,7 +175,7 @@ static void parse_manifest(const char *module_id, const char *module_dir,
       free(entry.target);
       continue;
     }
-    entry.companion = option != NULL;
+    entry.companion = (uint8_t)(option != NULL);
     entry.module_id = strdup(module_id);
 
     char library_expanded[PATH_MAX];
