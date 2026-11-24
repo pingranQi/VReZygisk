@@ -14,6 +14,7 @@ struct zn_module_entry {
   char *library;
   uint8_t target_type;
   uint8_t companion;
+  int companion_fd; /* daemon-owned stream to the ZN companion process */
 };
 
 struct zn_module_list {
