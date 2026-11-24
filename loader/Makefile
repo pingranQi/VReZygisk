@@ -29,13 +29,24 @@ COMMON_LDFLAGS = -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment       
 COMMON_SRCS = src/common/daemon.c src/common/elf_util.c   \
 			  src/common/misc.c src/common/socket_utils.c
 INJECTOR_SRCS = src/injector/alloc.c src/injector/cpp_strings.c src/injector/entry.c \
-				src/injector/hook.c src/injector/hiding.c src/injector/ptrace_clear.c src/injector/zn_api.c
+				src/injector/hook.c src/injector/hiding.c src/injector/ptrace_clear.c src/injector/zn_api.c \\
+				src/injector/zn_hook.c
 PTRACER_SRCS = src/ptracer/main.c src/ptracer/monitor.c src/ptracer/ptracer.c \
 			   src/ptracer/remote_csoloader.c src/ptracer/utils.c
 
 COMMON_OBJS = $(patsubst src/common/%.c,$(OBJ_DIR)/common/%.o,$(COMMON_SRCS))
 INJECTOR_OBJS = $(patsubst src/injector/%.c,$(OBJ_DIR)/injector/%.o,$(INJECTOR_SRCS))
 PTRACER_OBJS = $(patsubst src/ptracer/%.c,$(OBJ_DIR)/ptracer/%.o,$(PTRACER_SRCS))
+
+SHADOWHOOK_ROOT = src/external/shadowhook/shadowhook/src/main/cpp
+SHADOWHOOK_C_SRCS = $(wildcard $(SHADOWHOOK_ROOT)/*.c) \\
+				$(wildcard $(SHADOWHOOK_ROOT)/arch/arm64/*.c) \\
+				$(wildcard $(SHADOWHOOK_ROOT)/common/*.c) \\
+				$(wildcard $(SHADOWHOOK_ROOT)/third_party/*/*.c)
+SHADOWHOOK_ASM_SRCS = $(wildcard $(SHADOWHOOK_ROOT)/arch/arm64/*.S)
+SHADOWHOOK_OBJS = $(patsubst $(SHADOWHOOK_ROOT)/%,$(OBJ_DIR)/shadowhook/%,$(SHADOWHOOK_C_SRCS:.c=.o)) \\
+				  $(patsubst $(SHADOWHOOK_ROOT)/%,$(OBJ_DIR)/shadowhook/%,$(SHADOWHOOK_ASM_SRCS:.S=.o))
+SHADOWHOOK_LIB = $(BUILD_DIR)/obj/$(BUILD_TYPE)/shadowhook/$(ARCH)/libshadowhook.a
 
 PLTI_LIB = $(BUILD_DIR)/obj/$(BUILD_TYPE)/plti/$(ARCH)/libplti.a
 CSOLOADER_LIB = $(BUILD_DIR)/obj/$(BUILD_TYPE)/csoloader/$(ARCH)/libcsoloader.a
@@ -50,7 +61,11 @@ PLTI_DIR = src/external/plti
 CSOLOADER_DIR = src/external/csoloader
 
 COMMON_INCLUDES = -Isrc/include
-INJECTOR_INCLUDES = -Isrc/include -I$(PLTI_DIR)/src -I$(CSOLOADER_DIR)/include
+INJECTOR_INCLUDES = -Isrc/include -I$(PLTI_DIR)/src -I$(CSOLOADER_DIR)/include \\
+				-I$(SHADOWHOOK_ROOT) -I$(SHADOWHOOK_ROOT)/include \\
+				-I$(SHADOWHOOK_ROOT)/arch/arm64 -I$(SHADOWHOOK_ROOT)/common \\
+				-I$(SHADOWHOOK_ROOT)/third_party/xdl \\
+				-I$(SHADOWHOOK_ROOT)/third_party/bsd -I$(SHADOWHOOK_ROOT)/third_party/lss
 
 .PHONY: all arch clean
 
@@ -68,6 +83,7 @@ clean:
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/loader
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/plti
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/csoloader
+	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/shadowhook
 
 $(PLTI_LIB):
 	@mkdir -p $(dir $@)
@@ -96,16 +112,30 @@ $(OBJ_DIR)/ptracer/%.o: src/ptracer/%.c
 	$(CC_ARCH) $(NDK_CFLAGS) $(LOADER_CFLAGS) $(TYPE_CFLAGS) \
 		$(COMMON_INCLUDES) -fPIE -c $< -o $@
 
+$(OBJ_DIR)/shadowhook/%.o: $(SHADOWHOOK_ROOT)/%.c
+	@mkdir -p $(dir $@)
+	$(CC_ARCH) $(NDK_CFLAGS) $(TYPE_CFLAGS) -std=c11 -D_GNU_SOURCE \
+		-fPIC -fvisibility=hidden $(INJECTOR_INCLUDES) -Wno-unused-parameter \
+		-Wno-sign-compare -Wno-missing-field-initializers -c $< -o $@
+
+$(OBJ_DIR)/shadowhook/%.o: $(SHADOWHOOK_ROOT)/%.S
+	@mkdir -p $(dir $@)
+	$(CC_ARCH) $(NDK_CFLAGS) -fPIC $(INJECTOR_INCLUDES) -c $< -o $@
+
+$(SHADOWHOOK_LIB): $(SHADOWHOOK_OBJS)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
+
 $(LIBCOMMON): $(COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
-$(LIBZYGISK): $(INJECTOR_OBJS) $(LIBCOMMON) $(PLTI_LIB) $(CSOLOADER_LIB)
+$(LIBZYGISK): $(INJECTOR_OBJS) $(LIBCOMMON) $(PLTI_LIB) $(CSOLOADER_LIB) $(SHADOWHOOK_LIB)
 	@mkdir -p $(dir $@)
 	$(CC_ARCH) -fPIC -shared -Wl,-soname,libzygisk.so                            \
 		$(COMMON_LDFLAGS) $(TYPE_LDFLAGS) -Wl,--wrap=free -Wl,--wrap=realloc     \
-		-nostartfiles $(INJECTOR_OBJS) $(LIBCOMMON) $(PLTI_LIB) $(CSOLOADER_LIB) \
-		-llog -lm -o $@
+		-nostartfiles $(INJECTOR_OBJS) $(LIBCOMMON) $(PLTI_LIB) $(CSOLOADER_LIB) $(SHADOWHOOK_LIB) \
+		-llog -lm -ldl -o $@
 
 $(LIBPTRACE): $(PTRACER_OBJS) $(LIBCOMMON)
 	@mkdir -p $(dir $@)
