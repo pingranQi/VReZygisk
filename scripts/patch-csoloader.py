@@ -708,6 +708,38 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
     struct loaded_dep *current_dep = &linker->dependencies[linker->dep_count];""",
             "dynamic dependency graph growth",
         )
+        source = replace_once(
+            source,
+            """    char lib_full_path[PATH_MAX];
+    if (!_linker_find_library_path(lib_name, lib_full_path, sizeof(lib_full_path))) {
+      LOGW("Could not find required library: %s", lib_name);
+
+      /* INFO: Rather than failing, just skip missing libraries.
+                 This allows loading libraries with optional dependencies. */
+      carray_remove(loaded_libs, lib_name);
+      i--;
+
+      continue;
+    }
+
+    if (_linker_is_library_loaded(linker, lib_name)) {
+      LOGD("Library already loaded: %s", lib_full_path);
+
+      continue;
+    }""",
+            """    if (_linker_is_library_loaded(linker, lib_name)) {
+      LOGD("Dependency already present by DT_SONAME: %s", lib_name);
+      continue;
+    }
+
+    char lib_full_path[PATH_MAX];
+    if (!_linker_find_library_path(lib_name, lib_full_path, sizeof(lib_full_path))) {
+      LOGE("Required DT_NEEDED dependency cannot be located: %s", lib_name);
+      carray_destroy(loaded_libs);
+      return false;
+    }""",
+            "fail closed on missing DT_NEEDED and de-duplicate before path lookup",
+        )
         source = source.replace(
             "void linker_destroy(struct linker *linker) {",
             "bool linker_destroy(struct linker *linker) {",
