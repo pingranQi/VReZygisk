@@ -1046,16 +1046,29 @@ struct gnu_verdaux {
   uint32_t vda_next;
 };
 
+static uint32_t elf_sysv_hash(const char *name) {
+  uint32_t hash = 0;
+  while (*name) {
+    hash = (hash << 4) + (uint8_t)*name++;
+    uint32_t high = hash & 0xf0000000U;
+    if (high) hash ^= high >> 24;
+    hash &= ~high;
+  }
+  return hash;
+}
+
 static bool get_symbol_version_requirement(int fd,
                                            const struct elf_dyn_info *info,
                                            const ElfW(Phdr) *phdr, int phnum,
                                            size_t sym_idx,
                                            char *version, size_t version_size,
-                                           char *provider, size_t provider_size) {
-  if (!version || version_size == 0 || !provider || provider_size == 0)
-    return false;
+                                           char *provider, size_t provider_size,
+                                           bool *version_is_weak) {
+  if (!version || version_size == 0 || !provider || provider_size == 0 ||
+      !version_is_weak) return false;
   version[0] = '\0';
   provider[0] = '\0';
+  *version_is_weak = false;
   if (!info || !info->has_versym) return true;
 
   uint16_t versym = 0;
@@ -1092,11 +1105,13 @@ static bool get_symbol_version_requirement(int fd,
             !memchr(info->strtab + aux.vna_name, '\0',
                     info->strsz - aux.vna_name))
           return false;
-        if (strlen(info->strtab + aux.vna_name) >= version_size ||
+        if (aux.vna_hash != elf_sysv_hash(info->strtab + aux.vna_name) ||
+            strlen(info->strtab + aux.vna_name) >= version_size ||
             strlen(info->strtab + need.vn_file) >= provider_size)
           return false;
         strcpy(version, info->strtab + aux.vna_name);
         strcpy(provider, info->strtab + need.vn_file);
+        *version_is_weak = (aux.vna_flags & VER_FLG_WEAK) != 0;
         return true;
       }
       if (j + 1 < need.vn_cnt) {
@@ -1362,9 +1377,11 @@ static bool resolve_symbol_addr(int pid, struct user_regs_struct *regs, int fd,
 
   char required_version[256];
   char required_provider[256];
+  bool version_is_weak = false;
   if (!get_symbol_version_requirement(fd, info, phdr, phnum, sym_idx,
                                       required_version, sizeof(required_version),
-                                      required_provider, sizeof(required_provider))) {
+                                      required_provider, sizeof(required_provider),
+                                      &version_is_weak)) {
     LOGE("Malformed or unresolved GNU version requirement for %s", name);
     return false;
   }
@@ -1383,14 +1400,25 @@ static bool resolve_symbol_addr(int pid, struct user_regs_struct *regs, int fd,
     const char *mod_path = needed_paths ? needed_paths[i] : NULL;
     if (!mod_path) continue;
     if (required_provider[0]) {
-      const char *base = position_after(mod_path, '/');
-      if (!base) base = mod_path;
-      if (strcmp(base, required_provider) != 0) continue;
+      char actual_soname[PATH_MAX];
+      bool has_soname = false;
+      if (!read_remote_soname(mod_path, actual_soname,
+                              sizeof(actual_soname), &has_soname))
+        continue;
+      if (has_soname) {
+        if (strcmp(actual_soname, required_provider) != 0) continue;
+      } else {
+        const char *base = position_after(mod_path, '/');
+        if (!base) base = mod_path;
+        if (strcmp(base, required_provider) != 0) continue;
+      }
     }
 
     void *addr = required_version[0]
         ? find_func_addr_version(local_map, remote_map, mod_path, name, required_version)
         : find_func_addr(local_map, remote_map, mod_path, name);
+    if (!addr && required_version[0] && version_is_weak)
+      addr = find_func_addr(local_map, remote_map, mod_path, name);
     if (addr) {
       *out_addr = (uintptr_t)addr;
 
