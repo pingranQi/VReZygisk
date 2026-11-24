@@ -190,8 +190,12 @@ static int create_zn_companion_broker(const char *library) {
 static int api_connect_companion(void *opaque) {
   const struct zn_module_handle *handle = opaque;
   if (!handle) return -1;
-  if (handle->companion_broker_fd >= 0 && hyos_in_child())
-    return connect_zn_companion_via_broker(handle->companion_broker_fd);
+  if (hyos_in_child() && is_hyos_spawner()) {
+    if (handle->companion_broker_fd >= 0)
+      return connect_zn_companion_via_broker(handle->companion_broker_fd);
+    LOGW("HyperOS child has no inherited ZN companion broker");
+    return -1;
+  }
   return rezygiskd_connect_zn_companion(handle->manifest_index);
 }
 
@@ -681,6 +685,12 @@ static bool already_loaded(const char *module_id, const char *library) {
 }
 
 bool zn_modules_load_for_current_process(void) {
+  if (is_hyos_spawner() && !g_hyos_spawner_pid) {
+    g_hyos_spawner_pid = raw_getpid();
+    g_hyos_runtime_enabled = true;
+    LOGI("Detected HyperOS Rust Runtime spawner pid=%d", g_hyos_spawner_pid);
+  }
+
   char exe_path[PATH_MAX];
   ssize_t path_len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
   if (path_len <= 0 || (size_t)path_len >= sizeof(exe_path)) {
