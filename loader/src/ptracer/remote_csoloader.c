@@ -263,6 +263,8 @@ struct elf_dyn_info {
   size_t rela_sz;
   off_t jmprel_off;
   size_t jmprel_sz;
+  off_t relr_off;
+  size_t relr_sz;
   int pltrel_type;
 
   size_t syment;
@@ -344,9 +346,12 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   ElfW(Addr) rel_vaddr = 0;
   ElfW(Addr) rela_vaddr = 0;
   ElfW(Addr) jmprel_vaddr = 0;
+  ElfW(Addr) relr_vaddr = 0;
   size_t rel_sz = 0;
   size_t rela_sz = 0;
   size_t jmprel_sz = 0;
+  size_t relr_sz = 0;
+  size_t relrent = 0;
   size_t strsz = 0;
   size_t syment = 0;
 
@@ -389,11 +394,9 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       case DT_PLTRELSZ:  jmprel_sz = (size_t)dyn[i].d_un.d_val; break;
       /* Reject unsupported dynamic metadata by ABI tag value, independent
        * of whether the platform elf.h exposes the corresponding macro. */
-      case 35: /* DT_RELRSZ */
-      case 36: /* DT_RELR */
-      case 37: /* DT_RELRENT */
-        LOGE("DT_RELR relocations are not supported by remote CSOLoader");
-        goto cleanup;
+      case 35: /* DT_RELRSZ */ relr_sz = (size_t)dyn[i].d_un.d_val; break;
+      case 36: /* DT_RELR */ relr_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
+      case 37: /* DT_RELRENT */ relrent = (size_t)dyn[i].d_un.d_val; break;
       case 0x6000000f: /* DT_ANDROID_REL */
       case 0x60000010: /* DT_ANDROID_RELSZ */
       case 0x60000011: /* DT_ANDROID_RELA */
@@ -430,6 +433,9 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   if ((rel_vaddr == 0) != (rel_sz == 0) ||
       (rela_vaddr == 0) != (rela_sz == 0) ||
       (jmprel_vaddr == 0) != (jmprel_sz == 0) ||
+      (relr_vaddr == 0) != (relr_sz == 0) ||
+      (relr_sz && relrent != sizeof(ElfW(Addr))) ||
+      (!relr_sz && relrent != 0) ||
       (jmprel_sz && out->pltrel_type != DT_REL && out->pltrel_type != DT_RELA)) {
     LOGE("Inconsistent dynamic relocation metadata");
     goto cleanup;
@@ -474,10 +480,18 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   if (jmprel_vaddr && jmprel_sz) {
     if (!vaddr_to_offset(phdr, eh->e_phnum, jmprel_vaddr, jmprel_sz, &out->jmprel_off)) {
       LOGE("Failed vaddr_to_offset for DT_JMPREL");
-
       goto cleanup;
     }
     out->jmprel_sz = jmprel_sz;
+  }
+
+  if (relr_vaddr && relr_sz) {
+    if (relr_sz % sizeof(ElfW(Addr)) != 0 ||
+        !vaddr_to_offset(phdr, eh->e_phnum, relr_vaddr, relr_sz, &out->relr_off)) {
+      LOGE("Invalid or out-of-bounds DT_RELR table");
+      goto cleanup;
+    }
+    out->relr_sz = relr_sz;
   }
 
   /* INFO: Read string table into memory */
@@ -911,10 +925,68 @@ static bool apply_rel_section(int pid, int fd, const struct elf_dyn_info *info,
   return true;
 }
 
+/* Apply ELF RELR relative relocations using the ABI direct/bitmap encoding. */
+static bool apply_relr_section(int pid, int fd, const struct elf_dyn_info *info,
+                               const ElfW(Phdr) *phdr, int phnum,
+                               uintptr_t load_bias) {
+  if (!info || !info->relr_sz) return true;
+  if (info->relr_sz % sizeof(ElfW(Addr)) != 0) return false;
+
+  const size_t word_bits = sizeof(ElfW(Addr)) * 8;
+  uintptr_t where = 0;
+  size_t count = info->relr_sz / sizeof(ElfW(Addr));
+  for (size_t i = 0; i < count; ++i) {
+    ElfW(Addr) entry = 0;
+    if (i > (size_t)INT64_MAX / sizeof(entry) ||
+        !read_loop_offset(fd, &entry, sizeof(entry),
+                          info->relr_off + (off_t)(i * sizeof(entry))))
+      return false;
+
+    if ((entry & 1) == 0) {
+      if ((uintptr_t)entry > UINTPTR_MAX - load_bias) return false;
+      where = (uintptr_t)entry;
+      uintptr_t target = load_bias + where;
+      ElfW(Addr) addend = 0;
+      if (!vaddr_range_in_load_segment(phdr, phnum, (ElfW(Addr))where,
+                                       sizeof(addend), true) ||
+          !read_remote_addr(pid, target, &addend) ||
+          !write_remote_addr(pid, target, (ElfW(Addr))(load_bias + addend)))
+        return false;
+      if (where > UINTPTR_MAX - sizeof(ElfW(Addr))) return false;
+      where += sizeof(ElfW(Addr));
+      continue;
+    }
+
+    /* Bits 1..word_bits-1 describe relocations at successive word slots. */
+    ElfW(Addr) bitmap = entry >> 1;
+    for (size_t bit = 0; bit < word_bits - 1; ++bit) {
+      if (bitmap & ((ElfW(Addr))1 << bit)) {
+        if (where > UINTPTR_MAX - load_bias) return false;
+        uintptr_t target = load_bias + where;
+        ElfW(Addr) addend = 0;
+        if (!vaddr_range_in_load_segment(phdr, phnum, (ElfW(Addr))where,
+                                         sizeof(addend), true) ||
+            !read_remote_addr(pid, target, &addend) ||
+            !write_remote_addr(pid, target, (ElfW(Addr))(load_bias + addend)))
+          return false;
+      }
+      if (where > UINTPTR_MAX - sizeof(ElfW(Addr))) return false;
+      where += sizeof(ElfW(Addr));
+    }
+  }
+  return true;
+}
+
 static bool apply_relocations(int pid, int fd, const struct elf_dyn_info *info,
                               struct maps_info *local_map, struct maps_info *remote_map,
                               const char *const *needed_paths, const ElfW(Phdr) *phdr,
                               int phnum, uintptr_t load_bias) {
+  /* Relative relocations must be applied before symbol relocations. */
+  if (!apply_relr_section(pid, fd, info, phdr, phnum, load_bias)) {
+    LOGE("Failed to apply DT_RELR relocations");
+    return false;
+  }
+
   /* INFO: Process RELA section */
   if (info->rela_sz && info->rela_off) {
     if (!apply_rela_section(pid, fd, info, local_map, remote_map, needed_paths, phdr, phnum, load_bias, info->rela_off, info->rela_sz))
