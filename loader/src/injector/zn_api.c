@@ -396,8 +396,6 @@ bool zn_modules_load_for_current_process(void) {
       LOGE("Failed to retain ZN module identity for %s", entry->module_id);
       free(self->module_id);
       free(self->library);
-      free(self->module_id);
-      free(self->library);
       free(self);
       dlclose(handle);
       continue;
@@ -408,6 +406,8 @@ bool zn_modules_load_for_current_process(void) {
                 (g_zn_handle_count + 1) * sizeof(*g_zn_handles));
     if (!new_handles) {
       PLOGE("grow ZN module handle list");
+      free(self->module_id);
+      free(self->library);
       free(self);
       dlclose(handle);
       continue;
