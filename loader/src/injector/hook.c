@@ -160,6 +160,21 @@ static pthread_mutex_t g_csoloader_mutex;
 static pthread_once_t g_csoloader_mutex_once = PTHREAD_ONCE_INIT;
 static int g_csoloader_mutex_init_error;
 
+/* The zygote forks while process-global linker state is live. Serialize fork
+ * against every CSOLoader API call and leave the recursive mutex owned by the
+ * forking thread so it can be released independently in parent and child. */
+static void csoloader_atfork_prepare(void) {
+  (void)pthread_mutex_lock(&g_csoloader_mutex);
+}
+
+static void csoloader_atfork_parent(void) {
+  (void)pthread_mutex_unlock(&g_csoloader_mutex);
+}
+
+static void csoloader_atfork_child(void) {
+  (void)pthread_mutex_unlock(&g_csoloader_mutex);
+}
+
 static void csoloader_mutex_init_once(void) {
   pthread_mutexattr_t attr;
   int error = pthread_mutexattr_init(&attr);
@@ -171,6 +186,12 @@ static void csoloader_mutex_init_once(void) {
   error = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
   if (error == 0) error = pthread_mutex_init(&g_csoloader_mutex, &attr);
   pthread_mutexattr_destroy(&attr);
+  if (error == 0) {
+    error = pthread_atfork(csoloader_atfork_prepare,
+                           csoloader_atfork_parent,
+                           csoloader_atfork_child);
+    if (error != 0) (void)pthread_mutex_destroy(&g_csoloader_mutex);
+  }
   g_csoloader_mutex_init_error = error;
 }
 
