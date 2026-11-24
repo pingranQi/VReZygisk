@@ -69,6 +69,40 @@ static bool range_ok(const struct image_view *v, uintptr_t p, size_t n) {
   return p >= v->begin && p <= v->end && n <= v->end - p;
 }
 
+static bool load_range_ok(const struct image_view *v,
+                          const Elf64_Phdr *phdr, size_t phnum,
+                          uintptr_t p, size_t n) {
+  if (!v || !phdr || n == 0) return false;
+  for (size_t i = 0; i < phnum; ++i) {
+    if (phdr[i].p_type != PT_LOAD || phdr[i].p_memsz == 0) continue;
+    uintptr_t start;
+    if (add_overflow_uintptr(v->bias, (uintptr_t)phdr[i].p_vaddr, &start))
+      continue;
+    if (phdr[i].p_memsz > UINTPTR_MAX - start) continue;
+    uintptr_t end = start + (uintptr_t)phdr[i].p_memsz;
+    if (p >= start && p <= end && n <= end - p) return true;
+  }
+  return false;
+}
+
+static bool load_segment_remaining(const struct image_view *v,
+                                   const Elf64_Phdr *phdr, size_t phnum,
+                                   uintptr_t p, size_t *remaining) {
+  if (!v || !phdr || !remaining) return false;
+  for (size_t i = 0; i < phnum; ++i) {
+    if (phdr[i].p_type != PT_LOAD || phdr[i].p_memsz == 0) continue;
+    uintptr_t start;
+    if (add_overflow_uintptr(v->bias, (uintptr_t)phdr[i].p_vaddr, &start) ||
+        phdr[i].p_memsz > UINTPTR_MAX - start) continue;
+    uintptr_t end = start + (uintptr_t)phdr[i].p_memsz;
+    if (p >= start && p < end) {
+      *remaining = (size_t)(end - p);
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool add_overflow_uintptr(uintptr_t a, uintptr_t b, uintptr_t *out) {
   if (a > UINTPTR_MAX - b) return true;
   *out = a + b;
@@ -77,6 +111,7 @@ static bool add_overflow_uintptr(uintptr_t a, uintptr_t b, uintptr_t *out) {
 
 static uintptr_t dynamic_pointer(const struct image_view *v, Elf64_Addr value) {
   uintptr_t p = (uintptr_t)value;
+  if (p == 0) return 0;
   if (p >= v->begin && p < v->end) return p;
   if (add_overflow_uintptr(v->bias, p, &p)) return 0;
   return p;
@@ -123,7 +158,7 @@ static bool image_bounds(void *base, struct image_view *v,
     uintptr_t seg_end = (uintptr_t)phdr[i].p_vaddr + (uintptr_t)phdr[i].p_memsz;
     if (seg_end > hi) hi = seg_end;
   }
-  if (lo != 0 || hi <= lo || hi - lo > SIZE_MAX) return false;
+  if (lo != 0 || hi <= lo) return false;
 
   /* VReZygisk's offset-zero map lookup requires the conventional vaddr=0 image. */
   uintptr_t bias = b;
@@ -140,23 +175,27 @@ static bool image_bounds(void *base, struct image_view *v,
 }
 
 static size_t gnu_hash_symbol_count(const struct image_view *v,
+                                    const Elf64_Phdr *phdr, size_t phnum,
                                     const uint32_t *gh) {
-  if (!range_ok(v, (uintptr_t)gh, 4 * sizeof(uint32_t))) return 0;
+  if (!load_range_ok(v, phdr, phnum, (uintptr_t)gh,
+                     4 * sizeof(uint32_t))) return 0;
   uint32_t nbuckets = gh[0], symoffset = gh[1], bloom_size = gh[2];
   if (!nbuckets || !bloom_size || nbuckets > 1U << 20 ||
       bloom_size > 1U << 20 || symoffset > 1U << 24) return 0;
 
   uintptr_t p = (uintptr_t)(gh + 4);
   size_t bloom_bytes = (size_t)bloom_size * sizeof(Elf64_Xword);
-  if (!range_ok(v, p, bloom_bytes)) return 0;
+  if (!load_range_ok(v, phdr, phnum, p, bloom_bytes)) return 0;
   p += bloom_bytes;
   size_t bucket_bytes = (size_t)nbuckets * sizeof(uint32_t);
-  if (!range_ok(v, p, bucket_bytes)) return 0;
+  if (!load_range_ok(v, phdr, phnum, p, bucket_bytes)) return 0;
   const uint32_t *buckets = (const uint32_t *)p;
   p += bucket_bytes;
   if (p > v->end) return 0;
   const uint32_t *chains = (const uint32_t *)p;
-  size_t chain_capacity = (v->end - p) / sizeof(uint32_t);
+  size_t chain_remaining = 0;
+  if (!load_segment_remaining(v, phdr, phnum, p, &chain_remaining)) return 0;
+  size_t chain_capacity = chain_remaining / sizeof(uint32_t);
   size_t max_symbol = symoffset;
 
   for (uint32_t i = 0; i < nbuckets; ++i) {
@@ -189,7 +228,7 @@ static bool parse_dynamic(const struct image_view *v,
     }
   }
   if (!dyn_addr || dyn_size < sizeof(Elf64_Dyn) ||
-      !range_ok(v, dyn_addr, dyn_size)) return false;
+      !load_range_ok(v, phdr, eh->e_phnum, dyn_addr, dyn_size)) return false;
 
   const Elf64_Dyn *dyn = (const Elf64_Dyn *)dyn_addr;
   size_t count = dyn_size / sizeof(*dyn);
@@ -231,30 +270,39 @@ static bool parse_dynamic(const struct image_view *v,
       di->strsz == 0) return false;
   if (hash_addr) {
     const uint32_t *h = (const uint32_t *)hash_addr;
-    if (!range_ok(v, hash_addr, 2 * sizeof(uint32_t))) return false;
+    if (!load_range_ok(v, phdr, eh->e_phnum, hash_addr,
+                       2 * sizeof(uint32_t))) return false;
     if (h[0] == 0 || h[0] > (1U << 20) || h[1] == 0 ||
         h[1] > (1U << 24)) return false;
     size_t hash_words = 2U + (size_t)h[0] + (size_t)h[1];
     if (hash_words > SIZE_MAX / sizeof(uint32_t) ||
-        !range_ok(v, hash_addr, hash_words * sizeof(uint32_t))) return false;
+        !load_range_ok(v, phdr, eh->e_phnum, hash_addr,
+                       hash_words * sizeof(uint32_t))) return false;
     di->symbol_count = h[1];
   } else if (gnu_hash_addr) {
-    di->symbol_count = gnu_hash_symbol_count(v, (const uint32_t *)gnu_hash_addr);
+    di->symbol_count = gnu_hash_symbol_count(v, phdr, eh->e_phnum,
+                                              (const uint32_t *)gnu_hash_addr);
   }
   if (!di->symbol_count || di->symbol_count > (v->end - v->begin) / sizeof(Elf64_Sym))
     return false;
-  if (!range_ok(v, (uintptr_t)di->symtab,
-                di->symbol_count * sizeof(Elf64_Sym))) return false;
+  if (!load_range_ok(v, phdr, eh->e_phnum, (uintptr_t)di->symtab,
+                     di->symbol_count * sizeof(Elf64_Sym))) return false;
   if (di->versym &&
-      !range_ok(v, (uintptr_t)di->versym,
-                di->symbol_count * sizeof(Elf64_Half))) return false;
-  if (!range_ok(v, (uintptr_t)di->strtab, di->strsz)) return false;
+      !load_range_ok(v, phdr, eh->e_phnum, (uintptr_t)di->versym,
+                     di->symbol_count * sizeof(Elf64_Half))) return false;
+  if (!load_range_ok(v, phdr, eh->e_phnum, (uintptr_t)di->strtab,
+                     di->strsz)) return false;
   if (di->verdef_count > MAX_VERSION_ENTRIES ||
       di->verneed_count > MAX_VERSION_ENTRIES) return false;
+  if ((di->verdef_count != 0) != (di->verdef != NULL) ||
+      (di->verneed_count != 0) != (di->verneed != NULL) ||
+      ((di->verdef_count || di->verneed_count) && !di->versym)) return false;
   if (di->verdef_count && (!di->verdef ||
-      !range_ok(v, (uintptr_t)di->verdef, sizeof(Elf64_Verdef)))) return false;
+      !load_range_ok(v, phdr, eh->e_phnum, (uintptr_t)di->verdef,
+                     sizeof(Elf64_Verdef)))) return false;
   if (di->verneed_count && (!di->verneed ||
-      !range_ok(v, (uintptr_t)di->verneed, sizeof(Elf64_Verneed)))) return false;
+      !load_range_ok(v, phdr, eh->e_phnum, (uintptr_t)di->verneed,
+                     sizeof(Elf64_Verneed)))) return false;
   if (di->has_soname &&
       (di->soname_offset >= di->strsz ||
        !memchr(di->strtab + di->soname_offset, '\0',
@@ -278,7 +326,7 @@ static bool version_name_for_index(const struct image_view *v,
     if (!range_ok(v, cur, sizeof(Elf64_Verdef))) return false;
     const Elf64_Verdef *vd = (const Elf64_Verdef *)cur;
     if (vd->vd_version != VER_DEF_CURRENT || vd->vd_cnt == 0 ||
-        vd->vd_cnt > 64 || vd->vd_aux < sizeof(Elf64_Verdef) ||
+        vd->vd_cnt > MAX_VERSION_ENTRIES || vd->vd_aux < sizeof(Elf64_Verdef) ||
         (vd->vd_ndx & VER_NDX_MASK) <= VER_NDX_GLOBAL) return false;
 
     uintptr_t aux_addr;
@@ -433,7 +481,7 @@ static bool version_requirement_for_index(const struct image_view *view,
     if (!range_ok(view, need_addr, sizeof(Elf64_Verneed))) return false;
     const Elf64_Verneed *need = (const Elf64_Verneed *)need_addr;
     if (need->vn_version != VER_NEED_CURRENT || need->vn_cnt == 0 ||
-        need->vn_cnt > 64 || need->vn_aux < sizeof(Elf64_Verneed) ||
+        need->vn_cnt > MAX_VERSION_ENTRIES || need->vn_aux < sizeof(Elf64_Verneed) ||
         need->vn_file >= di->strsz ||
         !memchr(di->strtab + need->vn_file, '\0',
                 di->strsz - need->vn_file)) return false;
