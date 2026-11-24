@@ -105,13 +105,6 @@ static int api_plt_hook(void *base_addr, const char *symbol,
   return ok ? ZN_SUCCESS : ZN_FAILED;
 }
 
-static int api_unsupported_plt_hook(void *base, const char *symbol,
-                                    void *handler, void **original) {
-  (void)base; (void)symbol; (void)handler; (void)original;
-  LOGW("ZN pltHook backend is not initialized");
-  return ZN_FAILED;
-}
-
 static int api_unsupported_inline_hook(void *target, void *handler,
                                        void **original) {
   (void)target; (void)handler; (void)original;
