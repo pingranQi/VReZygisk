@@ -1,6 +1,7 @@
 #define LOG_TAG "zygisk-zn-api"
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <elf.h>
 #include <link.h>
 #include <limits.h>
@@ -28,6 +29,8 @@ struct ZnSymbolResolver {
 struct zn_module_handle {
   size_t manifest_index;
   void *dl_handle;
+  char *module_id;
+  char *library;
 };
 
 static struct zn_module_handle **g_zn_handles;
@@ -316,10 +319,11 @@ static bool target_matches(const struct zn_module_info *entry,
 }
 
 static bool already_loaded(const char *module_id, const char *library) {
-  (void)module_id;
-  (void)library;
-  /* dlopen() reference-counts the same memfd path; keep one callback per
-   * manifest row for now because each row has its own companion handle. */
+  for (size_t i = 0; i < g_zn_handle_count; ++i) {
+    const struct zn_module_handle *loaded = g_zn_handles[i];
+    if (strcmp(loaded->module_id, module_id) == 0 &&
+        strcmp(loaded->library, library) == 0) return true;
+  }
   return false;
 }
 
@@ -356,6 +360,7 @@ bool zn_modules_load_for_current_process(void) {
       continue;
     }
 
+    (void)fcntl(image_fd, F_SETFD, FD_CLOEXEC);
     char fd_path[64];
     snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", image_fd);
     void *handle = dlopen(fd_path, RTLD_NOW | RTLD_LOCAL);
@@ -384,6 +389,19 @@ bool zn_modules_load_for_current_process(void) {
     }
     self->manifest_index = i;
     self->dl_handle = handle;
+    self->module_id = strdup(entry->module_id);
+    self->library = strdup(entry->library);
+    if (!self->module_id || !self->library ||
+        g_zn_handle_count >= SIZE_MAX / sizeof(*g_zn_handles)) {
+      LOGE("Failed to retain ZN module identity for %s", entry->module_id);
+      free(self->module_id);
+      free(self->library);
+      free(self->module_id);
+      free(self->library);
+      free(self);
+      dlclose(handle);
+      continue;
+    }
 
     struct zn_module_handle **new_handles =
         realloc(g_zn_handles,
