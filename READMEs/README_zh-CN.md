@@ -1,85 +1,73 @@
 # ReZygisk
 
-[English](../README.md)
+[English](../README.md) | [简体中文](../README.md#简体中文)
 
-ReZygisk 是 Zygisk Next 的一个分支，是 Zygisk 的独立实现，为 KernelSU、APatch 和 Magisk 提供 Zygisk API 支持。
+ReZygisk 是从 Zygisk Next 分支出来的 Zygisk API 独立实现，为 **KernelSU、APatch 和 Magisk** 提供 Zygisk 兼容支持。
 
-代码库已经完全重写为 C 语言，这不仅带来了更干净、更易读的代码库，还让生成的二进制文件更轻量、更快速。同时还引入了自定义链接器，在正常情况下完全不使用系统链接器，从而让 ReZygisk 能够应对未来的检测，并规避所有基于链接器的检测。
+项目使用 C 语言实现，并引入自定义链接器以减少对系统链接器的依赖。ReZygisk 以轻量化和代码可审计性为设计目标。
 
-## 为什么？
+## 功能特性
 
-Zygisk Next 的最新版本不是开源的，其代码完全由其开发者保留。这不仅限制了我们为项目做出贡献的能力，也使得代码审计变得不可能，这是一个重大的安全隐患，因为 Zygisk Next 是一个以超级用户 (root) 权限运行的模块，可以访问整个系统。
+- 独立实现 Zygisk API。
+- 兼容 KernelSU、APatch 和 Magisk。
+- 仅支持 ARM64 架构（**arm64-v8a**）。
+- 支持自定义链接器。
+- Root 管理器的模块描述会显示运行状态和检测到的 Zygisk 模块名称。
+- 不包含 WebUI。
 
-Zygisk Next 的开发者是 Android 社区中著名且值得信赖的，然而，这并不意味着代码没有恶意或漏洞。我们 (PerformanC) 理解他们保持代码闭源的原因，但我们持相反的观点。
+## 兼容性
 
-## 优势
+| 项目 | 支持情况 |
+|---|---|
+| ABI | 仅 ARM64（arm64-v8a） |
+| KernelSU | 支持 |
+| APatch | 支持 |
+| Magisk | 支持，但必须关闭内置 Zygisk |
+| ARM 32 位 / x86 / x86_64 | 不支持 |
 
-- **自由开源 (永远)**
-
-## 依赖项
-
-| 工具              | 描述                               |
-|-------------------|------------------------------------|
-| `Android NDK`     | Android 原生开发工具包             |
-
-### C 依赖项
-
-| 依赖项        | 描述                                |
-|---------------|-------------------------------------|
-| `PLTI`       | Android 的简单 PLT Hook 库          |
-| `CSOLoader`   | 最先进（SOTA）的 Linux 自定义链接器 |
+构建系统和安装脚本会拒绝非 ARM64 目标。ptracer 仅使用 AArch64 寄存器布局，并且只支持向 64 位 Zygote 注入。
 
 ## 安装
 
-### 1. 选择正确的 zip 文件
+1. 从项目的 [GitHub Actions](https://github.com/pingranQi/VReZygisk/actions) 构建产物或正式发布页面下载最新的 **Release** ZIP。
+   - **Release**：日常使用推荐版本，启用二进制优化并减少日志输出。
+   - **Debug**：包含更详细的日志，仅建议用于问题排查。
+2. 打开 KernelSU、APatch 或 Magisk 的“模块”页面，选择 ZIP 文件并安装。
+3. 如果使用 Magisk，必须关闭 Magisk 内置的 **Zygisk**，避免发生冲突。
+4. 重启设备。
 
-选择正确的构建版本/zip 文件很重要，因为它将决定 ReZygisk 的隐藏性和稳定性。不过，这并不是一项艰巨的任务：
+## 验证安装
 
--   `release` 版本应该是大多数情况下的选择，它移除了应用层级的日志记录，并提供更优化的二进制文件。
--   `debug` 版本则相反，它包含大量日志记录且没有优化。因此，**你应仅在调试目的**以及**为创建 Issue 而获取日志时**使用它。
+重启后，在 Root 管理器的模块描述中检查 ReZygisk 的运行状态。描述会显示 monitor 和 64 位 Zygisk 状态，例如：
 
-至于分支，你应始终使用 `main` 分支，除非开发者另有说明，或者你想测试即将推出的功能并知晓其中涉及的风险。
+**[Monitor: ✅, ReZygisk 64-bit: ✅] Standalone implementation of Zygisk.**
 
-### 2. 刷入 zip 文件
+具体状态文本可能随运行状态变化。
 
-选择正确的版本后，你应该使用当前的 root 管理器（如 Magisk 或 KernelSU）刷入它。你可以进入 root 管理器的 `模块` 部分，然后选择你下载的 zip 文件来完成此操作。
+## 构建
 
-刷入后，检查安装日志以确保没有错误。如果一切正常，你可以重启设备。
+**所需工具链：** Android NDK。
 
-> [!WARNING]
-> Magisk 用户应禁用内置的 Zygisk，因为它会与 ReZygisk 冲突。这可以通过进入 Magisk 的 `设置` 部分并禁用 `Zygisk` 选项来完成。
+项目构建配置仅面向 **arm64-v8a**。如果尝试选择其他 ABI，构建系统会直接拒绝。
 
-### 3. 验证安装
+第三方 Native 依赖：
 
-重启后，你可以通过检查 root 管理器 `模块` 部分中的模块描述来验证 ReZygisk 是否正常工作。描述应指示必要的守护进程正在运行。ARM64 专用版本仅显示 64 位 Zygote 状态，例如：`[Monitor: ✅, ReZygisk 64-bit: ✅] Standalone implementation of Zygisk.`
+| 依赖项 | 用途 |
+|---|---|
+| PLTI | Android PLT Hook |
+| CSOLoader | Linux 自定义链接器 |
 
-## 翻译
+## 故障排查
 
-目前有两种不同的方式可以为 ReZygisk 贡献翻译：
+- **Magisk 提示 Zygisk 冲突：** 关闭 Magisk 内置 Zygisk，然后重启设备。
+- **模块描述未显示 monitor 正常运行：** 检查模块安装日志和 Android 日志中的启动错误。
+- **Zygisk 模块无法加载：** 确认目标模块支持 64 位进程，并检查 ReZygisk Debug 版本的日志。
+- **安装时提示 ABI 不受支持：** 当前构建仅支持 ARM64 设备。
 
-*   **README 的翻译**：你可以在 `READMEs` 文件夹中创建一个新文件，遵循命名约定 `README_<语言>.md`，其中 `<语言>` 是语言代码（例如，巴西葡萄牙语为 `README_pt-BR.md`），并向 `main` 分支提交一个包含你更改的 pull request。
-*   **ReZygisk WebUI 的翻译**：你应该首先贡献到我们的 [Crowdin](https://crowdin.com/project/rezygisk)。一旦获得批准，请从那里检索 `.json` 文件，并提交一个包含你更改的 pull request——将 `.json` 文件添加到 `webroot/lang` 文件夹，并将你的署名按字母顺序添加到 `TRANSLATOR.md` 文件中。
+## KernelSU Late Load
 
-## 支持
-
-对于任何与 ReZygisk 或其他 PerformanC 项目相关的问题，欢迎随时加入以下任一频道：
-
-*   Discord 频道: [PerformanC](https://discord.gg/uPveNfTuCJ)
-*   ReZygisk Telegram 频道: [@rezygisk](https://t.me/rezygisk)
-*   PerformanC Telegram 频道: [@performancorg](https://t.me/performancorg)
-*   PerformanC Signal 群组: [@performanc](https://signal.group/#CjQKID3SS8N5y4lXj3VjjGxVJnzNsTIuaYZjj3i8UhipAS0gEhAedxPjT5WjbOs6FUuXptcT)
-
-## 贡献
-
-向 ReZygisk 做贡献必须遵循 PerformanC 的 [贡献指南](https://github.com/PerformanC/contributing)。遵守其安全策略、行为准则和语法标准。
+KernelSU Late Load 通过 `late-load.sh` 启动 monitor，并请求 init 重新启动 Zygote，使 monitor 能够捕获新的 fork/exec 注入入口。
 
 ## 许可证
 
-ReZygisk 采用 [AGPL 3.0](../LICENSE) 授权。你可以在 [开源倡议组织 (Open Source Initiative)](https://opensource.org/licenses/AGPL-3.0) 上了解更多相关信息。
-
-
-## 本分支构建说明
-
-- 仅支持 ARM64（arm64-v8a）；构建系统、安装器和 ptracer 均拒绝其他 ABI。
-- 完全移除 WebUI；运行状态和检测到的 Zygisk 模块名称显示在 Root 管理器的模块描述中。
-- KernelSU Late Load 通过 `late-load.sh` 启动 monitor，并请求 init 重新启动 Zygote，使 monitor 能捕获新的 fork/exec 注入入口。
+ReZygisk 使用 [AGPL-3.0](../LICENSE) 许可证。许可证详情参见 [Open Source Initiative](https://opensource.org/license/agpl-v3/)。
