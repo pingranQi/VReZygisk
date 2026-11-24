@@ -9,6 +9,7 @@
 
 #include <fcntl.h>
 #include <link.h>
+#include <dlfcn.h>
 #include <signal.h>
 #include <unistd.h>
 #include <sys/mman.h>
