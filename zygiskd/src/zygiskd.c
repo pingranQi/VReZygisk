@@ -398,9 +398,11 @@ static int spawn_zn_companion(char *restrict argv[],
 
   if (pid == 0) {
     /* Only async-signal-safe operations are allowed between fork and execve:
-     * the daemon may already have broker threads running. */
+     * the daemon may already have broker threads running. dup2() also clears
+     * FD_CLOEXEC on the fixed child descriptor. */
     close(daemon_fd);
-    if (fcntl(companion_fd, F_SETFD, 0) == -1) _exit(127);
+    if (dup2(companion_fd, child_fd) == -1) _exit(127);
+    close(companion_fd);
     execve(ZYGISKD_PATH, child_argv, environ);
     _exit(127);
   }
