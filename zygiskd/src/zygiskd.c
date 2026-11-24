@@ -401,8 +401,10 @@ static int create_zn_module_memfd(const char *path) {
 #endif
 }
 
+static void terminate_zn_companion(pid_t pid);
+
 static int spawn_zn_companion(char *restrict argv[],
-                                struct zn_module_entry *module) {
+                              struct zn_module_entry *module) {
   int sockets[2];
   if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == -1) {
     LOGE("Failed creating ZN companion socket pair: %s", strerror(errno));
@@ -411,8 +413,15 @@ static int spawn_zn_companion(char *restrict argv[],
 
   int daemon_fd = sockets[0];
   int companion_fd = sockets[1];
-  int child_fd = 198;
-  while (child_fd == daemon_fd || child_fd == companion_fd) ++child_fd;
+  /* Allocate an unused high descriptor in the parent. The child only clears
+   * CLOEXEC on this already-reserved descriptor before execve(). */
+  int child_fd = fcntl(companion_fd, F_DUPFD_CLOEXEC, 198);
+  if (child_fd < 0) {
+    LOGE("Failed reserving ZN companion exec FD: %s", strerror(errno));
+    close(daemon_fd);
+    close(companion_fd);
+    return -1;
+  }
 
   const char *process = argv[0];
   const char *last = strrchr(process, '/');
@@ -427,24 +436,24 @@ static int spawn_zn_companion(char *restrict argv[],
   pid_t pid = fork();
   if (pid < 0) {
     LOGE("Failed forking ZN companion: %s", strerror(errno));
+    close(child_fd);
     close(daemon_fd);
     close(companion_fd);
     return -1;
   }
 
   if (pid == 0) {
-    /* Only async-signal-safe operations are allowed between fork and execve:
-     * the daemon may already have broker threads running. dup2() also clears
-     * FD_CLOEXEC on the fixed child descriptor. */
+    /* Do not call non-async-signal-safe library functions between fork/exec. */
     close(daemon_fd);
-    if (dup2(companion_fd, child_fd) == -1) _exit(127);
     close(companion_fd);
+    if (fcntl(child_fd, F_SETFD, 0) == -1) _exit(127);
     execve(ZYGISKD_PATH, child_argv, environ);
     _exit(127);
   }
 
+  close(child_fd);
   close(companion_fd);
-  int library_fd = open(module->library, O_RDONLY | O_CLOEXEC);
+  int library_fd = open(module->library, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (library_fd < 0) {
     LOGE("Failed opening ZN companion library %s: %s",
          module->library, strerror(errno));
@@ -459,17 +468,25 @@ static int spawn_zn_companion(char *restrict argv[],
          module->module_id);
     close(library_fd);
     close(daemon_fd);
-    while (waitpid(pid, NULL, 0) == -1 && errno == EINTR) {}
+    terminate_zn_companion(pid);
     return -1;
   }
   close(library_fd);
 
+  struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
+  (void)setsockopt(daemon_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout));
   uint8_t response = 0;
-  if (read_uint8_t(daemon_fd, &response) != sizeof(response) || response != 1) {
-    LOGE("ZN companion module initialization rejected for %s",
-         module->module_id);
+  ssize_t received = read_uint8_t(daemon_fd, &response);
+  timeout.tv_sec = 0;
+  timeout.tv_usec = 0;
+  (void)setsockopt(daemon_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout));
+  if (received != sizeof(response) || response != 1) {
+    LOGE("ZN companion module initialization rejected for %s (read=%zd)",
+         module->module_id, received);
     close(daemon_fd);
-    while (waitpid(pid, NULL, 0) == -1 && errno == EINTR) {}
+    terminate_zn_companion(pid);
     return -2;
   }
 
