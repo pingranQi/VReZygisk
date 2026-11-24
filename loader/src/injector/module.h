@@ -2,6 +2,7 @@
 #define MODULE_H
 
 #include <string.h>
+#include <pthread.h>
 
 #include <sys/types.h>
 
@@ -168,6 +169,69 @@ struct rezygisk_module {
   void (*zygisk_module_entry)(void *, void *);
 
   bool unload;
+
+  /* Host-side execution lease: unload waits until all module callbacks return. */
+  pthread_mutex_t call_mutex;
+  pthread_cond_t call_cond;
+  size_t active_calls;
+  bool call_closing;
+  bool call_sync_initialized;
+};
+
+static inline bool rz_module_sync_init(struct rezygisk_module *m) {
+  if (!m) return false;
+  int error = pthread_mutex_init(&m->call_mutex, NULL);
+  if (error != 0) return false;
+  error = pthread_cond_init(&m->call_cond, NULL);
+  if (error != 0) {
+    pthread_mutex_destroy(&m->call_mutex);
+    return false;
+  }
+  m->active_calls = 0;
+  m->call_closing = false;
+  m->call_sync_initialized = true;
+  return true;
+}
+
+static inline bool rz_module_call_enter(struct rezygisk_module *m) {
+  if (!m || !m->call_sync_initialized) return false;
+  if (pthread_mutex_lock(&m->call_mutex) != 0) return false;
+  bool allowed = !m->call_closing;
+  if (allowed) m->active_calls++;
+  pthread_mutex_unlock(&m->call_mutex);
+  return allowed;
+}
+
+static inline void rz_module_call_leave(struct rezygisk_module *m) {
+  if (!m || !m->call_sync_initialized) return;
+  pthread_mutex_lock(&m->call_mutex);
+  if (m->active_calls > 0) m->active_calls--;
+  if (m->call_closing && m->active_calls == 0)
+    pthread_cond_broadcast(&m->call_cond);
+  pthread_mutex_unlock(&m->call_mutex);
+}
+
+static inline bool rz_module_sync_close_and_wait(struct rezygisk_module *m) {
+  if (!m || !m->call_sync_initialized) return false;
+  if (pthread_mutex_lock(&m->call_mutex) != 0) return false;
+  m->call_closing = true;
+  while (m->active_calls != 0) {
+    int error = pthread_cond_wait(&m->call_cond, &m->call_mutex);
+    if (error != 0) {
+      pthread_mutex_unlock(&m->call_mutex);
+      return false;
+    }
+  }
+  pthread_mutex_unlock(&m->call_mutex);
+  return true;
+}
+
+static inline void rz_module_sync_destroy(struct rezygisk_module *m) {
+  if (!m || !m->call_sync_initialized) return;
+  (void)rz_module_sync_close_and_wait(m);
+  pthread_cond_destroy(&m->call_cond);
+  pthread_mutex_destroy(&m->call_mutex);
+  m->call_sync_initialized = false;
 };
 
 /*
@@ -183,7 +247,9 @@ struct rezygisk_module {
      - https://clang.llvm.org/extra/clang-tidy/checks/misc/definitions-in-headers.html
 */
 static inline void rz_module_call_on_load(struct rezygisk_module *m, void *env) {
+  if (!m->zygisk_module_entry || !rz_module_call_enter(m)) return;
   m->zygisk_module_entry((void *)&m->api, env);
+  rz_module_call_leave(m);
 }
 
 static inline void rz_module_call_pre_app_specialize(struct rezygisk_module *m, struct app_specialize_args_v5 *args) {
@@ -216,7 +282,7 @@ static inline void rz_module_call_pre_app_specialize(struct rezygisk_module *m, 
         .mount_storage_dirs = args->mount_storage_dirs
       };
 
-      m->abi.pre_app_specialize(m->abi.impl, &versioned_args);
+      if (rz_module_call_enter(m)) { m->abi.pre_app_specialize(m->abi.impl, &versioned_args); rz_module_call_leave(m); }
 
       break;
     }
@@ -230,7 +296,7 @@ static inline void rz_module_call_pre_app_specialize(struct rezygisk_module *m, 
       break;
     }
     case 5: {
-      m->abi.pre_app_specialize(m->abi.impl, args);
+      if (rz_module_call_enter(m)) { m->abi.pre_app_specialize(m->abi.impl, args); rz_module_call_leave(m); }
 
       break;
     }
@@ -267,7 +333,7 @@ static inline void rz_module_call_post_app_specialize(struct rezygisk_module *m,
         .mount_storage_dirs = args->mount_storage_dirs
       };
 
-      m->abi.post_app_specialize(m->abi.impl, &versioned_args);
+      if (rz_module_call_enter(m)) { m->abi.post_app_specialize(m->abi.impl, &versioned_args); rz_module_call_leave(m); }
 
       break;
     }
@@ -281,7 +347,7 @@ static inline void rz_module_call_post_app_specialize(struct rezygisk_module *m,
       break;
     }
     case 5: {
-      m->abi.post_app_specialize(m->abi.impl, args);
+      if (rz_module_call_enter(m)) { m->abi.post_app_specialize(m->abi.impl, args); rz_module_call_leave(m); }
 
       break;
     }
@@ -297,7 +363,7 @@ static inline void rz_module_call_pre_server_specialize(struct rezygisk_module *
     return;
   }
 
-  m->abi.pre_server_specialize(m->abi.impl, args);
+  if (rz_module_call_enter(m)) { m->abi.pre_server_specialize(m->abi.impl, args); rz_module_call_leave(m); }
 }
 
 static inline void rz_module_call_post_server_specialize(struct rezygisk_module *m, const struct server_specialize_args_v1 *args) {
@@ -309,7 +375,7 @@ static inline void rz_module_call_post_server_specialize(struct rezygisk_module 
     return;
   }
 
-  m->abi.post_server_specialize(m->abi.impl, args);
+  if (rz_module_call_enter(m)) { m->abi.post_server_specialize(m->abi.impl, args); rz_module_call_leave(m); }
 }
 
 #endif /* MODULE_H */
