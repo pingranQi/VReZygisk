@@ -126,7 +126,7 @@ static void parse_manifest(const char *module_id, const char *module_dir,
   if (snprintf(manifest, sizeof(manifest), "%s/%s", module_dir,
                ZN_MANIFEST_NAME) >= (int)sizeof(manifest)) return;
 
-  FILE *fp = fopen(manifest, "re");
+  FILE *fp = fopen(manifest, "r");
   if (!fp) return;
 
   char *line = NULL;
@@ -154,8 +154,10 @@ static void parse_manifest(const char *module_id, const char *module_dir,
       continue;
     }
 
+    if (option && option[0] == '#') option = NULL;
+
     struct zn_module_entry entry = {0};
-    if (!strncmp(target, "name=", 5) && target[5]) {
+    if (!strncmp(target, "name=", 5) && target[5] && !strchr(target + 5, '/')) {
       entry.target_type = ZN_TARGET_NAME;
       entry.target = strdup(target + 5);
     } else if (!strncmp(target, "path=", 5) && target[5] == '/') {
