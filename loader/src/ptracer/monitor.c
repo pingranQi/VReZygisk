@@ -483,13 +483,20 @@ static bool ensure_daemon_created(void) {
 }
 
 static bool refresh_zn_targets(struct zn_module_list *targets) {
-  rezygiskd_free_zn_modules(targets);
-  if (!ensure_daemon_created()) return false;
-  if (!rezygiskd_read_zn_modules(targets)) {
-    LOGD("ZN manifest inventory is not available yet");
-    return false;
+  if (!targets || !ensure_daemon_created()) return false;
+
+  /*
+   * The daemon sends SET_INFO before creating its listening socket. Retry
+   * briefly to avoid losing the initial inventory update to that startup race.
+   */
+  for (unsigned int attempt = 0; attempt < 8; ++attempt) {
+    rezygiskd_free_zn_modules(targets);
+    if (rezygiskd_read_zn_modules(targets)) return true;
+    usleep(100 * 1000);
   }
-  return true;
+
+  LOGD("ZN manifest inventory is not available yet");
+  return false;
 }
 
 static bool zn_target_matches(const struct zn_module_list *targets,
@@ -877,8 +884,16 @@ static void append_module_prop_list(char *buffer, size_t capacity,
   bool first = true;
   if (!zn_only && info->modules) {
     for (uint32_t i = 0; i < info->modules_len; ++i) {
-      n = snprintf(buffer + used, capacity - used, "%s%s",
-                   first ? "" : ", ", info->modules[i]);
+      bool hybrid = false;
+      for (size_t j = 0; j < info->zn_modules.count; ++j) {
+        if (strcmp(info->zn_modules.items[j].module_id, info->modules[i]) == 0) {
+          hybrid = true;
+          break;
+        }
+      }
+      n = snprintf(buffer + used, capacity - used, "%s%s%s",
+                   first ? "" : ", ", info->modules[i],
+                   hybrid ? " [Hybrid]" : "");
       if (n < 0 || (size_t)n >= capacity - used) return;
       used += (size_t)n;
       first = false;
