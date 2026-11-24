@@ -685,6 +685,147 @@ cleanup:
   return success;
 }
 
+static void free_symbol_scope(char **paths, size_t count) {
+  if (!paths) return;
+  for (size_t i = 0; i < count; ++i) free(paths[i]);
+  free(paths);
+}
+
+static bool read_dependency_dynamic_info(const char *path, int *out_fd,
+                                         ElfW(Ehdr) *out_eh,
+                                         ElfW(Phdr) **out_phdr,
+                                         struct elf_dyn_info *out_info) {
+  if (!path || !out_fd || !out_eh || !out_phdr || !out_info) return false;
+  *out_fd = -1;
+  *out_phdr = NULL;
+  memset(out_info, 0, sizeof(*out_info));
+
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  struct stat st;
+  ElfW(Ehdr) eh;
+  if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(eh) ||
+      !read_loop_offset(fd, &eh, sizeof(eh), 0) ||
+      memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
+      eh.e_ident[EI_CLASS] != ELFCLASS64 ||
+      eh.e_ident[EI_DATA] != ELFDATA2LSB ||
+      eh.e_machine != EM_AARCH64 || eh.e_type != ET_DYN ||
+      eh.e_phentsize != sizeof(ElfW(Phdr)) || eh.e_phnum == 0 ||
+      eh.e_phoff > (ElfW(Off))st.st_size ||
+      (size_t)eh.e_phnum > SIZE_MAX / sizeof(ElfW(Phdr)) ||
+      (size_t)eh.e_phnum * sizeof(ElfW(Phdr)) >
+          (size_t)((ElfW(Off))st.st_size - eh.e_phoff)) {
+    close(fd);
+    return false;
+  }
+
+  size_t phdr_size = (size_t)eh.e_phnum * sizeof(ElfW(Phdr));
+  ElfW(Phdr) *phdr = (ElfW(Phdr) *)calloc(1, phdr_size);
+  if (!phdr || !read_loop_offset(fd, phdr, phdr_size, (off_t)eh.e_phoff)) {
+    free(phdr);
+    close(fd);
+    return false;
+  }
+
+  for (int i = 0; i < eh.e_phnum; ++i) {
+    if (phdr[i].p_type != PT_LOAD) continue;
+    if (phdr[i].p_filesz > phdr[i].p_memsz ||
+        phdr[i].p_offset > (ElfW(Off))st.st_size ||
+        phdr[i].p_filesz > (ElfW(Xword))((ElfW(Off))st.st_size - phdr[i].p_offset) ||
+        phdr[i].p_vaddr > UINTPTR_MAX - phdr[i].p_memsz) {
+      free(phdr);
+      close(fd);
+      return false;
+    }
+  }
+
+  if (!elf_load_dyn_info(fd, &eh, phdr, out_info)) {
+    free(phdr);
+    close(fd);
+    return false;
+  }
+  *out_fd = fd;
+  *out_eh = eh;
+  *out_phdr = phdr;
+  return true;
+}
+
+/*
+ * Build the ordered breadth-first DT_NEEDED scope. Bionic's global lookup
+ * scope places all direct dependencies before their transitive dependencies.
+ * Path de-duplication also terminates dependency cycles.
+ */
+static char **build_remote_symbol_scope(struct maps_info *remote_map,
+                                        const char *const *direct_paths,
+                                        size_t direct_count,
+                                        size_t *out_count) {
+  if (!remote_map || !out_count || direct_count > 256) return NULL;
+  *out_count = 0;
+  size_t capacity = 256;
+  char **paths = (char **)calloc(capacity, sizeof(char *));
+  if (!paths) return NULL;
+
+  for (size_t i = 0; i < direct_count; ++i) {
+    if (!direct_paths || !direct_paths[i]) continue;
+    bool duplicate = false;
+    for (size_t j = 0; j < *out_count; ++j)
+      if (strcmp(paths[j], direct_paths[i]) == 0) { duplicate = true; break; }
+    if (duplicate) continue;
+    if (*out_count == capacity) goto fail;
+    paths[*out_count] = strdup(direct_paths[i]);
+    if (!paths[*out_count]) goto fail;
+    (*out_count)++;
+  }
+
+  for (size_t i = 0; i < *out_count; ++i) {
+    int fd = -1;
+    ElfW(Ehdr) eh;
+    ElfW(Phdr) *phdr = NULL;
+    struct elf_dyn_info dep_info;
+    if (!read_dependency_dynamic_info(paths[i], &fd, &eh, &phdr, &dep_info))
+      continue;
+
+    for (size_t n = 0; n < dep_info.needed_count; ++n) {
+      size_t off = dep_info.needed_str_offsets[n];
+      if (off >= dep_info.strsz) continue;
+      const char *soname = dep_info.strtab + off;
+      if (!memchr(soname, '\\0', dep_info.strsz - off)) continue;
+      const char *dep_path = find_remote_module_path(remote_map, soname);
+      if (!dep_path) continue;
+
+      bool duplicate = false;
+      for (size_t j = 0; j < *out_count; ++j) {
+        if (strcmp(paths[j], dep_path) == 0) { duplicate = true; break; }
+      }
+      if (duplicate) continue;
+      if (*out_count == capacity) {
+        elf_dyn_info_destroy(&dep_info);
+        free(phdr);
+        close(fd);
+        goto fail;
+      }
+      paths[*out_count] = strdup(dep_path);
+      if (!paths[*out_count]) {
+        elf_dyn_info_destroy(&dep_info);
+        free(phdr);
+        close(fd);
+        goto fail;
+      }
+      (*out_count)++;
+    }
+
+    elf_dyn_info_destroy(&dep_info);
+    free(phdr);
+    close(fd);
+  }
+  return paths;
+
+fail:
+  free_symbol_scope(paths, *out_count);
+  *out_count = 0;
+  return NULL;
+}
+
 /* INFO: Look up a symbol by name in the dynamic symbol table. */
 static bool find_dynsym_value(int fd, const struct elf_dyn_info *info, const char *sym_name, ElfW(Addr) *out_value) {
   if (!info || !sym_name || !out_value || info->syment != sizeof(ElfW(Sym))) return false;
@@ -1771,41 +1912,52 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
     return false;
   }
 
-  const char **needed_paths = NULL;
+  const char **direct_needed_paths = NULL;
   if (dinfo.needed_count) {
-    needed_paths = (const char **)calloc(dinfo.needed_count, sizeof(char *));
-    if (!needed_paths) {
-      LOGE("Failed to allocate memory for needed paths");
-
+    direct_needed_paths = (const char **)calloc(dinfo.needed_count, sizeof(char *));
+    if (!direct_needed_paths) {
+      LOGE("Failed to allocate memory for direct dependency paths");
       elf_dyn_info_destroy(&dinfo);
       REMOTE_CLEANUP_MAPPING();
       free(phdr);
       close(fd);
-
       return false;
     }
 
     for (size_t i = 0; i < dinfo.needed_count; i++) {
       size_t off = dinfo.needed_str_offsets[i];
-
       if (off >= dinfo.strsz) continue;
-
       const char *soname = &dinfo.strtab[off];
       size_t remaining = dinfo.strsz - off;
       if (!memchr(soname, '\0', remaining)) {
         LOGE("DT_NEEDED string is not terminated within DT_STRSZ");
         continue;
       }
-
-      needed_paths[i] = find_remote_module_path(remote_map, soname);
+      direct_needed_paths[i] = find_remote_module_path(remote_map, soname);
     }
   }
+
+  size_t symbol_scope_count = 0;
+  char **needed_paths = build_remote_symbol_scope(remote_map, direct_needed_paths,
+                                                   dinfo.needed_count,
+                                                   &symbol_scope_count);
+  free((void *)direct_needed_paths);
+  if (!needed_paths && dinfo.needed_count != 0) {
+    LOGE("Failed to construct ordered transitive dependency scope");
+    elf_dyn_info_destroy(&dinfo);
+    REMOTE_CLEANUP_MAPPING();
+    free(phdr);
+    close(fd);
+    return false;
+  }
+  /* The resolver consumes the expanded BFS scope from this point onward. */
+  dinfo.needed_count = symbol_scope_count;
 
   /* INFO: Apply all relocations */
   if (!apply_relocations(pid, fd, &dinfo, local_map, remote_map, needed_paths, phdr, eh.e_phnum, load_bias)) {
     LOGE("Failed to apply relocations");
 
-    free((void *)needed_paths);
+    free_symbol_scope(needed_paths, symbol_scope_count);
     elf_dyn_info_destroy(&dinfo);
     REMOTE_CLEANUP_MAPPING();
     free(phdr);
@@ -1828,7 +1980,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
       REMOTE_CLEANUP_MAPPING();
 
-      free((void *)needed_paths);
+      free_symbol_scope(needed_paths, symbol_scope_count);
       elf_dyn_info_destroy(&dinfo);
       free(phdr);
       close(fd);
@@ -1881,7 +2033,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
     return false;
   }
 
-  free((void *)needed_paths);
+  free_symbol_scope(needed_paths, symbol_scope_count);
   elf_dyn_info_destroy(&dinfo);
   free(phdr);
   close(fd);
