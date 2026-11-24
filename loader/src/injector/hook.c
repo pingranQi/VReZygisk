@@ -165,13 +165,16 @@ static int g_csoloader_mutex_init_error;
  * forking thread so it can be released independently in parent and child. */
 static void csoloader_atfork_prepare(void) {
   (void)pthread_mutex_lock(&g_csoloader_mutex);
+  csoloader_fork_prepare();
 }
 
 static void csoloader_atfork_parent(void) {
+  csoloader_fork_parent();
   (void)pthread_mutex_unlock(&g_csoloader_mutex);
 }
 
 static void csoloader_atfork_child(void) {
+  csoloader_fork_child();
   (void)pthread_mutex_unlock(&g_csoloader_mutex);
 }
 
