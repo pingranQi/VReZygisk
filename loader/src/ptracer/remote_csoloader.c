@@ -1428,14 +1428,26 @@ static bool resolve_symbol_addr(int pid, struct user_regs_struct *regs, int fd,
       }
     }
 
+    unsigned provider_symbol_type = STT_NOTYPE;
     void *addr = required_version[0]
-        ? find_func_addr_version(local_map, remote_map, mod_path, name, required_version)
-        : find_func_addr(local_map, remote_map, mod_path, name);
+        ? find_func_addr_version_info(local_map, remote_map, mod_path, name,
+                                      required_version, &provider_symbol_type)
+        : find_func_addr_info(local_map, remote_map, mod_path, name,
+                              &provider_symbol_type);
     if (!addr && required_version[0] && version_is_weak)
-      addr = find_func_addr(local_map, remote_map, mod_path, name);
+      addr = find_func_addr_info(local_map, remote_map, mod_path, name,
+                                 &provider_symbol_type);
+    if (addr && provider_symbol_type == STT_GNU_IFUNC) {
+      uintptr_t resolved_ifunc = 0;
+      if (!run_remote_ifunc_resolver(pid, regs, remote_map,
+                                     (uintptr_t)addr, &resolved_ifunc)) {
+        LOGE("Failed to execute target-process IFUNC resolver for %s", name);
+        return false;
+      }
+      addr = (void *)resolved_ifunc;
+    }
     if (addr) {
       *out_addr = (uintptr_t)addr;
-
       return true;
     }
   }
