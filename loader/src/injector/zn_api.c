@@ -134,6 +134,7 @@ static int api_unsupported_inline_unhook(void *target) {
 }
 
 static bool hyos_in_child(void);
+static bool is_hyos_spawner(void);
 
 static int connect_zn_companion_via_broker(int broker_fd) {
   if (broker_fd < 0) return -1;
