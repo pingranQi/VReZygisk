@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 
 MARKER = "/* VREZYGISK_TLS_GENERATION_GUARD */"
+REGISTRATION_MARKER = "/* VREZYGISK_TLS_REGISTRATION_FAILURE_GUARD */"
 
 
 def replace_once(source: str, old: str, new: str, label: str) -> str:
@@ -25,7 +26,42 @@ def main() -> int:
     path = Path(sys.argv[1])
     source = path.read_text()
     if MARKER in source:
-        print("CSOLoader TLS hardening already applied")
+        if REGISTRATION_MARKER not in source:
+            source = replace_once(
+                source,
+                """  LOGD("Registering TLS segments for main library and dependencies.");
+  _linker_register_tls_segment(linker->img);
+  for (int i = 0; i < linker->dep_count; i++) {
+    struct loaded_dep *dep = &linker->dependencies[i];
+    if (!dep->is_manual_load) continue;
+
+    LOGD("Registering TLS segment for dependency: %s", dep->img->elf);
+
+    _linker_register_tls_segment(dep->img);
+  }""",
+                """  LOGD("Registering TLS segments for main library and dependencies.");
+  if (!_linker_register_tls_segment(linker->img)) {
+    LOGE("Failed to register TLS segment for main image %s", linker->img->elf);
+    return false;
+  }
+  for (int i = 0; i < linker->dep_count; i++) {
+    struct loaded_dep *dep = &linker->dependencies[i];
+    if (!dep->is_manual_load) continue;
+
+    LOGD("Registering TLS segment for dependency: %s", dep->img->elf);
+
+    if (!_linker_register_tls_segment(dep->img)) {
+      LOGE("Failed to register TLS segment for dependency %s", dep->img->elf);
+      return false;
+    }
+  }
+  ${REGISTRATION_MARKER}""",
+                "TLS registration failure propagation",
+            )
+            path.write_text(source)
+            print(f"Applied CSOLoader TLS registration failure checks to {path}")
+        else:
+            print("CSOLoader TLS hardening already applied")
         return 0
 
     source = replace_once(
