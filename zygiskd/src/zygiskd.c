@@ -377,7 +377,8 @@ static int spawn_zn_companion(char *restrict argv[],
 
   int daemon_fd = sockets[0];
   int companion_fd = sockets[1];
-  const int child_fd = 198;
+  int child_fd = 198;
+  while (child_fd == daemon_fd || child_fd == companion_fd) ++child_fd;
 
   const char *process = argv[0];
   const char *last = strrchr(process, '/');
@@ -391,6 +392,7 @@ static int spawn_zn_companion(char *restrict argv[],
 
   posix_spawn_file_actions_t actions;
   int spawn_error = posix_spawn_file_actions_init(&actions);
+  bool actions_initialized = spawn_error == 0;
   if (spawn_error == 0)
     spawn_error = posix_spawn_file_actions_adddup2(&actions, companion_fd,
                                                    child_fd);
@@ -403,7 +405,7 @@ static int spawn_zn_companion(char *restrict argv[],
   if (spawn_error == 0)
     spawn_error = posix_spawn(&pid, ZYGISKD_PATH, &actions, NULL,
                               child_argv, environ);
-  posix_spawn_file_actions_destroy(&actions);
+  if (actions_initialized) posix_spawn_file_actions_destroy(&actions);
   close(companion_fd);
 
   if (spawn_error != 0) {
@@ -418,7 +420,7 @@ static int spawn_zn_companion(char *restrict argv[],
     LOGE("Failed opening ZN companion library %s: %s",
          module->library, strerror(errno));
     close(daemon_fd);
-    (void)waitpid(pid, NULL, WNOHANG);
+    while (waitpid(pid, NULL, 0) == -1 && errno == EINTR) {}
     return -1;
   }
 
@@ -428,7 +430,7 @@ static int spawn_zn_companion(char *restrict argv[],
          module->module_id);
     close(library_fd);
     close(daemon_fd);
-    (void)waitpid(pid, NULL, WNOHANG);
+    while (waitpid(pid, NULL, 0) == -1 && errno == EINTR) {}
     return -1;
   }
   close(library_fd);
@@ -438,7 +440,7 @@ static int spawn_zn_companion(char *restrict argv[],
     LOGE("ZN companion module initialization rejected for %s",
          module->module_id);
     close(daemon_fd);
-    (void)waitpid(pid, NULL, WNOHANG);
+    while (waitpid(pid, NULL, 0) == -1 && errno == EINTR) {}
     return -2;
   }
 
