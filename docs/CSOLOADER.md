@@ -47,6 +47,11 @@ Initialize the pinned revision:
 git submodule update --init --recursive loader/src/external/csoloader
 ```
 
+The loader Makefile applies the tracked TLS hardening patch before compiling
+the submodule. The patch is idempotent and is based on the pinned upstream
+revision; do not commit the modified submodule worktree as a new upstream
+revision.
+
 Inspect the current pin:
 
 ```sh
@@ -91,8 +96,11 @@ Before advancing the pinned revision, validate at least:
 - Android API-level and ABI matrix on real bionic runtimes.
 
 The pinned CSOLoader implements emulated TLS, RELR, Android packed relocation,
-IFUNC and IRELATIVE handling. Its emulated TLS is not a substitute for Bionic's
-native TLS ABI, so VReZygisk routes PT_TLS images to Bionic for now. GNU symbol
-versioning is likewise delegated to Bionic. A failed custom load is allowed to fall back to Bionic only when cleanup
+IFUNC and IRELATIVE handling. The build applies
+`scripts/patch-csoloader.py` to harden TLS key creation, per-thread registration,
+module-ID reuse generations, alignment and offset validation, and TLS
+registration failure propagation. Its emulated TLS is not a substitute for
+Bionic's native TLS ABI, so VReZygisk routes PT_TLS images to Bionic for now.
+GNU symbol versioning is likewise delegated to Bionic. A failed custom load is allowed to fall back to Bionic only when cleanup
 is complete and module code has not started; a successful custom load must
 always be released with `csoloader_unload()`, never `dlclose()`.
