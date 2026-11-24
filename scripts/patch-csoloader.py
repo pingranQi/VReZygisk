@@ -999,8 +999,8 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
 
   if (linker->is_linked) {
     _linker_call_destructors(linker->img, &linker->main_lifecycle_state);
-    unregister_eh_frame_for_library(linker->img);
-    unregister_custom_library_for_backtrace(linker->img);
+    for (int i = 0; i < linker->dep_count; ++i)
+      _linker_run_dependency_destructors(&linker->dependencies[i]);
   }
 
   if (!_linker_registry_lock()) return false;
@@ -1011,9 +1011,13 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
     return false;
   }
 
+  if (linker->is_linked) {
+    unregister_eh_frame_for_library(linker->img);
+    unregister_custom_library_for_backtrace(linker->img);
+  }
   void *main_base = linker->img->base;
   size_t main_map_size = linker->main_map_size;
-  _linker_release_dependencies(linker, true, linker->is_linked);
+  _linker_release_dependencies(linker, true, false);
   _linker_unregister(linker);
   _linker_unregister_tls_segment((struct loaded_dep *)linker);
   csoloader_elf_destroy(linker->img);
