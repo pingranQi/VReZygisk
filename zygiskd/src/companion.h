@@ -2,5 +2,6 @@
 #define COMPANION_H
 
 void companion_entry(int fd);
+void zn_companion_entry(int fd);
 
 #endif /* COMPANION_H */
