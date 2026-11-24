@@ -17,7 +17,7 @@ Keep these paths separate in the design and test plans. They have different addr
 
 ### P0 — correctness and memory-safety gates
 
-- The remote mapper explicitly rejects `PT_TLS`, `DT_RELR`, Android packed relocations, and `STT_GNU_IFUNC`. These are honest fail-closed checks and must remain until complete implementations and tests exist.
+- The remote mapper explicitly rejects `PT_TLS`, `DT_RELR`, Android packed relocations, GNU symbol-version tags and `STT_GNU_IFUNC`. These are honest fail-closed checks and must remain until complete implementations and tests exist.
 - The remote mapper supports a deliberately small relocation set. On AArch64 its RELA path handles RELATIVE, GLOB_DAT, JUMP_SLOT and ABS64; unsupported types fail. TLS, IRELATIVE and other architecture-specific cases are not handled there.
 - Segment bookkeeping uses a fixed 64-entry array. The parser must reject excess PT_LOAD entries before mapping; silent truncation would leave permissions incomplete.
 - All dynamic pointers and relocation targets must be proven to fall inside validated PT_LOAD/file-backed ranges before reads, writes or arithmetic. Keep file offsets distinct from target virtual addresses.
