@@ -148,6 +148,7 @@ static bool enable_unloader = false;
 /* Process-wide CSOLoader state must outlive every abandoned custom image. */
 static bool csoloader_initialized = false;
 static bool csoloader_pinned = false;
+static size_t csoloader_active_images = 0;
 
 /*
  * CSOLoader keeps process-global linker/TLS registries. Serialize its public
@@ -197,8 +198,19 @@ static void csoloader_pin(void) {
 
 static bool csoloader_load_serialized(struct csoloader *lib, const char *path) {
   if (!csoloader_lock()) return false;
+
+  /* A failed load can still have initialized process-global TLS/linker state.
+   * Mark the runtime initialized before entering CSOLoader so that partial
+   * failures are always eligible for cleanup. */
+  csoloader_initialized = true;
   bool loaded = csoloader_load(lib, path);
-  if (loaded) csoloader_initialized = true;
+  if (loaded) {
+    csoloader_active_images++;
+  } else if (csoloader_active_images == 0 && !csoloader_pinned) {
+    csoloader_deinit();
+    csoloader_initialized = false;
+  }
+
   csoloader_unlock();
   return loaded;
 }
@@ -206,6 +218,7 @@ static bool csoloader_load_serialized(struct csoloader *lib, const char *path) {
 static bool csoloader_unload_serialized(struct csoloader *lib) {
   if (!csoloader_lock()) return false;
   bool unloaded = csoloader_unload(lib);
+  if (unloaded && csoloader_active_images > 0) csoloader_active_images--;
   csoloader_unlock();
   return unloaded;
 }
@@ -213,6 +226,7 @@ static bool csoloader_unload_serialized(struct csoloader *lib) {
 static bool csoloader_abandon_serialized(struct csoloader *lib) {
   if (!csoloader_lock()) return false;
   bool abandoned = csoloader_abandon(lib);
+  if (abandoned) csoloader_pinned = true;
   csoloader_unlock();
   return abandoned;
 }
@@ -226,7 +240,7 @@ static void *csoloader_get_symbol_serialized(struct csoloader *lib, const char *
 
 static void csoloader_deinit_if_safe(void) {
   if (!csoloader_lock()) return;
-  if (csoloader_initialized && !csoloader_pinned) {
+  if (csoloader_initialized && csoloader_active_images == 0 && !csoloader_pinned) {
     csoloader_deinit();
     csoloader_initialized = false;
     LOGD("CSOLoader global state deinitialized");
