@@ -349,6 +349,25 @@ void rezygiskd_free_zn_modules(struct zn_module_list *modules) {
   modules->count = 0;
 }
 
+int rezygiskd_get_zn_module_fd(size_t index) {
+  int fd = rezygiskd_connect(1);
+  if (fd == -1) return -1;
+
+  if (write_uint8_t(fd, (uint8_t)GetZnModuleFd) != sizeof(uint8_t) ||
+      write_size_t(fd, index) != (ssize_t)sizeof(index)) {
+    LOGE("Failed to request ZN module image fd");
+    close(fd);
+    return -1;
+  }
+
+  int module_fd = read_fd(fd);
+  if (module_fd < 0) {
+    LOGE("Daemon did not return a ZN module image fd for index %zu", index);
+  }
+  close(fd);
+  return module_fd;
+}
+
 int rezygiskd_connect_zn_companion(size_t index) {
   int fd = rezygiskd_connect(1);
   if (fd == -1) return -1;
