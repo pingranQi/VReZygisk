@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "elf_version.h"
 
 #include <elf.h>
@@ -295,7 +294,7 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
 
     unsigned bind = ELF64_ST_BIND(sym->st_info);
     unsigned type = ELF64_ST_TYPE(sym->st_info);
-    unsigned visibility = ELF64_ST_VISIBILITY(sym->st_other);
+    unsigned visibility = sym->st_other & 0x3U;
     if ((bind != STB_GLOBAL && bind != STB_WEAK
 #ifdef STB_GNU_UNIQUE
          && bind != STB_GNU_UNIQUE
