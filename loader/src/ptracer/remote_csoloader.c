@@ -1190,6 +1190,14 @@ cleanup: {
       success = false;
     }
   }
+
+  /* remote_syscall also changes the target register set. Restore the original
+   * context after cleanup, not only before munmap. */
+  *regs = saved;
+  if (!set_regs(pid, regs)) {
+    LOGE("Failed to restore target registers after IFUNC scratch cleanup");
+    success = false;
+  }
   return success;
 #endif
 }
