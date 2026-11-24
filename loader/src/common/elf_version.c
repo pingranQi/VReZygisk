@@ -403,7 +403,8 @@ static bool symbol_runtime_address(const struct image_view *view,
         (sym->st_size && value_end > seg_end)) continue;
 
     unsigned type = ELF64_ST_TYPE(sym->st_info);
-    if (type == STT_FUNC && !(phdr[i].p_flags & PF_X)) return false;
+    if ((type == STT_FUNC || type == STT_GNU_IFUNC) &&
+        !(phdr[i].p_flags & PF_X)) return false;
     if (type == STT_OBJECT && !(phdr[i].p_flags & PF_R)) return false;
 
     uintptr_t runtime;
@@ -415,9 +416,11 @@ static bool symbol_runtime_address(const struct image_view *view,
   return false;
 }
 
-uintptr_t elf_find_versioned_symbol(void *image_base,
-                                    const char *symbol_name,
-                                    const char *version_name) {
+uintptr_t elf_find_versioned_symbol_info(void *image_base,
+                                         const char *symbol_name,
+                                         const char *version_name,
+                                         unsigned *out_type) {
+  if (out_type) *out_type = STT_NOTYPE;
   if (!image_base || !symbol_name || !*symbol_name ||
       !version_name || !*version_name) return 0;
 
@@ -445,7 +448,7 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
          && bind != STB_GNU_UNIQUE
 #endif
         ) || (visibility != STV_DEFAULT && visibility != STV_PROTECTED) ||
-        type == STT_TLS || type == STT_GNU_IFUNC) continue;
+        type == STT_TLS) continue;
 
     const char *name = di.strtab + sym->st_name;
     if (!memchr(name, '\0', di.strsz - sym->st_name) ||
@@ -461,9 +464,71 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
 
     if (!symbol_runtime_address(&view, phdr, eh->e_phnum, sym, &result))
       return 0;
+    if (out_type) *out_type = type;
     return result;
   }
   return 0;
+}
+
+uintptr_t elf_find_versioned_symbol(void *image_base,
+                                    const char *symbol_name,
+                                    const char *version_name) {
+  return elf_find_versioned_symbol_info(image_base, symbol_name,
+                                        version_name, NULL);
+}
+
+uintptr_t elf_find_symbol_info(void *image_base, const char *symbol_name,
+                               unsigned *out_type) {
+  if (out_type) *out_type = STT_NOTYPE;
+  if (!image_base || !symbol_name || !*symbol_name) return 0;
+
+  struct image_view view = {0};
+  const Elf64_Ehdr *eh = NULL;
+  const Elf64_Phdr *phdr = NULL;
+  if (!image_bounds(image_base, &view, &eh, &phdr)) return 0;
+  struct dynamic_info di = {0};
+  if (!parse_dynamic(&view, eh, phdr, &di)) return 0;
+
+  uintptr_t best_address = 0;
+  unsigned best_type = STT_NOTYPE;
+  unsigned best_rank = 0;
+  for (size_t i = 0; i < di.symbol_count; ++i) {
+    const Elf64_Sym *sym = &di.symtab[i];
+    if (sym->st_name == 0 || sym->st_shndx == SHN_UNDEF ||
+        sym->st_name >= di.strsz) continue;
+    unsigned bind = ELF64_ST_BIND(sym->st_info);
+    unsigned type = ELF64_ST_TYPE(sym->st_info);
+    unsigned visibility = sym->st_other & 0x3U;
+    if ((bind != STB_GLOBAL && bind != STB_WEAK
+#ifdef STB_GNU_UNIQUE
+         && bind != STB_GNU_UNIQUE
+#endif
+        ) || (visibility != STV_DEFAULT && visibility != STV_PROTECTED) ||
+        type == STT_TLS) continue;
+    if (di.versym) {
+      uint16_t version = di.versym[i];
+      uint16_t index = version & VER_NDX_MASK;
+      if (index == VER_NDX_LOCAL ||
+          (index > VER_NDX_GLOBAL && (version & 0x8000U))) continue;
+    }
+    const char *name = di.strtab + sym->st_name;
+    if (!memchr(name, '\0', di.strsz - sym->st_name) ||
+        strcmp(name, symbol_name) != 0) continue;
+    unsigned rank = bind == STB_WEAK ? 1U : 2U;
+#ifdef STB_GNU_UNIQUE
+    if (bind == STB_GNU_UNIQUE) rank = 3U;
+#endif
+    if (rank < best_rank) continue;
+    uintptr_t address = 0;
+    if (!symbol_runtime_address(&view, phdr, eh->e_phnum, sym, &address))
+      continue;
+    best_address = address;
+    best_type = type;
+    best_rank = rank;
+    if (rank == 3U) break;
+  }
+  if (best_address && out_type) *out_type = best_type;
+  return best_address;
 }
 
 
