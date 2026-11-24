@@ -293,7 +293,7 @@ void zn_companion_entry(int fd) {
 
     struct zn_companion_thread_args *args = malloc(sizeof(*args));
     if (!args) {
-      PLOGE("allocate ZN companion thread args");
+      LOGE("allocate ZN companion thread args: %s", strerror(errno));
       close(client_fd);
       continue;
     }
