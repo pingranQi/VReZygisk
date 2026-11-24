@@ -349,6 +349,25 @@ void rezygiskd_free_zn_modules(struct zn_module_list *modules) {
   modules->count = 0;
 }
 
+bool rezygiskd_register_zn_companion_broker(const char *library,
+                                               int broker_fd) {
+  if (!library || !*library || broker_fd < 0) return false;
+  int fd = rezygiskd_connect(1);
+  if (fd == -1) return false;
+
+  bool ok =
+      write_uint8_t(fd, (uint8_t)RegisterZnCompanionBroker) ==
+          sizeof(uint8_t) &&
+      write_string(fd, library) >= 0 &&
+      write_fd(fd, broker_fd) == 1;
+
+  uint8_t response = 0;
+  if (ok)
+    ok = read_uint8_t(fd, &response) == sizeof(response) && response == 1;
+  close(fd);
+  return ok;
+}
+
 int rezygiskd_get_zn_module_fd(size_t index) {
   int fd = rezygiskd_connect(1);
   if (fd == -1) return -1;
