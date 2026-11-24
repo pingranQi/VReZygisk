@@ -267,6 +267,11 @@ struct elf_dyn_info {
   size_t relr_sz;
   off_t android_rela_off;
   size_t android_rela_sz;
+  off_t versym_off;
+  ElfW(Addr) verneed_vaddr;
+  size_t verneed_num;
+  ElfW(Addr) verdef_vaddr;
+  size_t verdef_num;
   int pltrel_type;
 
   size_t syment;
@@ -356,6 +361,11 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   size_t relrent = 0;
   ElfW(Addr) android_rela_vaddr = 0;
   size_t android_rela_sz = 0;
+  ElfW(Addr) versym_vaddr = 0;
+  ElfW(Addr) verneed_vaddr = 0;
+  size_t verneed_num = 0;
+  ElfW(Addr) verdef_vaddr = 0;
+  size_t verdef_num = 0;
   size_t strsz = 0;
   size_t syment = 0;
 
@@ -418,12 +428,20 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
         LOGE("Android RELR relocations are not supported by remote CSOLoader");
         goto cleanup;
       case 0x6ffffff0: /* DT_VERSYM */
+        versym_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr;
+        break;
       case 0x6ffffffc: /* DT_VERDEF */
+        verdef_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr;
+        break;
       case 0x6ffffffd: /* DT_VERDEFNUM */
+        verdef_num = (size_t)dyn[i].d_un.d_val;
+        break;
       case 0x6ffffffe: /* DT_VERNEED */
+        verneed_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr;
+        break;
       case 0x6fffffff: /* DT_VERNEEDNUM */
-        LOGE("GNU symbol versioning is not supported by remote CSOLoader");
-        goto cleanup;
+        verneed_num = (size_t)dyn[i].d_un.d_val;
+        break;
       case DT_PLTREL:    out->pltrel_type = (int)dyn[i].d_un.d_val; break;
       case DT_GNU_HASH:  gnu_hash_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
       case DT_HASH:      sysv_hash_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr; break;
@@ -443,6 +461,9 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       (jmprel_vaddr == 0) != (jmprel_sz == 0) ||
       (relr_vaddr == 0) != (relr_sz == 0) ||
       (android_rela_vaddr == 0) != (android_rela_sz == 0) ||
+      ((verneed_vaddr == 0) != (verneed_num == 0)) ||
+      ((verdef_vaddr == 0) != (verdef_num == 0)) ||
+      (verneed_num > 4096) || (verdef_num > 4096) ||
       (relr_sz && relrent != sizeof(ElfW(Addr))) ||
       (!relr_sz && relrent != 0) ||
       (jmprel_sz && out->pltrel_type != DT_REL && out->pltrel_type != DT_RELA)) {
@@ -511,6 +532,15 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
     }
     out->android_rela_sz = android_rela_sz;
   }
+  if (versym_vaddr && !vaddr_to_offset(phdr, eh->e_phnum, versym_vaddr,
+                                        sizeof(uint16_t), &out->versym_off)) {
+    LOGE("Invalid DT_VERSYM address");
+    goto cleanup;
+  }
+  out->verneed_vaddr = verneed_vaddr;
+  out->verneed_num = verneed_num;
+  out->verdef_vaddr = verdef_vaddr;
+  out->verdef_num = verdef_num;
 
   /* INFO: Read string table into memory */
   if (strsz == 0 || strsz == SIZE_MAX) {
@@ -631,6 +661,17 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
     goto cleanup;
   }
 
+  if (versym_vaddr) {
+    off_t checked_versym = 0;
+    if (out->nsyms > SIZE_MAX / sizeof(uint16_t) ||
+        !vaddr_to_offset(phdr, eh->e_phnum, versym_vaddr,
+                         out->nsyms * sizeof(uint16_t), &checked_versym) ||
+        checked_versym != out->versym_off) {
+      LOGE("Invalid or truncated DT_VERSYM table");
+      goto cleanup;
+    }
+  }
+
   success = true;
 
 cleanup:
@@ -677,6 +718,137 @@ static bool find_dynsym_value(int fd, const struct elf_dyn_info *info, const cha
   #define ELF_R_TYPE ELF32_R_TYPE
   #define ELF_R_SYM ELF32_R_SYM
 #endif
+
+struct gnu_verneed {
+  uint16_t vn_version;
+  uint16_t vn_cnt;
+  uint32_t vn_file;
+  uint32_t vn_aux;
+  uint32_t vn_next;
+};
+struct gnu_vernaux {
+  uint32_t vna_hash;
+  uint16_t vna_flags;
+  uint16_t vna_other;
+  uint32_t vna_name;
+  uint32_t vna_next;
+};
+struct gnu_verdef {
+  uint16_t vd_version;
+  uint16_t vd_flags;
+  uint16_t vd_ndx;
+  uint16_t vd_cnt;
+  uint32_t vd_hash;
+  uint32_t vd_aux;
+  uint32_t vd_next;
+};
+struct gnu_verdaux {
+  uint32_t vda_name;
+  uint32_t vda_next;
+};
+
+static bool get_symbol_version_requirement(int fd,
+                                           const struct elf_dyn_info *info,
+                                           const ElfW(Phdr) *phdr, int phnum,
+                                           size_t sym_idx,
+                                           char *version, size_t version_size,
+                                           char *provider, size_t provider_size) {
+  if (!version || version_size == 0 || !provider || provider_size == 0)
+    return false;
+  version[0] = '\0';
+  provider[0] = '\0';
+  if (!info || info->versym_off == 0) return true;
+
+  uint16_t versym = 0;
+  if (sym_idx > (size_t)INT64_MAX / sizeof(versym) ||
+      !read_loop_offset(fd, &versym, sizeof(versym),
+                        info->versym_off + (off_t)(sym_idx * sizeof(versym))))
+    return false;
+  uint16_t wanted = versym & 0x7fff;
+  if (wanted <= 1) return true;
+  if (!info->verneed_vaddr || info->verneed_num == 0) return false;
+
+  ElfW(Addr) need_addr = info->verneed_vaddr;
+  for (size_t i = 0; i < info->verneed_num; ++i) {
+    off_t need_off = 0;
+    struct gnu_verneed need;
+    if (!vaddr_to_offset(phdr, phnum, need_addr, sizeof(need), &need_off) ||
+        !read_loop_offset(fd, &need, sizeof(need), need_off) ||
+        need.vn_version != 1 || need.vn_cnt == 0 || need.vn_cnt > 4096 ||
+        need.vn_file >= info->strsz ||
+        !memchr(info->strtab + need.vn_file, '\0', info->strsz - need.vn_file))
+      return false;
+
+    ElfW(Addr) aux_addr = need_addr + need.vn_aux;
+    for (size_t j = 0; j < need.vn_cnt; ++j) {
+      off_t aux_off = 0;
+      struct gnu_vernaux aux;
+      if (!vaddr_to_offset(phdr, phnum, aux_addr, sizeof(aux), &aux_off) ||
+          !read_loop_offset(fd, &aux, sizeof(aux), aux_off))
+        return false;
+      if ((aux.vna_other & 0x7fff) == wanted) {
+        if (aux.vna_name >= info->strsz ||
+            !memchr(info->strtab + aux.vna_name, '\0',
+                    info->strsz - aux.vna_name))
+          return false;
+        if (strlen(info->strtab + aux.vna_name) >= version_size ||
+            strlen(info->strtab + need.vn_file) >= provider_size)
+          return false;
+        strcpy(version, info->strtab + aux.vna_name);
+        strcpy(provider, info->strtab + need.vn_file);
+        return true;
+      }
+      if (j + 1 < need.vn_cnt) {
+        if (aux.vna_next == 0 || aux_addr > UINTPTR_MAX - aux.vna_next)
+          return false;
+        aux_addr += aux.vna_next;
+      }
+    }
+
+    if (i + 1 < info->verneed_num) {
+      if (need.vn_next == 0 || need_addr > UINTPTR_MAX - need.vn_next)
+        return false;
+      need_addr += need.vn_next;
+    }
+  }
+  return false;
+}
+
+static bool validate_verdef_table(int fd, const struct elf_dyn_info *info,
+                                  const ElfW(Phdr) *phdr, int phnum) {
+  if (!info || info->verdef_num == 0) return true;
+  ElfW(Addr) def_addr = info->verdef_vaddr;
+  for (size_t i = 0; i < info->verdef_num; ++i) {
+    off_t def_off = 0;
+    struct gnu_verdef def;
+    if (!vaddr_to_offset(phdr, phnum, def_addr, sizeof(def), &def_off) ||
+        !read_loop_offset(fd, &def, sizeof(def), def_off) ||
+        def.vd_version != 1 || def.vd_cnt == 0 || def.vd_cnt > 4096)
+      return false;
+    ElfW(Addr) aux_addr = def_addr + def.vd_aux;
+    for (size_t j = 0; j < def.vd_cnt; ++j) {
+      off_t aux_off = 0;
+      struct gnu_verdaux aux;
+      if (!vaddr_to_offset(phdr, phnum, aux_addr, sizeof(aux), &aux_off) ||
+          !read_loop_offset(fd, &aux, sizeof(aux), aux_off) ||
+          aux.vda_name >= info->strsz ||
+          !memchr(info->strtab + aux.vda_name, '\0',
+                  info->strsz - aux.vda_name))
+        return false;
+      if (j + 1 < def.vd_cnt) {
+        if (aux.vda_next == 0 || aux_addr > UINTPTR_MAX - aux.vda_next)
+          return false;
+        aux_addr += aux.vda_next;
+      }
+    }
+    if (i + 1 < info->verdef_num) {
+      if (def.vd_next == 0 || def_addr > UINTPTR_MAX - def.vd_next)
+        return false;
+      def_addr += def.vd_next;
+    }
+  }
+  return true;
+}
 
 /* INFO: Resolve a symbol address - either local or from DT_NEEDED libraries. */
 static bool resolve_symbol_addr(int fd, const struct elf_dyn_info *info,
@@ -731,6 +903,15 @@ if (ELF_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
   const char *name = &info->strtab[sym.st_name];
   if (!*name || !memchr(name, '\0', info->strsz - sym.st_name)) return false;
 
+  char required_version[256];
+  char required_provider[256];
+  if (!get_symbol_version_requirement(fd, info, phdr, phnum, sym_idx,
+                                      required_version, sizeof(required_version),
+                                      required_provider, sizeof(required_provider))) {
+    LOGE("Malformed or unresolved GNU version requirement for %s", name);
+    return false;
+  }
+
   /* TODO: In CSOLoader, they're optional. Since it's broken to solve those *ATM*, just bypass. */
   if (strcmp(name, "__register_frame") == 0 || strcmp(name, "__deregister_frame") == 0) {
     LOGW("Bypassing resolution of EH frame function: %s", name);
@@ -744,8 +925,15 @@ if (ELF_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
   for (size_t i = 0; i < info->needed_count; i++) {
     const char *mod_path = needed_paths ? needed_paths[i] : NULL;
     if (!mod_path) continue;
+    if (required_provider[0]) {
+      const char *base = position_after(mod_path, '/');
+      if (!base) base = mod_path;
+      if (strcmp(base, required_provider) != 0) continue;
+    }
 
-    void *addr = find_func_addr(local_map, remote_map, mod_path, name);
+    void *addr = required_version[0]
+        ? find_func_addr_version(local_map, remote_map, mod_path, name, required_version)
+        : find_func_addr(local_map, remote_map, mod_path, name);
     if (addr) {
       *out_addr = (uintptr_t)addr;
 
@@ -1572,8 +1760,9 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   remote_fd = -1;
 
   struct elf_dyn_info dinfo;
-  if (!elf_load_dyn_info(fd, &eh, phdr, &dinfo)) {
-    LOGE("Failed to load ELF dynamic info");
+  if (!elf_load_dyn_info(fd, &eh, phdr, &dinfo) ||
+      !validate_verdef_table(fd, &dinfo, phdr, eh.e_phnum)) {
+    LOGE("Failed to load or validate ELF dynamic/version metadata");
 
     REMOTE_CLEANUP_MAPPING();
     free(phdr);
