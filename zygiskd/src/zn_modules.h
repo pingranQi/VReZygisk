@@ -16,6 +16,7 @@ struct zn_module_entry {
   uint8_t target_type;
   uint8_t companion;
   int companion_fd; /* daemon-owned stream to the ZN companion process */
+  pid_t companion_pid;
   int companion_broker_fd; /* inherited SOCK_DGRAM broker from hyos_spawner */
   pthread_t companion_broker_thread;
   bool companion_broker_running;
