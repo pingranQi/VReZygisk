@@ -266,6 +266,10 @@ struct elf_dyn_info {
   size_t jmprel_sz;
   off_t relr_off;
   size_t relr_sz;
+  off_t android_relr_off;
+  size_t android_relr_sz;
+  size_t android_relr_count;
+  bool has_android_relr_count;
   off_t android_rela_off;
   size_t android_rela_sz;
   off_t versym_off;
@@ -356,11 +360,16 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   ElfW(Addr) rela_vaddr = 0;
   ElfW(Addr) jmprel_vaddr = 0;
   ElfW(Addr) relr_vaddr = 0;
+  ElfW(Addr) android_relr_vaddr = 0;
   size_t rel_sz = 0;
   size_t rela_sz = 0;
   size_t jmprel_sz = 0;
   size_t relr_sz = 0;
   size_t relrent = 0;
+  size_t android_relr_sz = 0;
+  size_t android_relrent = 0;
+  size_t android_relr_count = 0;
+  bool has_android_relr_count = false;
   ElfW(Addr) android_rela_vaddr = 0;
   size_t android_rela_sz = 0;
   ElfW(Addr) versym_vaddr = 0;
@@ -424,11 +433,18 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
         LOGE("Android REL packed relocations are not supported on AArch64");
         goto cleanup;
       case 0x6fffe000: /* DT_ANDROID_RELR */
+        android_relr_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr;
+        break;
       case 0x6fffe001: /* DT_ANDROID_RELRSZ */
+        android_relr_sz = (size_t)dyn[i].d_un.d_val;
+        break;
       case 0x6fffe003: /* DT_ANDROID_RELRENT */
+        android_relrent = (size_t)dyn[i].d_un.d_val;
+        break;
       case 0x6fffe005: /* DT_ANDROID_RELRCOUNT */
-        LOGE("Android RELR relocations are not supported by remote CSOLoader");
-        goto cleanup;
+        android_relr_count = (size_t)dyn[i].d_un.d_val;
+        has_android_relr_count = true;
+        break;
       case 0x6ffffff0: /* DT_VERSYM */
         versym_vaddr = (ElfW(Addr))dyn[i].d_un.d_ptr;
         break;
@@ -462,6 +478,11 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       (rela_vaddr == 0) != (rela_sz == 0) ||
       (jmprel_vaddr == 0) != (jmprel_sz == 0) ||
       (relr_vaddr == 0) != (relr_sz == 0) ||
+      (android_relr_vaddr == 0) != (android_relr_sz == 0) ||
+      (android_relr_sz && android_relrent != sizeof(ElfW(Addr))) ||
+      (!android_relr_sz && android_relrent != 0) ||
+      (has_android_relr_count && !android_relr_sz) ||
+      (android_relr_count > 10000000) ||
       (android_rela_vaddr == 0) != (android_rela_sz == 0) ||
       ((verneed_vaddr == 0) != (verneed_num == 0)) ||
       ((verdef_vaddr == 0) != (verdef_num == 0)) ||
@@ -525,6 +546,17 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
       goto cleanup;
     }
     out->relr_sz = relr_sz;
+  }
+  if (android_relr_vaddr && android_relr_sz) {
+    if (android_relr_sz % sizeof(ElfW(Addr)) != 0 ||
+        !vaddr_to_offset(phdr, eh->e_phnum, android_relr_vaddr,
+                         android_relr_sz, &out->android_relr_off)) {
+      LOGE("Invalid or out-of-bounds DT_ANDROID_RELR table");
+      goto cleanup;
+    }
+    out->android_relr_sz = android_relr_sz;
+    out->android_relr_count = android_relr_count;
+    out->has_android_relr_count = has_android_relr_count;
   }
 
   if (android_rela_vaddr && android_rela_sz) {
@@ -1392,20 +1424,22 @@ static bool apply_rel_section(int pid, int fd, const struct elf_dyn_info *info,
 }
 
 /* Apply ELF RELR relative relocations using the ABI direct/bitmap encoding. */
-static bool apply_relr_section(int pid, int fd, const struct elf_dyn_info *info,
-                               const ElfW(Phdr) *phdr, int phnum,
-                               uintptr_t load_bias) {
-  if (!info || !info->relr_sz) return true;
-  if (info->relr_sz % sizeof(ElfW(Addr)) != 0) return false;
+static bool apply_relr_table(int pid, int fd, off_t table_off, size_t table_sz,
+                             bool check_count, size_t expected_count,
+                             const ElfW(Phdr) *phdr, int phnum,
+                             uintptr_t load_bias) {
+  if (table_sz == 0) return true;
+  if (table_sz % sizeof(ElfW(Addr)) != 0) return false;
 
   const size_t word_bits = sizeof(ElfW(Addr)) * 8;
   uintptr_t where = 0;
-  size_t count = info->relr_sz / sizeof(ElfW(Addr));
+  size_t count = table_sz / sizeof(ElfW(Addr));
+  size_t relocated_count = 0;
   for (size_t i = 0; i < count; ++i) {
     ElfW(Addr) entry = 0;
     if (i > (size_t)INT64_MAX / sizeof(entry) ||
         !read_loop_offset(fd, &entry, sizeof(entry),
-                          info->relr_off + (off_t)(i * sizeof(entry))))
+                          table_off + (off_t)(i * sizeof(entry))))
       return false;
 
     if ((entry & 1) == 0) {
@@ -1418,12 +1452,13 @@ static bool apply_relr_section(int pid, int fd, const struct elf_dyn_info *info,
           !read_remote_addr(pid, target, &addend) ||
           !write_remote_addr(pid, target, (ElfW(Addr))(load_bias + addend)))
         return false;
-      if (where > UINTPTR_MAX - sizeof(ElfW(Addr))) return false;
+      if (relocated_count == SIZE_MAX ||
+          where > UINTPTR_MAX - sizeof(ElfW(Addr))) return false;
+      relocated_count++;
       where += sizeof(ElfW(Addr));
       continue;
     }
 
-    /* Bits 1..word_bits-1 describe relocations at successive word slots. */
     ElfW(Addr) bitmap = entry >> 1;
     for (size_t bit = 0; bit < word_bits - 1; ++bit) {
       if (bitmap & ((ElfW(Addr))1 << bit)) {
@@ -1435,12 +1470,40 @@ static bool apply_relr_section(int pid, int fd, const struct elf_dyn_info *info,
             !read_remote_addr(pid, target, &addend) ||
             !write_remote_addr(pid, target, (ElfW(Addr))(load_bias + addend)))
           return false;
+        if (relocated_count == SIZE_MAX) return false;
+        relocated_count++;
       }
       if (where > UINTPTR_MAX - sizeof(ElfW(Addr))) return false;
       where += sizeof(ElfW(Addr));
     }
   }
+
+  if (check_count && relocated_count != expected_count) {
+    LOGE("Android RELR count mismatch: decoded=%zu expected=%zu",
+         relocated_count, expected_count);
+    return false;
+  }
   return true;
+}
+
+static bool apply_relr_section(int pid, int fd,
+                               const struct elf_dyn_info *info,
+                               const ElfW(Phdr) *phdr, int phnum,
+                               uintptr_t load_bias) {
+  return !info || apply_relr_table(pid, fd, info->relr_off, info->relr_sz,
+                                   false, 0, phdr, phnum, load_bias);
+}
+
+static bool apply_android_relr_section(int pid, int fd,
+                                       const struct elf_dyn_info *info,
+                                       const ElfW(Phdr) *phdr, int phnum,
+                                       uintptr_t load_bias) {
+  if (!info) return true;
+  return apply_relr_table(pid, fd, info->android_relr_off,
+                          info->android_relr_sz,
+                          info->has_android_relr_count,
+                          info->android_relr_count,
+                          phdr, phnum, load_bias);
 }
 
 static bool decode_sleb128(const uint8_t **cursor, const uint8_t *end,
@@ -1637,6 +1700,10 @@ static bool apply_relocations(int pid, struct user_regs_struct *regs, int fd,
   /* Relative relocations must be applied before symbol relocations. */
   if (!apply_relr_section(pid, fd, info, phdr, phnum, load_bias)) {
     LOGE("Failed to apply DT_RELR relocations");
+    return false;
+  }
+  if (!apply_android_relr_section(pid, fd, info, phdr, phnum, load_bias)) {
+    LOGE("Failed to apply DT_ANDROID_RELR relocations");
     return false;
   }
   if (!apply_android_rela_section(pid, regs, fd, info, local_map, remote_map,
