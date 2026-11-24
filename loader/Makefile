@@ -76,6 +76,7 @@ $(PLTI_LIB):
 		out=$(BUILD_DIR)/obj/$(BUILD_TYPE)/plti/$(ARCH)
 
 $(CSOLOADER_LIB):
+	python3 ../scripts/patch-csoloader.py $(CSOLOADER_DIR)/src/linker.c
 	@mkdir -p $(dir $@)
 	$(MAKE) -C $(CSOLOADER_DIR) BUILD_TYPE=$(BUILD_TYPE) ARCH=$(ARCH) \
 		NDK_PATH=$(NDK_PATH) API_LEVEL=$(API_LEVEL)                   \
