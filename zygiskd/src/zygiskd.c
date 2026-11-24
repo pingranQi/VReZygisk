@@ -10,7 +10,6 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <pthread.h>
-#include <spawn.h>
 
 #include <linux/limits.h>
 #include <linux/memfd.h>
@@ -377,8 +376,7 @@ static int spawn_zn_companion(char *restrict argv[],
 
   int daemon_fd = sockets[0];
   int companion_fd = sockets[1];
-  int child_fd = 198;
-  while (child_fd == daemon_fd || child_fd == companion_fd) ++child_fd;
+  int child_fd = companion_fd;
 
   const char *process = argv[0];
   const char *last = strrchr(process, '/');
@@ -390,31 +388,24 @@ static int spawn_zn_companion(char *restrict argv[],
   char command[] = "zn-companion";
   char *child_argv[] = {process_name, command, fd_string, NULL};
 
-  posix_spawn_file_actions_t actions;
-  int spawn_error = posix_spawn_file_actions_init(&actions);
-  bool actions_initialized = spawn_error == 0;
-  if (spawn_error == 0)
-    spawn_error = posix_spawn_file_actions_adddup2(&actions, companion_fd,
-                                                   child_fd);
-  if (spawn_error == 0)
-    spawn_error = posix_spawn_file_actions_addclose(&actions, daemon_fd);
-  if (spawn_error == 0 && companion_fd != child_fd)
-    spawn_error = posix_spawn_file_actions_addclose(&actions, companion_fd);
-
-  pid_t pid = -1;
-  if (spawn_error == 0)
-    spawn_error = posix_spawn(&pid, ZYGISKD_PATH, &actions, NULL,
-                              child_argv, environ);
-  if (actions_initialized) posix_spawn_file_actions_destroy(&actions);
-  close(companion_fd);
-
-  if (spawn_error != 0) {
-    LOGE("Failed spawning ZN companion %s: %s", module->module_id,
-         strerror(spawn_error));
+  pid_t pid = fork();
+  if (pid < 0) {
+    LOGE("Failed forking ZN companion: %s", strerror(errno));
     close(daemon_fd);
+    close(companion_fd);
     return -1;
   }
 
+  if (pid == 0) {
+    /* Only async-signal-safe operations are allowed between fork and execve:
+     * the daemon may already have broker threads running. */
+    close(daemon_fd);
+    if (fcntl(companion_fd, F_SETFD, 0) == -1) _exit(127);
+    execve(ZYGISKD_PATH, child_argv, environ);
+    _exit(127);
+  }
+
+  close(companion_fd);
   int library_fd = open(module->library, O_RDONLY | O_CLOEXEC);
   if (library_fd < 0) {
     LOGE("Failed opening ZN companion library %s: %s",
