@@ -5,7 +5,8 @@
 
 void init_monitor();
 
-bool trace_zygote(int pid);\nbool trace_zn_target(int pid);
+bool trace_zygote(int pid);
+bool trace_zn_target(int pid);
 
 enum rezygiskd_command {
   START = 1,
