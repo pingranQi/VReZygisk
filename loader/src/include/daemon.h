@@ -57,7 +57,7 @@ void free_rezygisk_info(struct rezygisk_info *info);
 
 bool rezygiskd_read_modules(struct zygisk_modules *modules);
 
-void free_modules(struct zygisk_modules *modules);
+void free_modules(struct zygisk_modules *modules);\n\nbool rezygiskd_read_zn_modules(struct zn_module_list *modules);\nvoid rezygiskd_free_zn_modules(struct zn_module_list *modules);
 
 int rezygiskd_connect_companion(size_t index);
 
