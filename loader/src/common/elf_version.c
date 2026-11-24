@@ -267,32 +267,97 @@ static bool version_name_for_index(const struct image_view *v,
                                    uint16_t wanted_index,
                                    const char **out_name,
                                    uint32_t *out_hash) {
-  if (!di->verdef || !di->verdef_count || wanted_index <= VER_NDX_GLOBAL)
-    return false;
+  if (!v || !di || !out_name || !out_hash || !di->verdef ||
+      !di->verdef_count || wanted_index <= VER_NDX_GLOBAL ||
+      wanted_index > VER_NDX_MASK) return false;
+
+  const char *found_name = NULL;
+  uint32_t found_hash = 0;
   uintptr_t cur = (uintptr_t)di->verdef;
   for (size_t i = 0; i < di->verdef_count; ++i) {
     if (!range_ok(v, cur, sizeof(Elf64_Verdef))) return false;
     const Elf64_Verdef *vd = (const Elf64_Verdef *)cur;
     if (vd->vd_version != VER_DEF_CURRENT || vd->vd_cnt == 0 ||
-        vd->vd_cnt > 64 || vd->vd_aux == 0) return false;
+        vd->vd_cnt > 64 || vd->vd_aux < sizeof(Elf64_Verdef) ||
+        (vd->vd_ndx & VER_NDX_MASK) <= VER_NDX_GLOBAL) return false;
 
     uintptr_t aux_addr;
-    if (add_overflow_uintptr(cur, vd->vd_aux, &aux_addr) ||
-        !range_ok(v, aux_addr, sizeof(Elf64_Verdaux))) return false;
-    const Elf64_Verdaux *aux = (const Elf64_Verdaux *)aux_addr;
-    if ((vd->vd_ndx & VER_NDX_MASK) == wanted_index) {
-      size_t maxstr = di->strsz;
-      if (aux->vda_name >= maxstr) return false;
-      const char *name = di->strtab + aux->vda_name;
-      if (!memchr(name, '\0', maxstr - aux->vda_name)) return false;
-      *out_name = name;
-      *out_hash = vd->vd_hash;
-      return true;
+    if (add_overflow_uintptr(cur, vd->vd_aux, &aux_addr)) return false;
+    const char *primary_name = NULL;
+    for (size_t j = 0; j < vd->vd_cnt; ++j) {
+      if (!range_ok(v, aux_addr, sizeof(Elf64_Verdaux))) return false;
+      const Elf64_Verdaux *aux = (const Elf64_Verdaux *)aux_addr;
+      if (aux->vda_name >= di->strsz ||
+          !memchr(di->strtab + aux->vda_name, '\0',
+                  di->strsz - aux->vda_name)) return false;
+      if (j == 0) primary_name = di->strtab + aux->vda_name;
+
+      if (j + 1 < vd->vd_cnt) {
+        uintptr_t next_aux;
+        if (!aux->vda_next ||
+            add_overflow_uintptr(aux_addr, aux->vda_next, &next_aux) ||
+            next_aux <= aux_addr) return false;
+        aux_addr = next_aux;
+      }
     }
-    if (!vd->vd_next) break;
-    uintptr_t next;
-    if (add_overflow_uintptr(cur, vd->vd_next, &next) || next <= cur) return false;
-    cur = next;
+
+    if ((vd->vd_ndx & VER_NDX_MASK) == wanted_index) {
+      if (!primary_name || vd->vd_hash != elf_name_hash(primary_name) ||
+          found_name) return false;
+      found_name = primary_name;
+      found_hash = vd->vd_hash;
+    }
+
+    if (i + 1 < di->verdef_count) {
+      uintptr_t next;
+      if (!vd->vd_next || add_overflow_uintptr(cur, vd->vd_next, &next) ||
+          next <= cur) return false;
+      cur = next;
+    }
+  }
+
+  if (!found_name) return false;
+  *out_name = found_name;
+  *out_hash = found_hash;
+  return true;
+}
+
+static bool symbol_runtime_address(const struct image_view *view,
+                                    const Elf64_Phdr *phdr,
+                                    size_t phnum,
+                                    const Elf64_Sym *sym,
+                                    uintptr_t *out) {
+  if (!view || !phdr || !sym || !out || sym->st_shndx == SHN_UNDEF)
+    return false;
+
+  if (sym->st_shndx == SHN_ABS) {
+    *out = (uintptr_t)sym->st_value;
+    return true;
+  }
+
+  uintptr_t value = (uintptr_t)sym->st_value;
+  if ((Elf64_Addr)value != sym->st_value ||
+      sym->st_size > UINTPTR_MAX - value) return false;
+  uintptr_t value_end = value + (uintptr_t)sym->st_size;
+
+  for (size_t i = 0; i < phnum; ++i) {
+    if (phdr[i].p_type != PT_LOAD || phdr[i].p_memsz == 0) continue;
+    uintptr_t seg_start = (uintptr_t)phdr[i].p_vaddr;
+    if ((Elf64_Addr)seg_start != phdr[i].p_vaddr ||
+        phdr[i].p_memsz > UINTPTR_MAX - seg_start) return false;
+    uintptr_t seg_end = seg_start + (uintptr_t)phdr[i].p_memsz;
+    if (value < seg_start || value >= seg_end ||
+        (sym->st_size && value_end > seg_end)) continue;
+
+    unsigned type = ELF64_ST_TYPE(sym->st_info);
+    if (type == STT_FUNC && !(phdr[i].p_flags & PF_X)) return false;
+    if (type == STT_OBJECT && !(phdr[i].p_flags & PF_R)) return false;
+
+    uintptr_t runtime;
+    if (add_overflow_uintptr(view->bias, value, &runtime) ||
+        runtime < view->begin || runtime >= view->end) return false;
+    *out = runtime;
+    return true;
   }
   return false;
 }
@@ -313,6 +378,7 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
       !di.verdef || !di.verdef_count) return 0;
 
   uint32_t wanted_hash = elf_name_hash(version_name);
+  uintptr_t result = 0;
   for (size_t i = 0; i < di.symbol_count; ++i) {
     const Elf64_Sym *sym = &di.symtab[i];
     if (sym->st_name == 0 || sym->st_shndx == SHN_UNDEF ||
@@ -329,8 +395,7 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
         type == STT_TLS || type == STT_GNU_IFUNC) continue;
 
     const char *name = di.strtab + sym->st_name;
-    size_t maxstr = di.strsz;
-    if (!memchr(name, '\0', maxstr - sym->st_name) ||
+    if (!memchr(name, '\0', di.strsz - sym->st_name) ||
         strcmp(name, symbol_name) != 0) continue;
 
     uint16_t vi = di.versym[i] & VER_NDX_MASK;
@@ -341,10 +406,8 @@ uintptr_t elf_find_versioned_symbol(void *image_base,
     if (candidate_hash != wanted_hash ||
         strcmp(candidate_version, version_name) != 0) continue;
 
-    uintptr_t result;
-    if (add_overflow_uintptr(view.bias, (uintptr_t)sym->st_value, &result))
+    if (!symbol_runtime_address(&view, phdr, eh->e_phnum, sym, &result))
       return 0;
-    if (result < view.begin || result >= view.end) return 0;
     return result;
   }
   return 0;
@@ -389,7 +452,7 @@ uintptr_t elf_resolve_versioned_symbol(void *provider_base,
         const char *required_version = request.strtab + aux->vna_name;
         const char *required_provider = request.strtab + need->vn_file;
         if (!memchr(required_version, '\0', str_size - aux->vna_name) ||
-            !memchr(required_provider, '\\0', str_size - need->vn_file) ||
+            !memchr(required_provider, '\0', str_size - need->vn_file) ||
             aux->vna_hash != elf_name_hash(required_version)) return 0;
 
         struct image_view provider_view = {0};
@@ -406,7 +469,7 @@ uintptr_t elf_resolve_versioned_symbol(void *provider_base,
           size_t provider_str_size = provider.strsz;
           if (provider.soname_offset >= provider_str_size) return 0;
           const char *soname = provider.strtab + provider.soname_offset;
-          if (!memchr(soname, '\\0', provider_str_size - provider.soname_offset) ||
+          if (!memchr(soname, '\0', provider_str_size - provider.soname_offset) ||
               strcmp(soname, required_provider) != 0) return 0;
         }
         return elf_find_versioned_symbol(provider_base, symbol_name,
