@@ -349,6 +349,26 @@ void rezygiskd_free_zn_modules(struct zn_module_list *modules) {
   modules->count = 0;
 }
 
+int rezygiskd_connect_zn_companion(size_t index) {
+  int fd = rezygiskd_connect(1);
+  if (fd == -1) return -1;
+
+  if (write_uint8_t(fd, (uint8_t)RequestZnCompanionSocket) != sizeof(uint8_t) ||
+      write_size_t(fd, index) != (ssize_t)sizeof(index)) {
+    LOGE("Failed to request ZN companion socket");
+    close(fd);
+    return -1;
+  }
+
+  uint8_t response = 0;
+  if (read_uint8_t(fd, &response) != sizeof(response) || response != 1) {
+    LOGE("ZN companion connection rejected for index %zu", index);
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+
 int rezygiskd_connect_companion(size_t index) {
   int fd = rezygiskd_connect(1);
   if (fd == -1) return -1;
