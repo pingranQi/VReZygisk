@@ -496,6 +496,7 @@ void zygiskd_start(char *restrict argv[]) {
       LOGE("Failed allocating info message: %s", strerror(errno));
 
       free_modules(&context);
+      zn_modules_free(&context.zn_modules);
       root_impl_cleanup();
 
       return;
@@ -526,6 +527,7 @@ void zygiskd_start(char *restrict argv[]) {
     LOGE("Failed creating daemon socket");
 
     free_modules(&context);
+    zn_modules_free(&context.zn_modules);
 
     root_impl_cleanup();
 
@@ -998,5 +1000,6 @@ void zygiskd_start(char *restrict argv[]) {
 
   close(socket_fd);
   free_modules(&context);
+  zn_modules_free(&context.zn_modules);
   root_impl_cleanup();
 }
