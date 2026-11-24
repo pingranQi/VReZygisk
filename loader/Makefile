@@ -29,7 +29,7 @@ COMMON_LDFLAGS = -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment       
 COMMON_SRCS = src/common/daemon.c src/common/elf_util.c   \
 			  src/common/misc.c src/common/socket_utils.c
 INJECTOR_SRCS = src/injector/alloc.c src/injector/cpp_strings.c src/injector/entry.c \
-				src/injector/hook.c src/injector/hiding.c src/injector/ptrace_clear.c src/injector/zn_api.c \\
+				src/injector/hook.c src/injector/hiding.c src/injector/ptrace_clear.c src/injector/zn_api.c \
 				src/injector/zn_hook.c
 PTRACER_SRCS = src/ptracer/main.c src/ptracer/monitor.c src/ptracer/ptracer.c \
 			   src/ptracer/remote_csoloader.c src/ptracer/utils.c
@@ -39,12 +39,12 @@ INJECTOR_OBJS = $(patsubst src/injector/%.c,$(OBJ_DIR)/injector/%.o,$(INJECTOR_S
 PTRACER_OBJS = $(patsubst src/ptracer/%.c,$(OBJ_DIR)/ptracer/%.o,$(PTRACER_SRCS))
 
 SHADOWHOOK_ROOT = src/external/shadowhook/shadowhook/src/main/cpp
-SHADOWHOOK_C_SRCS = $(wildcard $(SHADOWHOOK_ROOT)/*.c) \\
-				$(wildcard $(SHADOWHOOK_ROOT)/arch/arm64/*.c) \\
-				$(wildcard $(SHADOWHOOK_ROOT)/common/*.c) \\
+SHADOWHOOK_C_SRCS = $(wildcard $(SHADOWHOOK_ROOT)/*.c) \
+				$(wildcard $(SHADOWHOOK_ROOT)/arch/arm64/*.c) \
+				$(wildcard $(SHADOWHOOK_ROOT)/common/*.c) \
 				$(wildcard $(SHADOWHOOK_ROOT)/third_party/*/*.c)
 SHADOWHOOK_ASM_SRCS = $(wildcard $(SHADOWHOOK_ROOT)/arch/arm64/*.S)
-SHADOWHOOK_OBJS = $(patsubst $(SHADOWHOOK_ROOT)/%,$(OBJ_DIR)/shadowhook/%,$(SHADOWHOOK_C_SRCS:.c=.o)) \\
+SHADOWHOOK_OBJS = $(patsubst $(SHADOWHOOK_ROOT)/%,$(OBJ_DIR)/shadowhook/%,$(SHADOWHOOK_C_SRCS:.c=.o)) \
 				  $(patsubst $(SHADOWHOOK_ROOT)/%,$(OBJ_DIR)/shadowhook/%,$(SHADOWHOOK_ASM_SRCS:.S=.o))
 SHADOWHOOK_LIB = $(BUILD_DIR)/obj/$(BUILD_TYPE)/shadowhook/$(ARCH)/libshadowhook.a
 
@@ -61,10 +61,10 @@ PLTI_DIR = src/external/plti
 CSOLOADER_DIR = src/external/csoloader
 
 COMMON_INCLUDES = -Isrc/include
-INJECTOR_INCLUDES = -Isrc/include -I$(PLTI_DIR)/src -I$(CSOLOADER_DIR)/include \\
-				-I$(SHADOWHOOK_ROOT) -I$(SHADOWHOOK_ROOT)/include \\
-				-I$(SHADOWHOOK_ROOT)/arch/arm64 -I$(SHADOWHOOK_ROOT)/common \\
-				-I$(SHADOWHOOK_ROOT)/third_party/xdl \\
+INJECTOR_INCLUDES = -Isrc/include -I$(PLTI_DIR)/src -I$(CSOLOADER_DIR)/include \
+				-I$(SHADOWHOOK_ROOT) -I$(SHADOWHOOK_ROOT)/include \
+				-I$(SHADOWHOOK_ROOT)/arch/arm64 -I$(SHADOWHOOK_ROOT)/common \
+				-I$(SHADOWHOOK_ROOT)/third_party/xdl \
 				-I$(SHADOWHOOK_ROOT)/third_party/bsd -I$(SHADOWHOOK_ROOT)/third_party/lss
 
 .PHONY: all arch clean
