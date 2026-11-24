@@ -310,6 +310,38 @@ static size_t _linker_bump_tls_generation(void) {
         "safe TLS key deinitialization",
     )
 
+    source = replace_once(
+        source,
+        """  LOGD("Registering TLS segments for main library and dependencies.");
+  _linker_register_tls_segment(linker->img);
+  for (int i = 0; i < linker->dep_count; i++) {
+    struct loaded_dep *dep = &linker->dependencies[i];
+    if (!dep->is_manual_load) continue;
+
+    LOGD("Registering TLS segment for dependency: %s", dep->img->elf);
+
+    _linker_register_tls_segment(dep->img);
+  }""",
+        """  LOGD("Registering TLS segments for main library and dependencies.");
+  if (!_linker_register_tls_segment(linker->img)) {
+    LOGE("Failed to register TLS segment for main image %s", linker->img->elf);
+    return false;
+  }
+  for (int i = 0; i < linker->dep_count; i++) {
+    struct loaded_dep *dep = &linker->dependencies[i];
+    if (!dep->is_manual_load) continue;
+
+    LOGD("Registering TLS segment for dependency: %s", dep->img->elf);
+
+    if (!_linker_register_tls_segment(dep->img)) {
+      LOGE("Failed to register TLS segment for dependency %s", dep->img->elf);
+      return false;
+    }
+  }
+  ${REGISTRATION_MARKER}""",
+        "TLS registration failure propagation",
+    )
+
     path.write_text(source)
     print(f"Applied VReZygisk TLS hardening to {path}")
     return 0
