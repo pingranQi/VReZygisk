@@ -155,10 +155,28 @@ static bool csoloader_pinned = false;
  * registries. Do not hold this lock while invoking a module entry point or
  * specialization callback.
  */
-static pthread_mutex_t g_csoloader_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_csoloader_mutex;
+static pthread_once_t g_csoloader_mutex_once = PTHREAD_ONCE_INIT;
+static int g_csoloader_mutex_init_error;
+
+static void csoloader_mutex_init_once(void) {
+  pthread_mutexattr_t attr;
+  int error = pthread_mutexattr_init(&attr);
+  if (error != 0) {
+    g_csoloader_mutex_init_error = error;
+    return;
+  }
+
+  error = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  if (error == 0) error = pthread_mutex_init(&g_csoloader_mutex, &attr);
+  pthread_mutexattr_destroy(&attr);
+  g_csoloader_mutex_init_error = error;
+}
 
 static bool csoloader_lock(void) {
-  int error = pthread_mutex_lock(&g_csoloader_mutex);
+  int error = pthread_once(&g_csoloader_mutex_once, csoloader_mutex_init_once);
+  if (error == 0) error = g_csoloader_mutex_init_error;
+  if (error == 0) error = pthread_mutex_lock(&g_csoloader_mutex);
   if (error != 0) {
     LOGE("Failed to lock CSOLoader state: %d", error);
     return false;
