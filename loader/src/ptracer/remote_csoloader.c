@@ -762,6 +762,10 @@ static bool apply_rela_section(int pid, int fd, const struct elf_dyn_info *info,
                                struct maps_info *local_map, struct maps_info *remote_map,
                                const char *const *needed_paths, const ElfW(Phdr) *phdr, int phnum, uintptr_t load_bias,
                                off_t rela_off, size_t rela_sz) {
+  if (rela_sz % sizeof(ElfW(Rela)) != 0) {
+    LOGE("Malformed RELA table size");
+    return false;
+  }
   size_t count = rela_sz / sizeof(ElfW(Rela));
 
   for (size_t i = 0; i < count; i++) {
@@ -770,6 +774,9 @@ static bool apply_rela_section(int pid, int fd, const struct elf_dyn_info *info,
 
     unsigned type = (unsigned)ELF_R_TYPE(r.r_info);
     unsigned sym = (unsigned)ELF_R_SYM(r.r_info);
+#if defined(__aarch64__)
+    if (type == R_AARCH64_NONE) continue;
+#endif
     if ((uintptr_t)r.r_offset > UINTPTR_MAX - load_bias ||
         !vaddr_range_in_load_segment(phdr, phnum, r.r_offset, sizeof(ElfW(Addr)), true)) {
       LOGE("RELA target is outside a writable PT_LOAD segment");
