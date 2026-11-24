@@ -231,26 +231,20 @@ static bool hyos_in_child(void) {
 static bool is_hyos_spawner(void) {
   char path[PATH_MAX];
   ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 1);
-  if (n > 0 && (size_t)n < sizeof(path)) {
-    path[n] = '\0';
-    const char *base = strrchr(path, '/');
-    base = base ? base + 1 : path;
-    if (strcmp(base, "hyos_spawner") == 0 ||
-        strcmp(base, "usap64") == 0) return true;
-  }
+  if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+  path[n] = '\0';
 
-  /* Some HyperOS builds expose the spawner through the usap64 process name. */
-  char cmdline[128] = {0};
-  int fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
-  if (fd < 0) return false;
-  do {
-    n = read(fd, cmdline, sizeof(cmdline) - 1);
-  } while (n < 0 && errno == EINTR);
-  close(fd);
-  if (n <= 0) return false;
-  cmdline[strnlen(cmdline, (size_t)n)] = '\0';
-  return strcmp(cmdline, "hyos_spawner") == 0 ||
-         strcmp(cmdline, "usap64") == 0;
+  static const char deleted_suffix[] = " (deleted)";
+  size_t length = strlen(path);
+  const size_t suffix_length = sizeof(deleted_suffix) - 1;
+  if (length >= suffix_length &&
+      strcmp(path + length - suffix_length, deleted_suffix) == 0)
+    path[length - suffix_length] = '\0';
+
+  const char *suffix = "/hyos_spawner";
+  size_t suffix_len = sizeof(suffix) - 1;
+  return length >= suffix_len &&
+         strcmp(path + length - suffix_len, suffix) == 0;
 }
 
 static bool read_process_cmdline(char *out, size_t capacity) {
