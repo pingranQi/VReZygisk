@@ -1052,12 +1052,20 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
     csoloader_header = csoloader_header_path.read_text()
     csoloader_fork_marker = "/* VREZYGISK_LINKER_FORK_COORDINATION */"
     if csoloader_fork_marker not in csoloader_header:
-        csoloader_header += (
+        fork_declarations = (
             "\nvoid csoloader_fork_prepare(void);\n"
             "void csoloader_fork_parent(void);\n"
             "void csoloader_fork_child(void);\n"
             + csoloader_fork_marker + "\n"
         )
+        guard_end = csoloader_header.rfind("#endif")
+        if guard_end >= 0:
+            csoloader_header = (
+                csoloader_header[:guard_end] + fork_declarations +
+                csoloader_header[guard_end:]
+            )
+        else:
+            csoloader_header += fork_declarations
         csoloader_header_path.write_text(csoloader_header)
 
     csoloader_path = linker_path.with_name("csoloader.c")
