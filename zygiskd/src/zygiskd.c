@@ -711,7 +711,7 @@ void zygiskd_start(char *restrict argv[]) {
         if (ret != 1) {
           LOGE("Failed sending ZN module image fd for %s", entry->module_id);
         } else {
-          LOGD("Passed sealed ZN module image for %s", entry->module_id);
+          LOGI("Passed sealed ZN module image for %s", entry->module_id);
         }
         break;
       }
