@@ -450,6 +450,24 @@ static int spawn_zn_companion(char *restrict argv[],
   return daemon_fd;
 }
 
+static void close_zn_companion(struct zn_module_entry *module) {
+  if (!module) return;
+  if (module->companion_fd >= 0) {
+    (void)shutdown(module->companion_fd, SHUT_RDWR);
+    close(module->companion_fd);
+    module->companion_fd = -1;
+  }
+  if (module->companion_pid > 0) {
+    pid_t waited;
+    do {
+      waited = waitpid(module->companion_pid, NULL, 0);
+    } while (waited == -1 && errno == EINTR);
+    if (waited == module->companion_pid ||
+        (waited == -1 && errno == ECHILD))
+      module->companion_pid = -1;
+  }
+}
+
 struct zn_broker_thread_args {
   struct Context *context;
   size_t module_index;
@@ -475,10 +493,8 @@ static void *zn_companion_broker_thread(void *opaque) {
     if (index < context->zn_modules.count) {
       struct zn_module_entry *module = &context->zn_modules.items[index];
       if (module->companion_fd >= 0 &&
-          !check_unix_socket(module->companion_fd, false)) {
-        close(module->companion_fd);
-        module->companion_fd = -1;
-      }
+          !check_unix_socket(module->companion_fd, false))
+        close_zn_companion(module);
 
       if (module->companion_fd < 0) {
         module->companion_fd = spawn_zn_companion(argv, module);
@@ -488,8 +504,7 @@ static void *zn_companion_broker_thread(void *opaque) {
           write_fd(module->companion_fd, client_fd) == 1) {
         dispatched = true;
       } else if (module->companion_fd >= 0) {
-        close(module->companion_fd);
-        module->companion_fd = -1;
+        close_zn_companion(module);
       }
     }
     pthread_mutex_unlock(&context->zn_mutex);
@@ -626,6 +641,7 @@ static void stop_zn_companion_brokers(struct Context *context) {
       pthread_join(entry->companion_broker_thread, NULL);
       entry->companion_broker_running = false;
     }
+    close_zn_companion(entry);
   }
 }
 
@@ -768,11 +784,8 @@ void zygiskd_start(char *restrict argv[]) {
         }
 
         pthread_mutex_lock(&context.zn_mutex);
-        for (size_t i = 0; i < context.zn_modules.count; ++i) {
-          if (context.zn_modules.items[i].companion_fd < 0) continue;
-          close(context.zn_modules.items[i].companion_fd);
-          context.zn_modules.items[i].companion_fd = -1;
-        }
+        for (size_t i = 0; i < context.zn_modules.count; ++i)
+          close_zn_companion(&context.zn_modules.items[i]);
         pthread_mutex_unlock(&context.zn_mutex);
 
         break;
@@ -928,8 +941,7 @@ void zygiskd_start(char *restrict argv[]) {
         if (module->companion_fd >= 0 &&
             !check_unix_socket(module->companion_fd, false)) {
           LOGW("ZN companion for module %s disconnected", module->module_id);
-          close(module->companion_fd);
-          module->companion_fd = -1;
+          close_zn_companion(module);
         }
 
         if (module->companion_fd < 0) {
@@ -938,10 +950,8 @@ void zygiskd_start(char *restrict argv[]) {
 
         bool dispatched = module->companion_fd >= 0 &&
                           write_fd(module->companion_fd, client_fd) == 1;
-        if (!dispatched && module->companion_fd >= 0) {
-          close(module->companion_fd);
-          module->companion_fd = -1;
-        }
+        if (!dispatched && module->companion_fd >= 0)
+          close_zn_companion(module);
         pthread_mutex_unlock(&context.zn_mutex);
 
         if (!dispatched) {
