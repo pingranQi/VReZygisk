@@ -333,8 +333,9 @@ static inline bool rz_module_set_state(struct rezygisk_module *m,
                                        enum module_lifecycle_state state) {
   if (!m || !m->call_sync_initialized ||
       pthread_mutex_lock(&m->call_mutex) != 0) return false;
-  bool allowed = !m->call_closing &&
-      state != MODULE_STATE_CLOSING && state != MODULE_STATE_UNLOADED;
+  bool allowed = state == MODULE_STATE_RETAINED ||
+      state == MODULE_STATE_UNLOADED ||
+      (!m->call_closing && state != MODULE_STATE_CLOSING);
   if (allowed) m->lifecycle_state = state;
   pthread_mutex_unlock(&m->call_mutex);
   return allowed;
