@@ -1143,6 +1143,21 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
     source = linker_path.read_text()
     marker = "/* VREZYGISK_NATIVE_GNU_VERSIONED_RELOCATIONS */"
     if marker in source:
+        versioned_lookup = (
+            "_linker_find_symbol_in_linker_scope("
+            "linker, dep->img, sym_name, r->sym_idx)"
+        )
+        if source.count(versioned_lookup) != 4:
+            raise RuntimeError(
+                "patched CSOLoader lost version-aware lookup at one or more "
+                "ordinary/TLS relocation sites"
+            )
+        if source.count("tls_offset += (ElfW(Addr))(uintptr_t)sym.addr;") != 2:
+            raise RuntimeError(
+                "patched CSOLoader TLSDESC/TPREL no longer use provider TLS offsets"
+            )
+        if "elf_resolve_versioned_symbol_info" not in source:
+            raise RuntimeError("patched CSOLoader GNU version resolver call is missing")
         return
 
     source = replace_once(
