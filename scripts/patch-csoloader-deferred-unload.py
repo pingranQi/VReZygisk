@@ -41,7 +41,7 @@ def patch(linker_path: Path) -> None:
         source = replace_once(
             source,
             '#include "linker.h"',
-            '#include "linker.h"\\nstatic bool _linker_has_open_handles(const struct linker *linker);\\nstatic void (*g_deferred_unload_callback)(void *);',
+            '#include "linker.h"\nstatic bool _linker_has_open_handles(const struct linker *linker);\nstatic void (*g_deferred_unload_callback)(void *);',
             "deferred callback declarations before custom hooks",
         )
         source = replace_once(
