@@ -1221,6 +1221,22 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
     if "_linker_find_symbol_in_linker_scope(linker, dep->img, sym_name)" in source:
         raise RuntimeError("not all relocation symbol lookup call sites were updated")
 
+    source = replace_once(
+        source,
+        """    case R_GENERIC_TLS_DTPREL: {
+      ElfW(Sym) *sym_ent = &dynsym[r->sym_idx];""",
+        """    case R_GENERIC_TLS_DTPREL: {
+      int version_status = elf_symbol_version_requirement(dep->img->base,
+                                                           r->sym_idx);
+      if (version_status != 0) {
+        LOGE("GNU-versioned TLS DTPREL relocation is unsupported in %s",
+             dep->img->elf);
+        return false;
+      }
+      ElfW(Sym) *sym_ent = &dynsym[r->sym_idx];""",
+        "fail closed on versioned TLS DTPREL",
+    )
+
     source = source.replace(
         "/* INFO: Internal functions END */",
         marker + "\n\n/* INFO: Internal functions END */",
