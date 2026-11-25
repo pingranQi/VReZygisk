@@ -40,11 +40,14 @@ def patch(linker_path: Path) -> None:
     if MARKER not in source:
         source = replace_once(
             source,
+            '#include "linker.h"',
+            '#include "linker.h"\\nstatic bool _linker_has_open_handles(const struct linker *linker);\\nstatic void (*g_deferred_unload_callback)(void *);',
+            "deferred callback declarations before custom hooks",
+        )
+        source = replace_once(
+            source,
             "/* INFO: Internal functions END */",
-            """static bool _linker_has_open_handles(const struct linker *linker);
-static void (*g_deferred_unload_callback)(void *);
-
-void linker_set_deferred_unload_callback(void (*callback)(void *)) {
+            """void linker_set_deferred_unload_callback(void (*callback)(void *)) {
   if (!_linker_registry_lock()) return;
   g_deferred_unload_callback = callback;
   _linker_registry_unlock();
