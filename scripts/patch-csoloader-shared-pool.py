@@ -29,6 +29,13 @@ def patch(header_path: Path, linker_path: Path) -> None:
             "  size_t handle_refs;\n  struct shared_dep_object *shared_object;\n  bool is_manual_load;",
             "shared dependency reference in loaded_dep",
         )
+        if "void *system_handle;" not in header:
+            header = replace_once(
+                header,
+                "  struct shared_dep_object *shared_object;\n  bool is_manual_load;",
+                "  struct shared_dep_object *shared_object;\n  void *system_handle;\n  bool is_manual_load;",
+                "per-linker Bionic handle for non-pooled dependencies",
+            )
         header = replace_once(
             header,
             "struct loaded_dep {",
@@ -207,9 +214,65 @@ static void _linker_shared_dep_release(struct shared_dep_object *object) {
     dep->map_size = 0;
     return;
   }
+  if (dep->system_handle) {
+    csoloader_elf_destroy(dep->img);
+    dep->img = NULL;
+    (void)dlclose(dep->system_handle);
+    dep->system_handle = NULL;
+    dep->map_size = 0;
+    return;
+  }
 
   void *dep_base = dep->img->base;""",
         "release shared dependency references",
+    )
+
+    source = replace_once(
+        source,
+        """    struct csoloader_elf *check_img = csoloader_elf_create(lib_name, NULL);
+    if (check_img && check_img->base) {
+      current_dep->img = check_img;
+      current_dep->is_manual_load = false;
+    } else {
+      void *base_addr = linker_load_library_manually(lib_full_path, current_dep);""",
+        """    struct shared_dep_object *shared =
+        _linker_shared_dep_acquire(lib_name);
+    if (shared) {
+      current_dep->shared_object = shared;
+      current_dep->img = shared->img;
+      current_dep->is_manual_load = false;
+      LOGD("Using process-shared Bionic dependency object: %s (%p)",
+           lib_name, (void *)current_dep->img->base);
+    } else {
+      /* PT_TLS images remain Bionic-owned but outside the non-TLS shared
+       * metadata pool. Each linker holds its own dlopen reference. */
+      void *system_handle = dlopen(lib_name, RTLD_NOW | RTLD_LOCAL);
+      struct csoloader_elf *check_img = system_handle
+          ? csoloader_elf_create(lib_name, NULL) : NULL;
+      if (check_img && check_img->base) {
+        current_dep->img = check_img;
+        current_dep->system_handle = system_handle;
+        current_dep->is_manual_load = false;
+      } else {
+        if (check_img) csoloader_elf_destroy(check_img);
+        if (system_handle) (void)dlclose(system_handle);
+        void *base_addr = linker_load_library_manually(lib_full_path, current_dep);""",
+        "acquire process-shared Bionic dependency object",
+    )
+    source = replace_once(
+        source,
+        """      current_dep->is_manual_load = true;
+
+      csoloader_elf_destroy(check_img);
+    }
+
+    if (!current_dep->img) {""",
+        """        current_dep->is_manual_load = true;
+      }
+    }
+
+    if (!current_dep->img) {""",
+        "close Bionic/system dependency fallback",
     )
 
     # System-loaded objects must contribute their DT_NEEDED closure to this
