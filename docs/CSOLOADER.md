@@ -47,10 +47,14 @@ There are two separate loading paths and they must not be conflated:
   deferred images are pending. ReZygisk API v6 exposes a tracked
   `pthread_create` callback, backed by `rz_module_pthread_create()`; it holds
   an execution lease until worker cleanup. API v7 adds transferable opaque
-  execution-lease tokens so a module can acquire a lease before submitting
-  work to a third-party thread pool and release it from the worker after the
-  task can no longer execute module code. Raw `clone`/syscalls and work
-  scheduled without a lease remain outside automatic tracking.
+  execution-lease tokens so a module can acquire before submitting work to a
+  third-party thread pool. The worker must call the host-side
+  `run_with_execution_lease()` trampoline, which releases the token only after
+  the module callback returns (also covering `pthread_exit` and cancellation).
+  A task cancelled before it starts uses `cancel_execution_lease()`; if called
+  from module code, the caller must still hold another lease until it returns.
+  Raw `clone`/syscalls and work scheduled without a lease remain outside
+  automatic tracking.
 - The ptracer's bootstrap ELF mapper is a separate implementation. It supports
   standard and Android RELR, Android APS2 packed RELA, GNU versioned undefined
   symbol lookup, and target-process AArch64 IFUNC/IRELATIVE execution. It still
