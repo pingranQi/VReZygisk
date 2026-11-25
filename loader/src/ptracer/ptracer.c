@@ -95,6 +95,13 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
   if (!remote_csoloader_load_and_resolve_entry(pid, &regs, map, local_map, lib_path, &remote_base, &remote_size, &injector_entry)) {
     LOGE("Remote CSOLoader mapping failed");
 
+    /* A failed loader cleanup returns a handle so the caller can retry munmap. */
+    if (remote_base && remote_size &&
+        !remote_csoloader_unmap(pid, &regs, map, remote_base, remote_size)) {
+      LOGE("Remote image remains mapped after cleanup retry: %p (%zu)",
+           (void *)remote_base, remote_size);
+    }
+
     free_maps(local_map);
     free_maps(map);
 
