@@ -14,7 +14,7 @@
 
 #include "logging.h"
 
-#define REZYGISK_API_VERSION 6
+#define REZYGISK_API_VERSION 7
 
 enum rezygiskd_flags : uint32_t {
   PROCESS_GRANTED_ROOT = (1u << 0),
@@ -153,6 +153,13 @@ struct rezygisk_api {
   /* API v6: tracked module-owned worker creation. */
   int (*pthread_create)(struct rezygisk_api *, pthread_t *,
                         const pthread_attr_t *, void *(*)(void *), void *);
+
+  /* API v7: leases for work submitted to arbitrary thread pools/runtimes.
+   * Acquire before publishing/scheduling work; release exactly once when the
+   * task can no longer execute module code. The lease may be released by a
+   * different thread from the one that acquired it. */
+  bool (*acquire_execution_lease)(struct rezygisk_api *);
+  void (*release_execution_lease)(struct rezygisk_api *);
 };
 
 enum module_loader_backend {
