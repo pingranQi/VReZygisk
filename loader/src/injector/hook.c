@@ -1316,6 +1316,16 @@ static uint32_t api_get_flags(void) {
   return (g_ctx->info_flags & ~PRIVATE_MASK);
 }
 
+static int api_pthread_create(struct rezygisk_api *api, pthread_t *thread,
+                              const pthread_attr_t *attr,
+                              void *(*entry)(void *), void *arg) {
+  if (!api || !thread || !entry) return EINVAL;
+  size_t module_id = DECODE_ID(api->impl);
+  if (module_id >= zygisk_module_length || !zygisk_modules) return EINVAL;
+  return rz_module_pthread_create(&zygisk_modules[module_id], thread, attr,
+                                  entry, arg);
+}
+
 bool rezygisk_module_register(struct rezygisk_api *api, struct rezygisk_abi const *target_module) {
   if (!g_ctx || !api || !target_module || target_module->api_version > REZYGISK_API_VERSION) return false;
 
@@ -1344,6 +1354,8 @@ bool rezygisk_module_register(struct rezygisk_api *api, struct rezygisk_abi cons
     api->get_module_dir = api_get_module_dir;
     api->get_flags = api_get_flags;
   }
+  if (target_module->api_version >= 6)
+    api->pthread_create = api_pthread_create;
 
   return true;
 }
