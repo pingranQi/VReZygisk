@@ -29,10 +29,14 @@ jobs:
           fi
           test -f loader/src/external/csoloader/include/csoloader.h
 
-      - name: Verify CSOLoader hardening patch
+      - name: Verify CSOLoader hardening patch idempotence
         run: |
-          python3 scripts/patch-csoloader.py loader/src/external/csoloader/src/linker.c
-          python3 scripts/patch-csoloader.py loader/src/external/csoloader/src/linker.c
+          for pass in 1 2; do
+            python3 scripts/patch-csoloader.py loader/src/external/csoloader/src/linker.c
+            python3 scripts/patch-csoloader-shared-pool.py loader/src/external/csoloader/src/linker.c
+            python3 scripts/patch-csoloader-manual-pool.py loader/src/external/csoloader/src/linker.c
+            python3 scripts/patch-csoloader-deferred-unload.py loader/src/external/csoloader/src/linker.c
+          done
 
       - name: Setup NDK_PATH
         run: echo "NDK_PATH=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
