@@ -77,11 +77,12 @@ VReZygisk has two independent loading paths:
 ## Remaining correctness gates
 
 1. **Global symbol scope**: implement only with explicit namespace and visibility semantics; do not resolve from arbitrary resident mappings as a shortcut.
-2. **Cross-linker shared dependency ownership**: Bionic-loadable non-`PT_TLS`
-   dependencies are pooled process-wide. Manual-mapped fallback dependencies
-   are still private to one CSOLoader instance; sharing those requires moving
-   their TLS module state, relocation ownership, unwind registration, and
-   mapping lifetime into a common object record.
+2. **Cross-linker shared dependency ownership**: no CSOLoader dependency
+   mappings are currently pooled across independent linker instances. A real
+   pool must move mapping ownership, relocation/symbol-scope identity, TLS
+   module state, constructor/destructor state, unwind registration, and final
+   unmap into a shared object record. Sharing by SONAME alone is incorrect
+   because a dependency's relocations may bind to different requester scopes.
 3. **GNU versioning edge cases**: ordinary and CSOLoader-managed TLS relocations are wired to native version lookup. Weak-version corner cases, nonstandard symbol namespaces, and full Bionic lookup parity remain unsupported or unverified. TLS relocation behavior still requires Android device validation across the supported API range.
 4. **Remote resolver ABI**: IFUNC/IRELATIVE execution needs device validation for target auxv/HWCAP, API-specific resolver calling convention, stack alignment, signal-stop verification, resolver reentrancy, and abnormal termination cleanup.
 5. **Relocation coverage**: Android packed REL and TLS relocation families remain unsupported in the ptracer; unsupported relocation types fail closed.
