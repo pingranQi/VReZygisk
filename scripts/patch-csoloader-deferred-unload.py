@@ -68,7 +68,7 @@ void linker_set_deferred_unload_callback(void (*callback)(void *)) {
   struct csoloader_elf *img = _linker_image_from_handle(linker, handle);
   if (img) {
     bool released = _linker_adjust_handle_ref(linker, img, false);
-    struct linker *notify_linkers[MAX_ACTIVE_LINKERS];
+    void *notify_owners[MAX_ACTIVE_LINKERS];
     size_t notify_count = 0;
     void (*callback)(void *) = g_deferred_unload_callback;
     if (released && callback) {
@@ -77,12 +77,12 @@ void linker_set_deferred_unload_callback(void (*callback)(void *)) {
         if (candidate && candidate->is_closing &&
             !_linker_has_open_handles(candidate) &&
             candidate->owner_context && notify_count < MAX_ACTIVE_LINKERS)
-          notify_linkers[notify_count++] = candidate;
+          notify_owners[notify_count++] = candidate->owner_context;
       }
     }
     _linker_registry_unlock();
     for (size_t i = 0; i < notify_count; ++i)
-      callback(notify_linkers[i]->owner_context);
+      callback(notify_owners[i]);
     return released ? 0 : -1;
   }
   _linker_registry_unlock();
