@@ -1561,7 +1561,8 @@ static size_t _linker_bump_tls_generation(void) {
     path.write_text(source)
     patch_csoloader_lifecycle(path)
     patch_csoloader_linker_lifetime(path)
-    print(f"Applied VReZygisk linker/TLS hardening to {path}")
+    patch_csoloader_gnu_versions(path)
+    print(f"Applied VReZygisk linker/TLS/GNU-version hardening to {path}")
     return 0
 
 
