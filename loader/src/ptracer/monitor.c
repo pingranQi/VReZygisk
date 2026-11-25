@@ -771,7 +771,9 @@ void sigchld_listener_callback() {
           char program[PATH_MAX];
           if (get_program(pid, program, sizeof(program)) == -1) {
             LOGW("failed to get program %d", pid);
-
+            process_tracker_remove(pid);
+            if (WIFSTOPPED(sigchld_status) && ptrace(PTRACE_DETACH, pid, 0, 0) == -1)
+              PLOGE("detach process after failed executable lookup");
             continue;
           }
 
