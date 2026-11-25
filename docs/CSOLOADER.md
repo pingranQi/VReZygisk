@@ -42,12 +42,15 @@ There are two separate loading paths and they must not be conflated:
   at-fork handlers in the same lock order. Module callbacks use execution
   leases; the lease gate is closed and active callbacks drained before unload.
   A detached reaper waits for tracked module execution leases across the
-  process to drain, retries teardown, releases shared dependency references,
+  process to drain, retries teardown, releases that Linker's dependency graph,
   and deinitializes CSOLoader when safe. The Zygisk runtime stays resident while
   deferred images are pending. ReZygisk API v6 exposes a tracked
   `pthread_create` callback, backed by `rz_module_pthread_create()`; it holds
-  an execution lease until worker cleanup. Direct `pthread_create`, `clone`,
-  raw syscalls, and third-party thread pools remain outside automatic tracking.
+  an execution lease until worker cleanup. API v7 adds transferable opaque
+  execution-lease tokens so a module can acquire a lease before submitting
+  work to a third-party thread pool and release it from the worker after the
+  task can no longer execute module code. Raw `clone`/syscalls and work
+  scheduled without a lease remain outside automatic tracking.
 - The ptracer's bootstrap ELF mapper is a separate implementation. It supports
   standard and Android RELR, Android APS2 packed RELA, GNU versioned undefined
   symbol lookup, and target-process AArch64 IFUNC/IRELATIVE execution. It still
