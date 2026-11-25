@@ -14,11 +14,11 @@ build; builds must not fetch a moving upstream branch.
 There are two separate loading paths and they must not be conflated:
 
 - Modules loaded inside the injected `libzygisk.so` process use a bounded
-  ELF feature probe before CSOLoader. Main images with `PT_TLS` or GNU
-  symbol-version tags are routed directly to Bionic. The patched CSOLoader
-  also detects GNU version tags in manually loaded dependencies and fails
-  closed so the injector can retry the complete dependency closure with
-  Bionic. CSOLoader's pinned implementation already processes Android packed
+  ELF feature probe before CSOLoader. Images with `PT_TLS` are routed directly
+  to Bionic. Non-TLS GNU symbol-versioned images use the patched CSOLoader
+  resolver, which matches requester version requirements against provider
+  `DT_SONAME` and `DT_VERDEF` metadata. Versioned TLS relocations fail closed.
+  CSOLoader's pinned implementation already processes Android packed
   relocations, RELR, IFUNC and IRELATIVE; these remain on the custom path when
   the dependency closure is compatible. Other images try CSOLoader first and
   fall back to Bionic only after a clean pre-execution failure. The probe
@@ -117,10 +117,10 @@ The pinned CSOLoader implements emulated TLS, RELR, Android packed relocation,
 IFUNC and IRELATIVE handling. The build applies
 `scripts/patch-csoloader.py` to harden TLS key creation, per-thread registration,
 module-ID reuse generations, alignment and offset validation, TLS registration
-failure propagation, and per-image constructor/destructor state. Its emulated
-TLS is not a substitute for Bionic's native TLS ABI, so VReZygisk routes PT_TLS
-images to Bionic for now. GNU symbol versioning in the in-process CSOLoader is
-likewise delegated to Bionic. The ptracer bootstrap path has a separate
+failure propagation, per-image constructor/destructor state, and native GNU
+versioned symbol resolution for non-TLS relocations. Its emulated TLS is not a
+substitute for Bionic's native TLS ABI, so VReZygisk routes PT_TLS images to
+Bionic for now. Versioned TLS relocations remain unsupported and fail closed. The ptracer bootstrap path has a separate
 version-aware undefined-symbol resolver based on `DT_VERSYM`/`DT_VERNEED`,
 actual provider `DT_SONAME`, and mapped-provider version metadata. It is not a
 complete replacement for Bionic's global namespace and version lookup rules. A failed custom load is allowed to fall back to Bionic only when cleanup
