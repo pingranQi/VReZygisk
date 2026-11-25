@@ -28,15 +28,28 @@ VReZygisk has two independent loading paths:
 - Missing direct dependencies, unreadable dependency metadata, invalid dynamic tables, and missing non-alias transitive dependencies fail closed.
 - CSOLoader uses actual `DT_SONAME` for in-linker de-duplication, dynamically grows its dependency array up to a bounded maximum, skips the Bionic-internal `ld-android.so` alias, and fails on unresolved required `DT_NEEDED` entries.
 - The in-process symbol scope searches the requester/main image and then the ordered dependency list. This is a dependency-local scope, not a complete Bionic global namespace implementation. It does not model arbitrary `RTLD_GLOBAL` objects, all namespace isolation rules, or every symbolic lookup corner case.
-- There is currently **no process-wide dependency-object pool for CSOLoader
-  dependency mappings**. Each independent CSOLoader instance builds and owns its
-  own manual dependency graph; mapping, relocation state, emulated TLS module,
-  unwind registration, constructor state, and final unmap are per-linker.
-  This applies to dependencies with and without `PT_TLS`.
+- A process-wide dependency-object registry now has two ownership paths:
+  Bionic-backed non-`PT_TLS` dependencies are shared by SONAME; manually mapped
+  dependencies are shared only when the complete ordered dependency-scope
+  fingerprint matches. Manual adoption/publication is all-or-none for the
+  manual subset, so a shared relocated image cannot point at a private provider
+  mapping.
+- Manual pooling is deliberately disabled when any dependency relocation binds
+  to the main image, because that embeds a main-image address that can differ
+  between Linker instances. The scope fingerprint includes the main image file
+  identity, ordered dependency identities, Bionic provider mapping addresses,
+  and the requester index. If the scope cannot be proven identical, the
+  dependency remains private to its Linker.
+- A shared manual record owns the mapping, relocation result, emulated TLS
+  module registration and TLSDESC index bookkeeping, constructor/destructor
+  state, unwind/backtrace registration, and final unmap. The last reference
+  performs finalization and teardown. Manually mapped `PT_TLS` dependencies
+  can therefore be shared under the same scope constraints. Bionic-owned
+  `PT_TLS` dependencies retain per-Linker Bionic handles and are not imported
+  into CSOLoader's emulated TLS module-ID space.
 - When a module's *main image* is routed to Bionic, Bionic owns that image and
-  its dependency closure under the selected linker namespace. This is ordinary
-  Bionic loader behavior, not a VReZygisk cross-Linker pool. It does not share
-  dependencies with independent CSOLoader graphs.
+  its dependency closure under the selected linker namespace. This remains
+  ordinary Bionic loader behavior, distinct from the CSOLoader object pool.
 
 ### Relocations and remote resolvers
 
@@ -69,23 +82,25 @@ VReZygisk has two independent loading paths:
   Direct `pthread_create`, `clone`, raw syscalls, and third-party runtimes are
   not transparently intercepted; their tasks are safe only when explicitly
   bracketed by a lease or when the image remains resident.
-- Dependency ownership/reference counting is per CSOLoader instance for its dependency graph. There is no process-wide shared dependency reference-count registry across independent CSOLoader instances.
+- Dependency graph nodes remain Linker-local, but their image ownership can
+  reference a process-wide shared object. The shared registry owns cross-Linker
+  reference counts; Linker-local scopes and handle accounting remain separate.
 
 ### TLS policy
 
 - The pinned CSOLoader contains pthread-key based emulated TLS. The build-time patch checks TLS key creation and thread registration, validates allocation alignment and offsets, and tracks per-thread module generations to prevent stale TLS block reuse after module-ID recycling.
-- Emulated TLS is not claimed to be equivalent to Bionic's native static-TLS ABI. In-process images with `PT_TLS` are routed to Bionic.
+- Emulated TLS is not claimed to be equivalent to Bionic's native static-TLS ABI. Main images with `PT_TLS` are routed to Bionic; manually mapped fallback dependencies may use CSOLoader emulated TLS and are shareable only under an identical dependency-scope fingerprint.
 - The ptracer bootstrap mapper rejects `PT_TLS` and TLS symbols/relocations.
 
 ## Remaining correctness gates
 
 1. **Global symbol scope**: implement only with explicit namespace and visibility semantics; do not resolve from arbitrary resident mappings as a shortcut.
-2. **Cross-linker shared dependency ownership**: no CSOLoader dependency
-   mappings are currently pooled across independent linker instances. A real
-   pool must move mapping ownership, relocation/symbol-scope identity, TLS
-   module state, constructor/destructor state, unwind registration, and final
-   unmap into a shared object record. Sharing by SONAME alone is incorrect
-   because a dependency's relocations may bind to different requester scopes.
+2. **Cross-linker scope compatibility**: the shared pool uses exact ordered
+   scope fingerprints and rejects dependencies that bind to the main image.
+   Validate the fingerprint against symbol-versioned lookups, IFUNC, TLS
+   descriptors, Bionic namespace behavior, and unusual interposition patterns
+   on devices. Sharing remains intentionally conservative when file identity
+   or provider mapping identity cannot be established.
 3. **GNU versioning edge cases**: ordinary and CSOLoader-managed TLS relocations are wired to native version lookup. Weak-version corner cases, nonstandard symbol namespaces, and full Bionic lookup parity remain unsupported or unverified. TLS relocation behavior still requires Android device validation across the supported API range.
 4. **Remote resolver ABI**: IFUNC/IRELATIVE execution needs device validation for target auxv/HWCAP, API-specific resolver calling convention, stack alignment, signal-stop verification, resolver reentrancy, and abnormal termination cleanup.
 5. **Relocation coverage**: Android packed REL and TLS relocation families remain unsupported in the ptracer; unsupported relocation types fail closed.
