@@ -50,6 +50,7 @@ struct shared_dep_object {
   void *bionic_handle;
   struct csoloader_elf *img;
   size_t refs;
+  size_t handle_refs;
   struct shared_dep_object *next;
 };
 
@@ -168,6 +169,26 @@ static void _linker_shared_dep_release(struct shared_dep_object *object) {
         "insert process shared dependency pool",
     )
 
+    source = replace_once(
+        source,
+        """          refs = &linker->dependencies[i].handle_refs;""",
+        """          refs = linker->dependencies[i].shared_object
+              ? &linker->dependencies[i].shared_object->handle_refs
+              : &linker->dependencies[i].handle_refs;""",
+        "global shared-object handle references",
+    )
+
+    source = replace_once(
+        source,
+        """  for (int i = 0; i < linker->dep_count; ++i)
+    if (linker->dependencies[i].handle_refs != 0) return true;""",
+        """  for (int i = 0; i < linker->dep_count; ++i) {
+    if (linker->dependencies[i].handle_refs != 0) return true;
+    if (linker->dependencies[i].shared_object &&
+        linker->dependencies[i].shared_object->handle_refs != 0) return true;
+  }""",
+        "check process-wide shared-object handles before teardown",
+    )
     source = replace_once(
         source,
         """static void _linker_release_dependency(struct linker *linker, int index, bool unload) {
