@@ -1368,9 +1368,10 @@ static void api_release_execution_lease_token(void *opaque_lease) {
 static void *api_run_with_execution_lease(struct rezygisk_api *api,
                                           void *opaque_lease,
                                           void *(*entry)(void *), void *arg) {
-  (void)api;
+  struct rezygisk_module *module = api_get_module(api);
   struct rz_execution_lease *lease = opaque_lease;
-  if (!lease || lease->magic != RZ_EXECUTION_LEASE_MAGIC || !entry)
+  if (!module || !lease || lease->magic != RZ_EXECUTION_LEASE_MAGIC ||
+      lease->module != module || !entry)
     return NULL;
 
   void *result = NULL;
@@ -1382,8 +1383,11 @@ static void *api_run_with_execution_lease(struct rezygisk_api *api,
 
 static void api_cancel_execution_lease(struct rezygisk_api *api,
                                        void *opaque_lease) {
-  (void)api;
-  api_release_execution_lease_token(opaque_lease);
+  struct rezygisk_module *module = api_get_module(api);
+  struct rz_execution_lease *lease = opaque_lease;
+  if (!module || !lease || lease->magic != RZ_EXECUTION_LEASE_MAGIC ||
+      lease->module != module) return;
+  api_release_execution_lease_token(lease);
 }
 
 bool rezygisk_module_register(struct rezygisk_api *api, struct rezygisk_abi const *target_module) {
