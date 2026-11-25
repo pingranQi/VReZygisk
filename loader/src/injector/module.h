@@ -2,6 +2,8 @@
 #define MODULE_H
 
 #include <string.h>
+#include <stdlib.h>
+#include <errno.h>
 #include <pthread.h>
 
 #include <sys/types.h>
@@ -227,6 +229,67 @@ static inline void rz_module_call_leave(struct rezygisk_module *m) {
     pthread_cond_broadcast(&m->call_cond);
   pthread_mutex_unlock(&m->call_mutex);
 }
+
+/* VREZYGISK_TRACKED_MODULE_THREADS
+ * Modules that create persistent workers must use this wrapper. The lease is
+ * acquired before pthread_create and released by a cleanup handler, including
+ * when the worker calls pthread_exit or is cancelled.
+ */
+struct rz_module_thread_start {
+  struct rezygisk_module *module;
+  void *(*entry)(void *);
+  void *arg;
+};
+
+static inline void rz_module_thread_release(void *opaque) {
+  struct rz_module_thread_start *start =
+      (struct rz_module_thread_start *)opaque;
+  if (!start) return;
+  rz_module_call_leave(start->module);
+  free(start);
+}
+
+static inline void *rz_module_thread_trampoline(void *opaque) {
+  struct rz_module_thread_start *start =
+      (struct rz_module_thread_start *)opaque;
+  void *(*entry)(void *) = start->entry;
+  void *arg = start->arg;
+
+  pthread_cleanup_push(rz_module_thread_release, start);
+  void *result = entry(arg);
+  pthread_cleanup_pop(1);
+  return result;
+}
+
+/*
+ * Create a module-owned worker with an execution lease. Unload closes the
+ * lease gate and waits for all workers created through this API to finish.
+ * Direct pthread_create/clone/syscall use is not intercepted.
+ */
+static inline int rz_module_pthread_create(
+    struct rezygisk_module *m, pthread_t *thread,
+    const pthread_attr_t *attr, void *(*entry)(void *), void *arg) {
+  if (!m || !thread || !entry || !rz_module_call_enter(m)) return EBUSY;
+
+  struct rz_module_thread_start *start =
+      (struct rz_module_thread_start *)calloc(1, sizeof(*start));
+  if (!start) {
+    rz_module_call_leave(m);
+    return ENOMEM;
+  }
+
+  start->module = m;
+  start->entry = entry;
+  start->arg = arg;
+
+  int error = pthread_create(thread, attr, rz_module_thread_trampoline, start);
+  if (error != 0) {
+    free(start);
+    rz_module_call_leave(m);
+  }
+  return error;
+}
+/* VREZYGISK_TRACKED_MODULE_THREADS */
 
 static inline bool rz_module_sync_close_and_wait(struct rezygisk_module *m) {
   if (!m || !m->call_sync_initialized) return false;
