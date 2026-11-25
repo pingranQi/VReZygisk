@@ -1201,7 +1201,7 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
         ? elf_resolve_versioned_symbol_info(linker->img->base, requester->base,
                                             sym_idx, sym_name, &symbol_type)
         : elf_find_symbol_info(linker->img->base, sym_name, &symbol_type);
-    if (requester_is_tls && symbol_type != STT_TLS) symbol_address = 0;
+    if (requester_is_tls != (symbol_type == STT_TLS)) symbol_address = 0;
     if (symbol_address && symbol_type == STT_GNU_IFUNC)
       symbol_address = handle_indirect_symbol(symbol_address);
     void *addr = (void *)symbol_address;
@@ -1216,7 +1216,7 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
         ? elf_resolve_versioned_symbol_info(candidate->img->base, requester->base,
                                             sym_idx, sym_name, &symbol_type)
         : elf_find_symbol_info(candidate->img->base, sym_name, &symbol_type);
-    if (requester_is_tls && symbol_type != STT_TLS) symbol_address = 0;
+    if (requester_is_tls != (symbol_type == STT_TLS)) symbol_address = 0;
     if (symbol_address && symbol_type == STT_GNU_IFUNC)
       symbol_address = handle_indirect_symbol(symbol_address);
     void *addr = (void *)symbol_address;
