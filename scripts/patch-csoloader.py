@@ -1233,6 +1233,27 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
 
     source = replace_once(
         source,
+        """      *target_addr = tls_img && tls_img->tls_segment ? tls_img->tls_mod_id : 0;""",
+        """      if (tls_img && tls_img->tls_segment && tls_img->tls_mod_id == 0) {
+        LOGE("TLS DTPMOD references an image not registered with CSOLoader: %s",
+             tls_img->elf);
+        return false;
+      }
+      *target_addr = tls_img && tls_img->tls_segment ? tls_img->tls_mod_id : 0;""",
+        "reject foreign TLS module IDs in DTPMOD",
+    )
+
+    source = source.replace(
+        "        tls_offset += sym_ent->st_value;",
+        "        tls_offset += (ElfW(Addr))(uintptr_t)sym.addr;",
+    )
+    source = source.replace(
+        "if (!tls_img || !tls_img->tls_segment) {",
+        "if (!tls_img || !tls_img->tls_segment || tls_img->tls_mod_id == 0) {",
+    )
+
+    source = replace_once(
+        source,
         """    case R_GENERIC_TLS_DTPREL: {
       ElfW(Sym) *sym_ent = &dynsym[r->sym_idx];
       ElfW(Addr) offset = sym_ent->st_value + r->r_addend;
