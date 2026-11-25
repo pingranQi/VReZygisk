@@ -19,7 +19,7 @@ VReZygisk has two independent loading paths:
 - Versioned lookup distinguishes explicit-version lookup from unversioned/default-version lookup. It filters symbol binding/visibility, checks symbol addresses against load segments, and reports symbol type so IFUNC resolvers are not mistaken for final function addresses.
 - The ptracer resolves requester `DT_VERSYM`/`DT_VERNEED` requirements against the named provider's actual `DT_SONAME`, performs exact version lookup in the local provider mapping, and translates the provider-relative offset to the target mapping. Weak version requirements may fall back to an unversioned/default lookup in the same provider.
 - Versioned provider IFUNC symbols return the resolver address and are executed in the target process. The resolver ABI is selected by Android API level.
-- **The in-process pinned CSOLoader does not implement a complete GNU versioned relocation resolver.** The main image is routed to Bionic when it has GNU version tags; a manually loaded dependency with GNU version tags causes a clean CSOLoader failure so the injector can retry the complete load with Bionic. This is deliberate fail-closed behavior, not native CSOLoader version support.
+- The in-process pinned CSOLoader is patched to use the same bounded ELF64/AArch64 version parser. For non-TLS relocations it reads the requester's `DT_VERSYM`/`DT_VERNEED`, checks the provider `DT_SONAME`, and matches the provider's `DT_VERDEF` version name/hash. Unversioned references use default-version selection; IFUNC results are passed to the existing CSOLoader resolver. Versioned TLS relocations remain fail-closed. Main images with `PT_TLS` still route to Bionic.
 
 ### Dependency graph and symbol scope
 
@@ -59,7 +59,7 @@ VReZygisk has two independent loading paths:
 
 1. **Global symbol scope**: implement only with explicit namespace and visibility semantics; do not resolve from arbitrary resident mappings as a shortcut.
 2. **Cross-linker shared dependency ownership**: separate CSOLoader instances can still map duplicate copies of the same private dependency. A process-wide shared image registry and deferred release protocol remain future work.
-3. **Full custom-linker GNU versioning**: the ptracer supports version-aware lookup, but in-process CSOLoader intentionally delegates versioned images/dependency closures to Bionic.
+3. **GNU versioning edge cases**: ordinary versioned relocations are now resolved natively by CSOLoader, but versioned TLS relocations, weak-version corner cases, nonstandard symbol namespaces, and full Bionic lookup parity remain unsupported or unverified.
 4. **Remote resolver ABI**: IFUNC/IRELATIVE execution needs device validation for target auxv/HWCAP, API-specific resolver calling convention, stack alignment, signal-stop verification, resolver reentrancy, and abnormal termination cleanup.
 5. **Relocation coverage**: Android packed REL and TLS relocation families remain unsupported in the ptracer; unsupported relocation types fail closed.
 6. **Constructor failure semantics**: ELF constructors have no standard error return. State tracking prevents duplicate finalization, but cannot roll back arbitrary side effects from a constructor that faults or terminates the process.
