@@ -17,7 +17,12 @@ There are two separate loading paths and they must not be conflated:
   ELF feature probe before CSOLoader. Images with `PT_TLS` are routed directly
   to Bionic. Non-TLS GNU symbol-versioned images use the patched CSOLoader
   resolver, which matches requester version requirements against provider
-  `DT_SONAME` and `DT_VERDEF` metadata. Versioned TLS relocations fail closed.
+  `DT_SONAME` and `DT_VERDEF` metadata. GNU-versioned TLS symbols resolve to
+  provider TLS offsets. CSOLoader-managed TLS images support DTPMOD, DTPREL,
+  TPREL and TLSDESC using the resolved provider image and offset. A provider
+  must have a CSOLoader-managed TLS module ID; Bionic-owned TLS modules do not
+  expose that ID to this custom TLS ABI and are rejected rather than
+  mis-relocated. Main images containing `PT_TLS` continue to use Bionic.
   CSOLoader's pinned implementation already processes Android packed
   relocations, RELR, IFUNC and IRELATIVE; these remain on the custom path when
   the dependency closure is compatible. Other images try CSOLoader first and
