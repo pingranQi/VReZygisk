@@ -212,49 +212,6 @@ static void _linker_shared_dep_release(struct shared_dep_object *object) {
         "release shared dependency references",
     )
 
-    source = replace_once(
-        source,
-        """    struct csoloader_elf *check_img = csoloader_elf_create(lib_name, NULL);
-    if (check_img && check_img->base) {
-      current_dep->img = check_img;
-      current_dep->is_manual_load = false;
-    } else {
-      void *base_addr = linker_load_library_manually(lib_full_path, current_dep);""",
-        """    struct shared_dep_object *shared =
-        _linker_shared_dep_acquire(lib_name);
-    if (shared) {
-      current_dep->shared_object = shared;
-      current_dep->img = shared->img;
-      current_dep->is_manual_load = false;
-      LOGD("Using process-shared Bionic dependency object: %s (%p)",
-           lib_name, (void *)current_dep->img->base);
-    } else {
-      void *base_addr = linker_load_library_manually(lib_full_path, current_dep);
-      if (!base_addr) {
-        LOGE("Failed to manually load library: %s", lib_full_path);
-        carray_destroy(loaded_libs);
-        return false;
-      }
-      current_dep->img = csoloader_elf_create(lib_full_path, base_addr);
-      if (!current_dep->img) {
-        LOGE("Failed to create ELF image for manually loaded library: %s", lib_full_path);
-        if (current_dep->map_size > 0) munmap(base_addr, current_dep->map_size);
-        carray_destroy(loaded_libs);
-        return false;
-      }
-      current_dep->is_manual_load = true;
-    }
-    if (!current_dep->img) {""",
-        """        current_dep->is_manual_load = true;
-
-        if (check_img) csoloader_elf_destroy(check_img);
-      }
-    }
-
-    if (!current_dep->img) {""",
-        "close shared dependency fallback branch",
-    )
-
     # System-loaded objects must contribute their DT_NEEDED closure to this
     # linker's symbol scope as well. Bionic has mapped them, but the custom
     # main image still needs the same dependency search order.
