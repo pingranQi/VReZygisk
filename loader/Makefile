@@ -102,9 +102,7 @@ $(OBJ_DIR)/ptracer/%.o: src/ptracer/%.c
 		$(COMMON_INCLUDES) -fPIE -c $< -o $@
 
 $(RUST_LIB): $(RUST_MANIFEST) src/rust/src/lib.rs
-\t@cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET) --release --target-dir $(RUST_TARGET_DIR)
 
-$(RUST_LIB): $(RUST_MANIFEST) src/rust/src/lib.rs
 	@cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET) --release --target-dir $(RUST_TARGET_DIR)
 
 $(LIBCOMMON): $(COMMON_OBJS)
