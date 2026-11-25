@@ -29,6 +29,16 @@ uintptr_t elf_find_symbol_info(void *image_base, const char *symbol_name,
  * the requester's .dynsym/.gnu.version entry and DT_VERNEED metadata; the
  * provider is searched by the required version name/hash and DT_VERDEF.
  */
+/* Returns 1 for a valid version requirement, 0 for unversioned, -1 malformed. */
+int elf_symbol_version_requirement(void *requester_base,
+                                   size_t requester_symbol_index);
+
+uintptr_t elf_resolve_versioned_symbol_info(void *provider_base,
+                                            void *requester_base,
+                                            size_t requester_symbol_index,
+                                            const char *symbol_name,
+                                            unsigned *out_type);
+
 uintptr_t elf_resolve_versioned_symbol(void *provider_base,
                                        void *requester_base,
                                        size_t requester_symbol_index,
