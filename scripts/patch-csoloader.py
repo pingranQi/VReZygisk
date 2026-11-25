@@ -1166,10 +1166,6 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
         "  bool requester_is_tls = requester && requester->dynsym_start && requester->dynsym &&\n"
         "      sym_idx < requester->dynsym->sh_size / sizeof(ElfW(Sym)) &&\n"
         "      (requester->dynsym_start[sym_idx].st_info & 0x0f) == STT_TLS;\n"
-        "  if (version_status > 0 && requester_is_tls) {\n"
-        "    LOGE(\"Versioned TLS relocation for '%s' is not supported by CSOLoader\", sym_name);\n"
-        "    return (struct linker_symbol_info){ .addr = NULL, .img = NULL, .tls_indices = NULL };\n"
-        "  }\n"
         "  if (version_status < 0) {\n"
         "    LOGE(\"Malformed GNU version requirement for symbol '%s' in %s\", sym_name, requester ? requester->elf : \"<unknown>\");\n"
         "    return (struct linker_symbol_info){ .addr = NULL, .img = NULL, .tls_indices = NULL };\n"
@@ -1178,18 +1174,34 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
         "version-aware linker scope entry",
     )
 
+    source = replace_once(
+        source,
+        """  if (requester) {
+    void *addr = (void *)csoloader_elf_symb_address(requester, sym_name);
+    if (addr) {""",
+        """  if (requester) {
+    void *addr = NULL;
+    if (requester_is_tls && requester->dynsym_start &&
+        sym_idx < requester->dynsym->sh_size / sizeof(ElfW(Sym)) &&
+        requester->dynsym_start[sym_idx].st_shndx != SHN_UNDEF) {
+      addr = (void *)(uintptr_t)requester->dynsym_start[sym_idx].st_value;
+    } else {
+      addr = (void *)csoloader_elf_symb_address(requester, sym_name);
+    }
+    if (addr) {""",
+        "preserve TLS symbol offsets in requester scope",
+    )
+
     old_main = """  if (linker->img != requester) {
     void *addr = (void *)csoloader_elf_symb_address_exported(linker->img, sym_name);
     if (addr) {"""
     new_main = """  if (linker->img != requester) {
     unsigned symbol_type = STT_NOTYPE;
-    uintptr_t symbol_address = requester_is_tls
-        ? (uintptr_t)csoloader_elf_symb_address_exported(linker->img, sym_name)
-        : (version_status > 0
-            ? elf_resolve_versioned_symbol_info(linker->img->base, requester->base,
-                                                sym_idx, sym_name, &symbol_type)
-            : elf_find_symbol_info(linker->img->base, sym_name, &symbol_type));
-    if (requester_is_tls) symbol_type = STT_TLS;
+    uintptr_t symbol_address = version_status > 0
+        ? elf_resolve_versioned_symbol_info(linker->img->base, requester->base,
+                                            sym_idx, sym_name, &symbol_type)
+        : elf_find_symbol_info(linker->img->base, sym_name, &symbol_type);
+    if (requester_is_tls && symbol_type != STT_TLS) symbol_address = 0;
     if (symbol_address && symbol_type == STT_GNU_IFUNC)
       symbol_address = handle_indirect_symbol(symbol_address);
     void *addr = (void *)symbol_address;
@@ -1200,13 +1212,11 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
     old_dep = """    void *addr = (void *)csoloader_elf_symb_address_exported(candidate->img, sym_name);
     if (!addr) continue;"""
     new_dep = """    unsigned symbol_type = STT_NOTYPE;
-    uintptr_t symbol_address = requester_is_tls
-        ? (uintptr_t)csoloader_elf_symb_address_exported(candidate->img, sym_name)
-        : (version_status > 0
-            ? elf_resolve_versioned_symbol_info(candidate->img->base, requester->base,
-                                                sym_idx, sym_name, &symbol_type)
-            : elf_find_symbol_info(candidate->img->base, sym_name, &symbol_type));
-    if (requester_is_tls) symbol_type = STT_TLS;
+    uintptr_t symbol_address = version_status > 0
+        ? elf_resolve_versioned_symbol_info(candidate->img->base, requester->base,
+                                            sym_idx, sym_name, &symbol_type)
+        : elf_find_symbol_info(candidate->img->base, sym_name, &symbol_type);
+    if (requester_is_tls && symbol_type != STT_TLS) symbol_address = 0;
     if (symbol_address && symbol_type == STT_GNU_IFUNC)
       symbol_address = handle_indirect_symbol(symbol_address);
     void *addr = (void *)symbol_address;
@@ -1224,17 +1234,36 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
     source = replace_once(
         source,
         """    case R_GENERIC_TLS_DTPREL: {
-      ElfW(Sym) *sym_ent = &dynsym[r->sym_idx];""",
+      ElfW(Sym) *sym_ent = &dynsym[r->sym_idx];
+      ElfW(Addr) offset = sym_ent->st_value + r->r_addend;
+      *target_addr = offset;""",
         """    case R_GENERIC_TLS_DTPREL: {
-      int version_status = elf_symbol_version_requirement(dep->img->base,
-                                                           r->sym_idx);
-      if (version_status != 0) {
-        LOGE("GNU-versioned TLS DTPREL relocation is unsupported in %s",
-             dep->img->elf);
+      ElfW(Sym) *sym_ent = &dynsym[r->sym_idx];
+      struct csoloader_elf *tls_img = dep->img;
+      ElfW(Addr) offset = sym_ent->st_value;
+      if (sym_ent->st_shndx == SHN_UNDEF) {
+        uint8_t bind = ELF_ST_BIND(sym_ent->st_info);
+        const char *tls_name = dynstr + sym_ent->st_name;
+        struct linker_symbol_info sym =
+            _linker_find_symbol_in_linker_scope(linker, dep->img, tls_name, r->sym_idx);
+        if (!sym.img) {
+          if (bind != STB_WEAK) {
+            LOGE("TLS symbol '%s' not found for DTPREL in %s", tls_name, dep->img->elf);
+            return false;
+          }
+          *target_addr = r->r_addend;
+          break;
+        }
+        tls_img = sym.img;
+        offset = (ElfW(Addr))(uintptr_t)sym.addr;
+      }
+      if (!tls_img || !tls_img->tls_segment || tls_img->tls_mod_id == 0) {
+        LOGE("DTPREL references TLS image without a CSOLoader TLS module: %s",
+             tls_img ? tls_img->elf : "<null>");
         return false;
       }
-      ElfW(Sym) *sym_ent = &dynsym[r->sym_idx];""",
-        "fail closed on versioned TLS DTPREL",
+      *target_addr = offset + r->r_addend;""",
+        "resolve versioned and unversioned TLS DTPREL against provider",
     )
 
     source = source.replace(
