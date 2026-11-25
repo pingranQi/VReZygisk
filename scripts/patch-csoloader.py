@@ -1148,7 +1148,7 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
     source = replace_once(
         source,
         '#include "linker.h"',
-        '#include "linker.h"\n#include "elf_version.h"',
+        '#include "linker.h"\n#include "elf_version.h"\n#ifndef STT_GNU_IFUNC\n#define STT_GNU_IFUNC 10\n#endif',
         "include native GNU version resolver",
     )
     source = replace_once(
@@ -1167,11 +1167,7 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
         "    LOGE(\"Malformed GNU version requirement for symbol '%s' in %s\", sym_name, requester ? requester->elf : \"<unknown>\");\n"
         "    return (struct linker_symbol_info){ .addr = NULL, .img = NULL, .tls_indices = NULL };\n"
         "  }\n"
-        "  if (version_status > 0 && requester && requester->dynsym_start &&\n"
-        "      ELF_ST_TYPE(requester->dynsym_start[sym_idx].st_info) == STT_TLS) {\n"
-        "    LOGE(\"Versioned TLS relocation for '%s' is not supported by CSOLoader\", sym_name);\n"
-        "    return (struct linker_symbol_info){ .addr = NULL, .img = NULL, .tls_indices = NULL };\n"
-        "  }",
+        "",
         "version-aware linker scope entry",
     )
 
