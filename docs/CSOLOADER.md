@@ -62,13 +62,23 @@ There are two separate loading paths and they must not be conflated:
   unsupported architecture relocation types. The resolver ABI is selected by
   runtime Android API level, but target auxv/HWCAP, stack alignment, signal-stop
   handling, reentrancy and abnormal cleanup still require device validation.
-- There is currently no process-wide shared dependency-object pool for
-  CSOLoader dependency mappings. Each independent CSOLoader instance owns its
-  own manually mapped dependency graph, including relocation state, emulated
-  TLS module IDs, constructor/destructor state, unwind registration and final
-  unmap. Bionic manages the dependency closure of a main image routed to
-  Bionic, but that is ordinary Bionic loader behavior and is not a VReZygisk
-  pool shared with independent CSOLoader instances.
+- A process-wide dependency-object registry shares Bionic-backed
+  non-`PT_TLS` dependencies by SONAME and manually mapped dependencies by an
+  exact ordered dependency-scope fingerprint. Manual dependency adoption and
+  publication are all-or-none for the manual subset. The fingerprint includes
+  main-image file identity, ordered dependency identities, Bionic provider
+  mapping addresses, and the requester index. A closure is not pooled if any
+  dependency relocation binds to the main image, because that relocation would
+  embed a Linker-specific address. If identity or scope cannot be proven equal,
+  the manual mappings remain private.
+- A shared manual object owns its mapping, completed relocations, emulated TLS
+  module registration, TLSDESC bookkeeping, constructor/destructor state,
+  unwind/backtrace registration, and final unmap. Its constructors run once
+  when first published; its finalizers and teardown run after the last Linker
+  reference is released. Manually mapped `PT_TLS` dependencies use the same
+  shared emulated-TLS ownership when their scope is compatible. Bionic-owned
+  `PT_TLS` dependencies continue to use per-Linker Bionic handles and cannot
+  supply Bionic TLS module IDs to CSOLoader relocations.
 
 Do not claim complete TLS support for the ptracer mapper. IFUNC/IRELATIVE
 support is implemented using target-process execution, but must be validated
@@ -83,12 +93,16 @@ Initialize the pinned revision:
 git submodule update --init --recursive loader/src/external/csoloader
 ```
 
-Python 3 is required for the build-time patch pipeline. The loader Makefile applies `scripts/patch-csoloader.py` before compiling the
-pinned submodule. The pipeline validates TLS registration/allocation,
+Python 3 is required for the build-time patch pipeline. The loader Makefile applies `scripts/patch-csoloader.py`,
+`scripts/patch-csoloader-shared-pool.py`,
+`scripts/patch-csoloader-manual-pool.py`, and
+`scripts/patch-csoloader-deferred-unload.py` before compiling the pinned
+submodule. The pipeline validates TLS registration/allocation,
 preallocates path bookkeeping before constructors, adds per-image lifecycle
 state, wires GNU-versioned TLS and non-TLS relocations, and defers final teardown
-until custom handles and tracked execution leases have drained. It does not
-currently pool manually mapped dependencies across Linker instances. The patches are
+until custom handles and tracked execution leases have drained. The two shared
+pool patches implement Bionic-backed and scope-compatible manual dependency
+sharing across independent Linker instances. The patches are
 idempotent and target the pinned upstream revision; do not commit the modified
 submodule worktree as a new upstream revision.
 
