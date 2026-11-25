@@ -330,7 +330,7 @@ static bool version_name_for_index(const struct image_view *v,
     const Elf64_Verdef *vd = (const Elf64_Verdef *)cur;
     if (vd->vd_version != VER_DEF_CURRENT || vd->vd_cnt == 0 ||
         vd->vd_cnt > MAX_VERSION_ENTRIES || vd->vd_aux < sizeof(Elf64_Verdef) ||
-        (vd->vd_ndx & VER_NDX_MASK) <= VER_NDX_GLOBAL) return false;
+        (vd->vd_ndx & VER_NDX_MASK) == VER_NDX_LOCAL) return false;
 
     uintptr_t aux_addr;
     if (add_overflow_uintptr(cur, vd->vd_aux, &aux_addr)) return false;
