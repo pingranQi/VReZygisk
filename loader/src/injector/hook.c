@@ -332,6 +332,9 @@ static void csoloader_deferred_unload_notify(void *owner) {
   pthread_mutex_unlock(&g_deferred_unload_mutex);
 }
 
+static bool csoloader_unload_serialized(struct csoloader *lib);
+static void csoloader_deinit_if_safe(void);
+
 static bool csoloader_load_serialized(struct csoloader *lib, const char *path) {
   if (!csoloader_lock()) return false;
   csoloader_set_deferred_unload_callback(csoloader_deferred_unload_notify);
