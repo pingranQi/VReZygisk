@@ -39,9 +39,10 @@ There are two separate loading paths and they must not be conflated:
   A detached reaper waits for tracked module execution leases across the
   process to drain, retries teardown, releases shared dependency references,
   and deinitializes CSOLoader when safe. The Zygisk runtime stays resident while
-  deferred images are pending. Only workers created through
-  `rz_module_pthread_create()` are tracked; direct `pthread_create`, `clone`,
-  raw syscalls, and third-party thread pools are not intercepted.
+  deferred images are pending. ReZygisk API v6 exposes a tracked
+  `pthread_create` callback, backed by `rz_module_pthread_create()`; it holds
+  an execution lease until worker cleanup. Direct `pthread_create`, `clone`,
+  raw syscalls, and third-party thread pools remain outside automatic tracking.
 - The ptracer's bootstrap ELF mapper is a separate implementation. It supports
   standard and Android RELR, Android APS2 packed RELA, GNU versioned undefined
   symbol lookup, and target-process AArch64 IFUNC/IRELATIVE execution. It still
