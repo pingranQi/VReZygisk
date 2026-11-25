@@ -1163,6 +1163,13 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
         "static struct linker_symbol_info _linker_find_symbol_in_linker_scope(struct linker *linker, struct csoloader_elf *requester, const char *sym_name) {",
         "static struct linker_symbol_info _linker_find_symbol_in_linker_scope(struct linker *linker, struct csoloader_elf *requester, const char *sym_name, size_t sym_idx) {\n"
         "  int version_status = requester ? elf_symbol_version_requirement(requester->base, sym_idx) : 0;\n"
+        "  bool requester_is_tls = requester && requester->dynsym_start && requester->dynsym &&\n"
+        "      sym_idx < requester->dynsym->sh_size / sizeof(ElfW(Sym)) &&\n"
+        "      (requester->dynsym_start[sym_idx].st_info & 0x0f) == STT_TLS;\n"
+        "  if (version_status > 0 && requester_is_tls) {\n"
+        "    LOGE(\"Versioned TLS relocation for '%s' is not supported by CSOLoader\", sym_name);\n"
+        "    return (struct linker_symbol_info){ .addr = NULL, .img = NULL, .tls_indices = NULL };\n"
+        "  }\n"
         "  if (version_status < 0) {\n"
         "    LOGE(\"Malformed GNU version requirement for symbol '%s' in %s\", sym_name, requester ? requester->elf : \"<unknown>\");\n"
         "    return (struct linker_symbol_info){ .addr = NULL, .img = NULL, .tls_indices = NULL };\n"
@@ -1176,10 +1183,13 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
     if (addr) {"""
     new_main = """  if (linker->img != requester) {
     unsigned symbol_type = STT_NOTYPE;
-    uintptr_t symbol_address = version_status > 0
-        ? elf_resolve_versioned_symbol_info(linker->img->base, requester->base,
-                                            sym_idx, sym_name, &symbol_type)
-        : elf_find_symbol_info(linker->img->base, sym_name, &symbol_type);
+    uintptr_t symbol_address = requester_is_tls
+        ? (uintptr_t)csoloader_elf_symb_address_exported(linker->img, sym_name)
+        : (version_status > 0
+            ? elf_resolve_versioned_symbol_info(linker->img->base, requester->base,
+                                                sym_idx, sym_name, &symbol_type)
+            : elf_find_symbol_info(linker->img->base, sym_name, &symbol_type));
+    if (requester_is_tls) symbol_type = STT_TLS;
     if (symbol_address && symbol_type == STT_GNU_IFUNC)
       symbol_address = handle_indirect_symbol(symbol_address);
     void *addr = (void *)symbol_address;
@@ -1190,10 +1200,13 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
     old_dep = """    void *addr = (void *)csoloader_elf_symb_address_exported(candidate->img, sym_name);
     if (!addr) continue;"""
     new_dep = """    unsigned symbol_type = STT_NOTYPE;
-    uintptr_t symbol_address = version_status > 0
-        ? elf_resolve_versioned_symbol_info(candidate->img->base, requester->base,
-                                            sym_idx, sym_name, &symbol_type)
-        : elf_find_symbol_info(candidate->img->base, sym_name, &symbol_type);
+    uintptr_t symbol_address = requester_is_tls
+        ? (uintptr_t)csoloader_elf_symb_address_exported(candidate->img, sym_name)
+        : (version_status > 0
+            ? elf_resolve_versioned_symbol_info(candidate->img->base, requester->base,
+                                                sym_idx, sym_name, &symbol_type)
+            : elf_find_symbol_info(candidate->img->base, sym_name, &symbol_type));
+    if (requester_is_tls) symbol_type = STT_TLS;
     if (symbol_address && symbol_type == STT_GNU_IFUNC)
       symbol_address = handle_indirect_symbol(symbol_address);
     void *addr = (void *)symbol_address;
