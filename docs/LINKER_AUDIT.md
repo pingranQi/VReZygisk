@@ -81,7 +81,7 @@ VReZygisk has two independent loading paths:
    are still private to one CSOLoader instance; sharing those requires moving
    their TLS module state, relocation ownership, unwind registration, and
    mapping lifetime into a common object record.
-3. **GNU versioning edge cases**: ordinary versioned relocations are now resolved natively by CSOLoader, but versioned TLS relocations, weak-version corner cases, nonstandard symbol namespaces, and full Bionic lookup parity remain unsupported or unverified.
+3. **GNU versioning edge cases**: ordinary and CSOLoader-managed TLS relocations are wired to native version lookup. Weak-version corner cases, nonstandard symbol namespaces, and full Bionic lookup parity remain unsupported or unverified. TLS relocation behavior still requires Android device validation across the supported API range.
 4. **Remote resolver ABI**: IFUNC/IRELATIVE execution needs device validation for target auxv/HWCAP, API-specific resolver calling convention, stack alignment, signal-stop verification, resolver reentrancy, and abnormal termination cleanup.
 5. **Relocation coverage**: Android packed REL and TLS relocation families remain unsupported in the ptracer; unsupported relocation types fail closed.
 6. **Constructor failure semantics**: ELF constructors have no standard error return. State tracking prevents duplicate finalization, but cannot roll back arbitrary side effects from a constructor that faults or terminates the process.
