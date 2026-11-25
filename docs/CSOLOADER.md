@@ -14,15 +14,15 @@ build; builds must not fetch a moving upstream branch.
 There are two separate loading paths and they must not be conflated:
 
 - Modules loaded inside the injected `libzygisk.so` process use a bounded
-  ELF feature probe before CSOLoader. Images with `PT_TLS` are routed directly
-  to Bionic. Non-TLS GNU symbol-versioned images use the patched CSOLoader
-  resolver, which matches requester version requirements against provider
-  `DT_SONAME` and `DT_VERDEF` metadata. GNU-versioned TLS symbols resolve to
-  provider TLS offsets. CSOLoader-managed TLS images support DTPMOD, DTPREL,
-  TPREL and TLSDESC using the resolved provider image and offset. A provider
-  must have a CSOLoader-managed TLS module ID; Bionic-owned TLS modules do not
-  expose that ID to this custom TLS ABI and are rejected rather than
-  mis-relocated. Main images containing `PT_TLS` continue to use Bionic.
+  ELF feature probe before CSOLoader. A main image containing `PT_TLS` is
+  routed directly to Bionic. The custom CSOLoader dependency graph can still
+  contain manually mapped `PT_TLS` dependencies, which use CSOLoader's
+  emulated TLS registry. GNU symbol-versioned non-TLS and TLS relocations use
+  the patched resolver, matching requester version requirements against
+  provider `DT_SONAME` and `DT_VERDEF` metadata. DTPMOD, DTPREL, TPREL and
+  TLSDESC use the resolved provider image, TLS module ID and TLS offset. A
+  Bionic-owned TLS module cannot be used as a provider by the custom TLS ABI
+  and is rejected rather than mis-relocated.
   CSOLoader's pinned implementation already processes Android packed
   relocations, RELR, IFUNC and IRELATIVE; these remain on the custom path when
   the dependency closure is compatible. Other images try CSOLoader first and
@@ -55,14 +55,13 @@ There are two separate loading paths and they must not be conflated:
   unsupported architecture relocation types. The resolver ABI is selected by
   runtime Android API level, but target auxv/HWCAP, stack alignment, signal-stop
   handling, reentrancy and abnormal cleanup still require device validation.
-- A process-wide shared dependency pool covers dependencies Bionic can
-  load that do not contain `PT_TLS`. It is keyed by SONAME, owns one Bionic
-  `dlopen` reference and one shared `csoloader_elf` metadata wrapper, and is
-  reference-counted across independent CSOLoader instances. Bionic owns mapping,
-  relocations, constructors, unwind registration, and final unload for these
-  objects. `PT_TLS` dependencies use per-linker Bionic handles when available;
-  dependencies Bionic cannot load still use the manual CSOLoader mapper and
-  are not cross-Linker shared.
+- There is currently no process-wide shared dependency-object pool for
+  CSOLoader dependency mappings. Each independent CSOLoader instance owns its
+  own manually mapped dependency graph, including relocation state, emulated
+  TLS module IDs, constructor/destructor state, unwind registration and final
+  unmap. Bionic manages the dependency closure of a main image routed to
+  Bionic, but that is ordinary Bionic loader behavior and is not a VReZygisk
+  pool shared with independent CSOLoader instances.
 
 Do not claim complete TLS support for the ptracer mapper. IFUNC/IRELATIVE
 support is implemented using target-process execution, but must be validated
@@ -77,13 +76,12 @@ Initialize the pinned revision:
 git submodule update --init --recursive loader/src/external/csoloader
 ```
 
-Python 3 is required for the build-time patch pipeline. The loader Makefile
-applies `scripts/patch-csoloader.py`, then the process-shared dependency pool
-and deferred-unload patches before compiling the pinned submodule. The pipeline
-validates TLS registration/allocation, preallocates path bookkeeping before
-constructors, adds per-image lifecycle state, shares Bionic-owned dependency
-objects across Linker instances where supported, and defers final teardown
-until custom handles and tracked execution leases have drained. The patches are
+Python 3 is required for the build-time patch pipeline. The loader Makefile applies `scripts/patch-csoloader.py` before compiling the
+pinned submodule. The pipeline validates TLS registration/allocation,
+preallocates path bookkeeping before constructors, adds per-image lifecycle
+state, wires GNU-versioned TLS and non-TLS relocations, and defers final teardown
+until custom handles and tracked execution leases have drained. It does not
+currently pool manually mapped dependencies across Linker instances. The patches are
 idempotent and target the pinned upstream revision; do not commit the modified
 submodule worktree as a new upstream revision.
 
@@ -135,9 +133,10 @@ IFUNC and IRELATIVE handling. The build applies
 `scripts/patch-csoloader.py` to harden TLS key creation, per-thread registration,
 module-ID reuse generations, alignment and offset validation, TLS registration
 failure propagation, per-image constructor/destructor state, and native GNU
-versioned symbol resolution for non-TLS relocations. Its emulated TLS is not a
-substitute for Bionic's native TLS ABI, so VReZygisk routes PT_TLS images to
-Bionic for now. Versioned TLS relocations remain unsupported and fail closed. The ptracer bootstrap path has a separate
+versioned symbol resolution for non-TLS and CSOLoader-managed TLS relocations.
+Its emulated TLS is not a substitute for Bionic's native static-TLS ABI; main
+images with `PT_TLS` are routed to Bionic, while manually mapped dependencies
+may use the CSOLoader emulated TLS registry. The ptracer bootstrap path has a separate
 version-aware undefined-symbol resolver based on `DT_VERSYM`/`DT_VERNEED`,
 actual provider `DT_SONAME`, and mapped-provider version metadata. It is not a
 complete replacement for Bionic's global namespace and version lookup rules. A failed custom load is allowed to fall back to Bionic only when cleanup
