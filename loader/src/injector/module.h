@@ -255,8 +255,9 @@ static inline void *rz_module_thread_trampoline(void *opaque) {
   void *(*entry)(void *) = start->entry;
   void *arg = start->arg;
 
+  void *result = NULL;
   pthread_cleanup_push(rz_module_thread_release, start);
-  void *result = entry(arg);
+  result = entry(arg);
   pthread_cleanup_pop(1);
   return result;
 }
