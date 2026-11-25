@@ -167,35 +167,8 @@ ssize_t write_string(int fd, const char *str) {
   return write_bytes;
 }
 
-char *read_string(int fd) {
-  size_t str_len = 0;
-  ssize_t read_bytes = read_loop(fd, &str_len, sizeof(size_t));
-  if (read_bytes != (ssize_t)sizeof(size_t)) {
-    LOGE("Failed to read string length: Not all bytes were read (%zd != %zu).\n", read_bytes, sizeof(size_t));
-
-    return NULL;
-  }
-
-  char *buf = malloc(str_len + 1);
-  if (buf == NULL) {
-    PLOGE("allocate memory for string");
-
-    return NULL;
-  }
-
-  read_bytes = read_loop(fd, buf, str_len);
-  if (read_bytes != (ssize_t)str_len) {
-    LOGE("Failed to read string: Promised bytes doesn't exist (%zd != %zu).\n", read_bytes, str_len);
-
-    free(buf);
-
-    return NULL;
-  }
-
-  buf[str_len] = '\0';
-
-  return buf;
-}
+/* Implemented in Rust: bounded allocation + complete cleanup on short reads. */
+extern char *read_string(int fd);
 
 #define write_func(type)                       \
   ssize_t write_## type(int fd, type val) {    \

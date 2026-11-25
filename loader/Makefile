@@ -8,6 +8,11 @@ OBJ_DIR = $(OBJ_ROOT)/$(ARCH)
 
 ZKSU_VERSION ?= $(VER_NAME)-$(VER_CODE)-$(COMMIT_HASH)-$(BUILD_TYPE)
 
+RUST_TARGET = aarch64-linux-android
+RUST_MANIFEST = src/rust/Cargo.toml
+RUST_TARGET_DIR = $(BUILD_DIR)/rust
+RUST_LIB = $(RUST_TARGET_DIR)/$(RUST_TARGET)/release/libvrez_resource.a
+
 ifeq ($(BUILD_TYPE),release)
 	TYPE_CFLAGS = -O3 -ffast-math -flto -Wno-unused -Wno-unused-parameter       \
 				  -fvisibility=hidden -fvisibility-inlines-hidden -fno-unwind-tables \
@@ -96,21 +101,27 @@ $(OBJ_DIR)/ptracer/%.o: src/ptracer/%.c
 	$(CC_ARCH) $(NDK_CFLAGS) $(LOADER_CFLAGS) $(TYPE_CFLAGS) \
 		$(COMMON_INCLUDES) -fPIE -c $< -o $@
 
+$(RUST_LIB): $(RUST_MANIFEST) src/rust/src/lib.rs
+\t@cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET) --release --target-dir $(RUST_TARGET_DIR)
+
+$(RUST_LIB): $(RUST_MANIFEST) src/rust/src/lib.rs
+	@cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET) --release --target-dir $(RUST_TARGET_DIR)
+
 $(LIBCOMMON): $(COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
-$(LIBZYGISK): $(INJECTOR_OBJS) $(LIBCOMMON) $(PLTI_LIB) $(CSOLOADER_LIB)
+$(LIBZYGISK): $(INJECTOR_OBJS) $(LIBCOMMON) $(PLTI_LIB) $(CSOLOADER_LIB) $(RUST_LIB)
 	@mkdir -p $(dir $@)
 	$(CC_ARCH) -fPIC -shared -Wl,-soname,libzygisk.so                            \
 		$(COMMON_LDFLAGS) $(TYPE_LDFLAGS) -Wl,--wrap=free -Wl,--wrap=realloc     \
-		-nostartfiles $(INJECTOR_OBJS) $(LIBCOMMON) $(PLTI_LIB) $(CSOLOADER_LIB) \
+		-nostartfiles $(INJECTOR_OBJS) $(LIBCOMMON) $(PLTI_LIB) $(CSOLOADER_LIB) $(RUST_LIB) \
 		-llog -lm -o $@
 
-$(LIBPTRACE): $(PTRACER_OBJS) $(LIBCOMMON)
+$(LIBPTRACE): $(PTRACER_OBJS) $(LIBCOMMON) $(RUST_LIB)
 	@mkdir -p $(dir $@)
 	$(CC_ARCH) $(COMMON_LDFLAGS) $(TYPE_LDFLAGS) \
-		$(PTRACER_OBJS) $(LIBCOMMON) -llog -lm -o $@
+		$(PTRACER_OBJS) $(LIBCOMMON) $(RUST_LIB) -llog -lm -o $@
 
 $(LIBZYGISK_STRIPPED): $(LIBZYGISK)
 	@mkdir -p $(dir $@)
