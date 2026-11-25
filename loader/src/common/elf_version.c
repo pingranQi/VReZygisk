@@ -678,12 +678,11 @@ uintptr_t elf_resolve_versioned_symbol_info(void *provider_base,
     return 0;
 
   /* DT_VERNEED.vn_file identifies the provider's SONAME, not its pathname. */
-  if (provider.has_soname) {
-    if (provider.soname_offset >= provider.strsz) return 0;
-    const char *soname = provider.strtab + provider.soname_offset;
-    if (!memchr(soname, '\0', provider.strsz - provider.soname_offset) ||
-        strcmp(soname, required_provider) != 0) return 0;
-  }
+  if (!provider.has_soname ||
+      provider.soname_offset >= provider.strsz) return 0;
+  const char *soname = provider.strtab + provider.soname_offset;
+  if (!memchr(soname, '\0', provider.strsz - provider.soname_offset) ||
+      strcmp(soname, required_provider) != 0) return 0;
 
   return elf_find_versioned_symbol_info(provider_base, symbol_name,
                                         required_version, out_type);
