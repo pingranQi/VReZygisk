@@ -2,6 +2,7 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
+#include <inttypes.h>
 
 #include <unistd.h>
 #include <sys/epoll.h>
@@ -513,8 +514,121 @@ int sigchld_signal_fd;
 struct signalfd_siginfo sigchld_fdsi;
 int sigchld_status;
 
-pid_t *sigchld_process;
-size_t sigchld_process_count = 0;
+/*
+ * Process tracking and monitor cost counters share one event-loop-owned state.
+ * No lock is required: SIGCHLD is consumed only by the epoll thread.
+ */
+struct process_tracker_slot {
+  pid_t pid;
+  unsigned char state; /* 0=empty, 1=occupied, 2=tombstone */
+};
+
+static struct process_tracker_slot *process_tracker;
+static size_t process_tracker_capacity;
+static size_t process_tracker_count;
+static size_t process_tracker_tombstones;
+
+struct monitor_metrics {
+  uint64_t sigchld_events;
+  uint64_t tracked_process_lookups;
+  uint64_t tracked_process_probes;
+  uint64_t process_exec_events;
+  uint64_t status_update_requests;
+  uint64_t status_file_writes;
+  size_t peak_tracked_processes;
+};
+
+static struct monitor_metrics monitor_metrics;
+
+static bool process_tracker_rehash(size_t capacity) {
+  struct process_tracker_slot *slots = calloc(capacity, sizeof(*slots));
+  if (slots == NULL) return false;
+
+  for (size_t i = 0; i < process_tracker_capacity; i++) {
+    if (process_tracker[i].state != 1) continue;
+
+    size_t index = ((uint32_t)process_tracker[i].pid * 2654435761u) & (capacity - 1);
+    while (slots[index].state == 1) index = (index + 1) & (capacity - 1);
+    slots[index] = process_tracker[i];
+  }
+
+  free(process_tracker);
+  process_tracker = slots;
+  process_tracker_capacity = capacity;
+  process_tracker_tombstones = 0;
+  return true;
+}
+
+static bool process_tracker_contains(pid_t pid) {
+  monitor_metrics.tracked_process_lookups++;
+  if (pid <= 0 || process_tracker_capacity == 0) return false;
+
+  size_t index = ((uint32_t)pid * 2654435761u) & (process_tracker_capacity - 1);
+  for (size_t probes = 0; probes < process_tracker_capacity; probes++) {
+    monitor_metrics.tracked_process_probes++;
+    const struct process_tracker_slot *slot = &process_tracker[index];
+    if (slot->state == 0) return false;
+    if (slot->state == 1 && slot->pid == pid) return true;
+    index = (index + 1) & (process_tracker_capacity - 1);
+  }
+
+  return false;
+}
+
+static bool process_tracker_add(pid_t pid) {
+  if (pid <= 0) return false;
+  if (process_tracker_capacity == 0 && !process_tracker_rehash(128)) return false;
+
+  if ((process_tracker_count + process_tracker_tombstones + 1) * 10 >= process_tracker_capacity * 7) {
+    size_t capacity = process_tracker_capacity;
+    if ((process_tracker_count + 1) * 10 >= process_tracker_capacity * 7) {
+      if (capacity > SIZE_MAX / 2) return false;
+      capacity *= 2;
+    }
+    if (!process_tracker_rehash(capacity)) return false;
+  }
+
+  size_t index = ((uint32_t)pid * 2654435761u) & (process_tracker_capacity - 1);
+  size_t tombstone = SIZE_MAX;
+  for (size_t probes = 0; probes < process_tracker_capacity; probes++) {
+    struct process_tracker_slot *slot = &process_tracker[index];
+    if (slot->state == 1 && slot->pid == pid) return true;
+    if (slot->state == 2 && tombstone == SIZE_MAX) tombstone = index;
+    if (slot->state == 0) {
+      if (tombstone != SIZE_MAX) {
+        index = tombstone;
+        process_tracker_tombstones--;
+      }
+      process_tracker[index].pid = pid;
+      process_tracker[index].state = 1;
+      process_tracker_count++;
+      if (process_tracker_count > monitor_metrics.peak_tracked_processes)
+        monitor_metrics.peak_tracked_processes = process_tracker_count;
+      return true;
+    }
+    index = (index + 1) & (process_tracker_capacity - 1);
+  }
+
+  return false;
+}
+
+static void process_tracker_remove(pid_t pid) {
+  if (pid <= 0 || process_tracker_capacity == 0) return;
+
+  size_t index = ((uint32_t)pid * 2654435761u) & (process_tracker_capacity - 1);
+  for (size_t probes = 0; probes < process_tracker_capacity; probes++) {
+    struct process_tracker_slot *slot = &process_tracker[index];
+    if (slot->state == 0) return;
+    if (slot->state == 1 && slot->pid == pid) {
+      slot->state = 2;
+      slot->pid = 0;
+      process_tracker_count--;
+      process_tracker_tombstones++;
+      return;
+    }
+    index = (index + 1) & (process_tracker_capacity - 1);
+  }
+}
 
 static bool claim_init_tracer() {
   if (ptrace(PTRACE_SEIZE, 1, 0, PTRACE_O_TRACEFORK) == -1) {
@@ -537,7 +651,10 @@ static bool claim_init_tracer() {
 }
 
 bool sigchld_listener_init() {
-  sigchld_process = NULL;
+  if (!process_tracker_rehash(128)) {
+    PLOGE("allocate process tracker");
+    return false;
+  }
 
   sigset_t mask;
   sigemptyset(&mask);
@@ -583,11 +700,16 @@ void sigchld_listener_callback() {
     }
 
     int pid;
-    while ((pid = waitpid(-1, &sigchld_status, __WALL | WNOHANG)) != 0) {
+    while (1) {
+      pid = waitpid(-1, &sigchld_status, __WALL | WNOHANG);
+      if (pid == 0) break;
       if (pid == -1) {
-        if (tracing_state == STOPPED && errno == ECHILD) break;
+        if (errno == EINTR) continue;
+        if (errno == ECHILD) break;
         PLOGE("waitpid");
+        break;
       }
+      monitor_metrics.sigchld_events++;
 
       if (pid == 1) {
         if (STOPPED_WITH(SIGTRAP, PTRACE_EVENT_FORK)) {
@@ -627,45 +749,25 @@ void sigchld_listener_callback() {
 
       CHECK_DAEMON_EXIT(64)
 
-      pid_t state = 0;
-      for (size_t i = 0; i < sigchld_process_count; i++) {
-        if (sigchld_process[i] != pid) continue;
-
-        state = sigchld_process[i];
-
-        break;
-      }
-
-      if (state == 0) {
+      if (!process_tracker_contains(pid)) {
         LOGV("New process %d attached", pid);
 
-        for (size_t i = 0; i < sigchld_process_count; i++) {
-          if (sigchld_process[i] != 0) continue;
-
-          sigchld_process[i] = pid;
-
-          goto ptrace_process;
-        }
-
-        pid_t *new_sigchld_process = (pid_t *)realloc(sigchld_process, sizeof(pid_t) * (sigchld_process_count + 1));
-        if (new_sigchld_process == NULL) {
-          PLOGE("realloc sigchld_process");
-
+        if (!process_tracker_add(pid)) {
+          PLOGE("track process %d", pid);
+          /* Do not leave a forked child stopped if the tracker cannot grow. */
+          if (ptrace(PTRACE_CONT, pid, 0, 0) == -1) PLOGE("continue untracked process");
           continue;
         }
-        sigchld_process = new_sigchld_process;
 
-        sigchld_process[sigchld_process_count] = pid;
-        sigchld_process_count++;
-
-        ptrace_process:
-
-        ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACEEXEC);
-        ptrace(PTRACE_CONT, pid, 0, 0);
+        if (ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACEEXEC) == -1)
+          PLOGE("set TRACEEXEC for process %d", pid);
+        if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
+          PLOGE("continue process %d", pid);
 
         continue;
       } else {
         if (STOPPED_WITH(SIGTRAP, PTRACE_EVENT_EXEC)) {
+          monitor_metrics.process_exec_events++;
           char program[PATH_MAX];
           if (get_program(pid, program, sizeof(program)) == -1) {
             LOGW("failed to get program %d", pid);
@@ -736,13 +838,7 @@ void sigchld_listener_callback() {
           LOGW("process %d received unknown sigchld_status %s", pid, status_str);
         }
 
-        for (size_t i = 0; i < sigchld_process_count; i++) {
-          if (sigchld_process[i] != pid) continue;
-
-          sigchld_process[i] = 0;
-
-          break;
-        }
+        process_tracker_remove(pid);
 
         if (WIFSTOPPED(sigchld_status)) {
           LOGV("detach process %d", pid);
@@ -758,9 +854,11 @@ void sigchld_listener_stop() {
   if (sigchld_signal_fd >= 0) close(sigchld_signal_fd);
   sigchld_signal_fd = -1;
 
-  if (sigchld_process != NULL) free(sigchld_process);
-  sigchld_process = NULL;
-  sigchld_process_count = 0;
+  free(process_tracker);
+  process_tracker = NULL;
+  process_tracker_capacity = 0;
+  process_tracker_count = 0;
+  process_tracker_tombstones = 0;
 }
 
 static char pre_section[1024];
@@ -787,6 +885,7 @@ static char post_section[1024];
   }
 
 static bool update_status(const char *message) {
+  monitor_metrics.status_update_requests++;
   FILE *prop = fopen("/data/adb/modules/rezygisk/module.prop", "w");
   if (prop == NULL) {
     PLOGE("failed to open prop");
@@ -839,6 +938,7 @@ static bool update_status(const char *message) {
 
   fprintf(prop, "%s[%s] %s", pre_section, status_text, post_section);
   fclose(prop);
+  monitor_metrics.status_file_writes++;
 
   if (environment_information64.root_impl || environment_information32.root_impl) {
     FILE *json = fopen("/data/adb/rezygisk/state.json", "w");
@@ -960,7 +1060,7 @@ void init_monitor() {
 
   if (!claim_init_tracer()) exit(1);
 
-  monitor_events_init();
+  if (!monitor_events_init()) exit(1);
 
   if (!rezygiskd_listener_init()) {
     LOGE("failed to create socket");
@@ -970,7 +1070,11 @@ void init_monitor() {
     exit(1);
   }
 
-  monitor_events_register_event(rezygiskd_listener_callback, monitor_sock_fd, EPOLLIN | EPOLLET);
+  if (!monitor_events_register_event(rezygiskd_listener_callback, monitor_sock_fd, EPOLLIN | EPOLLET)) {
+    rezygiskd_listener_stop();
+    close(monitor_epoll_fd);
+    exit(1);
+  }
 
   if (sigchld_listener_init() == false) {
     LOGE("failed to create signalfd");
@@ -981,7 +1085,12 @@ void init_monitor() {
     exit(1);
   }
 
-  monitor_events_register_event(sigchld_listener_callback, sigchld_signal_fd, EPOLLIN | EPOLLET);
+  if (!monitor_events_register_event(sigchld_listener_callback, sigchld_signal_fd, EPOLLIN | EPOLLET)) {
+    rezygiskd_listener_stop();
+    sigchld_listener_stop();
+    close(monitor_epoll_fd);
+    exit(1);
+  }
 
   monitor_events_loop();
 
@@ -989,6 +1098,18 @@ void init_monitor() {
              either manually call the stops or save to a structure. */
   rezygiskd_listener_stop();
   sigchld_listener_stop();
+
+  LOGI("monitor metrics: sigchld=%" PRIu64 ", lookups=%" PRIu64
+       ", probes=%" PRIu64 ", exec=%" PRIu64
+       ", status_requests=%" PRIu64 ", status_writes=%" PRIu64
+       ", peak_tracked=%zu",
+       monitor_metrics.sigchld_events,
+       monitor_metrics.tracked_process_lookups,
+       monitor_metrics.tracked_process_probes,
+       monitor_metrics.process_exec_events,
+       monitor_metrics.status_update_requests,
+       monitor_metrics.status_file_writes,
+       monitor_metrics.peak_tracked_processes);
 
   if (status64.daemon_info) free(status64.daemon_info);
   if (status64.daemon_error_info) free(status64.daemon_error_info);
