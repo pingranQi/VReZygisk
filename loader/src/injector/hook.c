@@ -220,8 +220,121 @@ static void csoloader_pin(void) {
   csoloader_unlock();
 }
 
+
+#define MAX_DEFERRED_CSO_UNLOADS 128
+static pthread_mutex_t g_deferred_unload_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_deferred_unload_cond = PTHREAD_COND_INITIALIZER;
+static struct csoloader *g_deferred_unloads[MAX_DEFERRED_CSO_UNLOADS];
+static size_t g_deferred_unload_count;
+static pthread_once_t g_deferred_worker_once = PTHREAD_ONCE_INIT;
+static int g_deferred_worker_error;
+
+static struct rezygisk_module *find_module_by_csoloader(struct csoloader *lib) {
+  if (!lib || !zygisk_modules) return NULL;
+  for (size_t i = 0; i < zygisk_module_length; ++i) {
+    if (&zygisk_modules[i].lib == lib) return &zygisk_modules[i];
+  }
+  return NULL;
+}
+
+static bool any_module_execution_active(void) {
+  for (size_t i = 0; i < zygisk_module_length; ++i) {
+    struct rezygisk_module *m = &zygisk_modules[i];
+    if (!m->call_sync_initialized) continue;
+    if (pthread_mutex_lock(&m->call_mutex) != 0) return true;
+    bool active = m->active_calls != 0;
+    pthread_mutex_unlock(&m->call_mutex);
+    if (active) return true;
+  }
+  return false;
+}
+
+static void *deferred_unload_worker(void *unused) {
+  (void)unused;
+  for (;;) {
+    pthread_mutex_lock(&g_deferred_unload_mutex);
+    while (g_deferred_unload_count == 0)
+      pthread_cond_wait(&g_deferred_unload_cond, &g_deferred_unload_mutex);
+    struct csoloader *lib = g_deferred_unloads[0];
+    memmove(&g_deferred_unloads[0], &g_deferred_unloads[1],
+            (--g_deferred_unload_count) * sizeof(g_deferred_unloads[0]));
+    pthread_mutex_unlock(&g_deferred_unload_mutex);
+
+    struct rezygisk_module *m = find_module_by_csoloader(lib);
+    if (!m) continue;
+
+    /* The notification can race the caller marking the image RETAINED.
+     * Wait until the first unload attempt has returned and all tracked module
+     * code in the process has left its execution lease. */
+    bool ready = false;
+    while (!ready) {
+      if (!m->call_sync_initialized) break;
+      if (pthread_mutex_lock(&m->call_mutex) != 0) break;
+      ready = m->call_closing &&
+              m->lifecycle_state == MODULE_STATE_RETAINED &&
+              m->active_calls == 0;
+      pthread_mutex_unlock(&m->call_mutex);
+      if (!ready) usleep(1000);
+    }
+    if (!ready) continue;
+
+    while (any_module_execution_active()) usleep(1000);
+
+    if (!csoloader_unload_serialized(lib)) {
+      LOGW("Deferred CSOLoader unload is still blocked; image remains resident");
+      continue;
+    }
+
+    m->loader_backend = MODULE_LOADER_NONE;
+    rz_module_sync_destroy(m);
+    memset(m, 0, sizeof(*m));
+    LOGI("Deferred CSOLoader image unload completed");
+    csoloader_deinit_if_safe();
+  }
+  return NULL;
+}
+
+static void deferred_unload_worker_start(void) {
+  pthread_t thread;
+  g_deferred_worker_error =
+      pthread_create(&thread, NULL, deferred_unload_worker, NULL);
+  if (g_deferred_worker_error == 0) {
+    g_deferred_worker_error = pthread_detach(thread);
+  }
+}
+
+static void csoloader_deferred_unload_notify(void *owner) {
+  struct csoloader *lib = (struct csoloader *)owner;
+  if (!lib) return;
+  int once_error = pthread_once(&g_deferred_worker_once,
+                                deferred_unload_worker_start);
+  if (once_error != 0 || g_deferred_worker_error != 0) {
+    LOGE("Unable to start deferred unload worker: once=%d create=%d",
+         once_error, g_deferred_worker_error);
+    return;
+  }
+
+  pthread_mutex_lock(&g_deferred_unload_mutex);
+  for (size_t i = 0; i < g_deferred_unload_count; ++i) {
+    if (g_deferred_unloads[i] == lib) {
+      pthread_cond_signal(&g_deferred_unload_cond);
+      pthread_mutex_unlock(&g_deferred_unload_mutex);
+      return;
+    }
+  }
+  if (g_deferred_unload_count == MAX_DEFERRED_CSO_UNLOADS) {
+    LOGE("Deferred unload queue is full; retaining image %p", (void *)lib);
+    pthread_mutex_unlock(&g_deferred_unload_mutex);
+    return;
+  }
+  g_deferred_unloads[g_deferred_unload_count++] = lib;
+  pthread_cond_signal(&g_deferred_unload_cond);
+  pthread_mutex_unlock(&g_deferred_unload_mutex);
+}
+
 static bool csoloader_load_serialized(struct csoloader *lib, const char *path) {
   if (!csoloader_lock()) return false;
+  csoloader_set_deferred_unload_callback(csoloader_deferred_unload_notify);
 
   /* A failed load can still have initialized process-global TLS/linker state.
    * Mark the runtime initialized before entering CSOLoader so that partial
@@ -1544,12 +1657,13 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
       }
 
       if (!csoloader_unload_serialized(&m->lib)) {
-        LOGE("Failed to unload CSOLoader module [%s]",
+        LOGI("Deferring CSOLoader unload for [%s] until its final custom handle closes",
              m->lib.lib_path ? m->lib.lib_path : "(unknown)");
-        csoloader_pin();
         all_cso_modules_unloaded = false;
         should_unmap_zygisk = false;
-        rz_module_sync_destroy(m);
+        (void)rz_module_set_state(m, MODULE_STATE_RETAINED);
+        /* Keep the closed lease synchronization alive until the reaper
+         * completes teardown. The final dlclose queues the image here. */
         continue;
       }
     } else if (m->loader_backend == MODULE_LOADER_SYSTEM) {
@@ -1837,10 +1951,17 @@ static void rz_cleanup(struct zygisk_context *ctx) {
     plt_hook_list_count = 0;
   }
 
-  /* INFO: Strip out all API function pointers */
+  /* Retained CSOLoader images may still have outstanding custom handles.
+   * Their closed lease state and owner records must survive until the deferred
+   * unload worker observes the final dlclose. */
   for (size_t i = 0; i < zygisk_module_length; i++) {
-    rz_module_sync_destroy(&zygisk_modules[i]);
-    memset(&zygisk_modules[i], 0, sizeof(zygisk_modules[i]));
+    struct rezygisk_module *m = &zygisk_modules[i];
+    if (m->lifecycle_state == MODULE_STATE_RETAINED) {
+      should_unmap_zygisk = false;
+      continue;
+    }
+    rz_module_sync_destroy(m);
+    memset(m, 0, sizeof(*m));
   }
 
   enable_unloader = true;
