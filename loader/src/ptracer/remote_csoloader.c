@@ -51,6 +51,16 @@ static bool remote_syscall_failed(long result) {
   return result < 0 && result >= -4095;
 }
 
+/* Close a tracee fd once; close(EINTR) must not be blindly retried. */
+static void remote_close_fd(int pid, struct user_regs_struct *regs,
+                            uintptr_t syscall_gadget, long *remote_fd) {
+  if (!remote_fd || *remote_fd < 0) return;
+  long args[1] = { *remote_fd };
+  long result = remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+  if (result != 0) LOGE("Remote close(%ld) failed: %ld", *remote_fd, result);
+  *remote_fd = -1;
+}
+
 static long remote_mmap_offset_arg(off_t file_offset, size_t page_size) {
   /* INFO: mmap2 needs the offset in page units, unlike mmap */
   #ifdef __LP64__
@@ -1052,7 +1062,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
     LOGE("Failed to allocate memory for zeroed path");
 
     args[0] = remote_fd;
-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+    remote_close_fd(pid, regs, syscall_gadget, &remote_fd);
 
     free(phdr);
     close(fd);
@@ -1066,7 +1076,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
     free(remote_path_zerod);
 
     args[0] = remote_fd;
-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+    remote_close_fd(pid, regs, syscall_gadget, &remote_fd);
 
     free(phdr);
     close(fd);
@@ -1093,7 +1103,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
 
     args[0] = remote_fd;
-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+    remote_close_fd(pid, regs, syscall_gadget, &remote_fd);
 
     free(phdr);
     close(fd);
@@ -1106,7 +1116,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 #define REMOTE_CLEANUP_MAPPING() do {                                      \
   if (remote_fd >= 0) {                                                    \
     args[0] = remote_fd;                                                   \
-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);         \
+    remote_close_fd(pid, regs, syscall_gadget, &remote_fd);         \
     remote_fd = -1;                                                        \
   }                                                                        \
   if (remote_mapping_active) {                                             \
@@ -1347,7 +1357,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
 
   args[0] = remote_fd;
-  remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+  remote_close_fd(pid, regs, syscall_gadget, &remote_fd);
   remote_fd = -1;
 
   struct elf_dyn_info dinfo;
