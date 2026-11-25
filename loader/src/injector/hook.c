@@ -1333,14 +1333,38 @@ static struct rezygisk_module *api_get_module(struct rezygisk_api *api) {
   return &zygisk_modules[module_id];
 }
 
-static bool api_acquire_execution_lease(struct rezygisk_api *api) {
+struct rz_execution_lease {
+  uint64_t magic;
+  struct rezygisk_module *module;
+};
+
+#define RZ_EXECUTION_LEASE_MAGIC UINT64_C(0x525A4C4541534537)
+
+static void *api_acquire_execution_lease(struct rezygisk_api *api) {
   struct rezygisk_module *module = api_get_module(api);
-  return module && rz_module_call_enter(module);
+  if (!module || !rz_module_call_enter(module)) return NULL;
+
+  struct rz_execution_lease *lease = calloc(1, sizeof(*lease));
+  if (!lease) {
+    rz_module_call_leave(module);
+    return NULL;
+  }
+  lease->magic = RZ_EXECUTION_LEASE_MAGIC;
+  lease->module = module;
+  return lease;
 }
 
-static void api_release_execution_lease(struct rezygisk_api *api) {
-  struct rezygisk_module *module = api_get_module(api);
-  if (module) rz_module_call_leave(module);
+static void api_release_execution_lease(struct rezygisk_api *api,
+                                        void *opaque_lease) {
+  (void)api;
+  struct rz_execution_lease *lease = opaque_lease;
+  if (!lease || lease->magic != RZ_EXECUTION_LEASE_MAGIC) return;
+
+  struct rezygisk_module *module = lease->module;
+  lease->magic = 0;
+  lease->module = NULL;
+  free(lease);
+  rz_module_call_leave(module);
 }
 
 bool rezygisk_module_register(struct rezygisk_api *api, struct rezygisk_abi const *target_module) {
