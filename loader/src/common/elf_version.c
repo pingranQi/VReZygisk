@@ -387,6 +387,18 @@ static bool symbol_runtime_address(const struct image_view *view,
     return true;
   }
 
+  /* STT_TLS st_value is a byte offset in PT_TLS, not an image address. */
+  if (ELF64_ST_TYPE(sym->st_info) == STT_TLS) {
+    for (size_t i = 0; i < phnum; ++i) {
+      if (phdr[i].p_type != PT_TLS) continue;
+      if (sym->st_value > phdr[i].p_memsz ||
+          sym->st_size > phdr[i].p_memsz - sym->st_value) return false;
+      *out = (uintptr_t)sym->st_value;
+      return true;
+    }
+    return false;
+  }
+
   if (sym->st_shndx >= SHN_LORESERVE) return false;
 
   uintptr_t value = (uintptr_t)sym->st_value;
@@ -447,8 +459,7 @@ uintptr_t elf_find_versioned_symbol_info(void *image_base,
 #ifdef STB_GNU_UNIQUE
          && bind != STB_GNU_UNIQUE
 #endif
-        ) || (visibility != STV_DEFAULT && visibility != STV_PROTECTED) ||
-        type == STT_TLS) continue;
+        ) || (visibility != STV_DEFAULT && visibility != STV_PROTECTED) ) continue;
 
     const char *name = di.strtab + sym->st_name;
     if (!memchr(name, '\0', di.strsz - sym->st_name) ||
@@ -506,8 +517,7 @@ uintptr_t elf_find_symbol_info(void *image_base, const char *symbol_name,
 #ifdef STB_GNU_UNIQUE
          && bind != STB_GNU_UNIQUE
 #endif
-        ) || (visibility != STV_DEFAULT && visibility != STV_PROTECTED) ||
-        type == STT_TLS) continue;
+        ) || (visibility != STV_DEFAULT && visibility != STV_PROTECTED) ) continue;
     if (di.versym) {
       uint16_t version = di.versym[i];
       uint16_t index = version & VER_NDX_MASK;
