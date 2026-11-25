@@ -117,7 +117,7 @@ void monitor_events_loop() {
 
     for (int i = 0; i < nfds; i++) {
       if (events[i].events & (EPOLLERR | EPOLLHUP)) {
-        LOGE("Failed event on fd %d: %s", ((struct epoll_event *)&events[i])->data.fd, strerror(errno));
+        LOGE("Failed epoll event (flags: 0x%x)", events[i].events);
 
         monitor_events_running = false;
 
@@ -898,6 +898,7 @@ static bool update_status(const char *message) {
   if (message) {
     fprintf(prop, "%s[%s] %s", pre_section, message, post_section);
     fclose(prop);
+    monitor_metrics.status_file_writes++;
 
     return true;
   }
@@ -1015,6 +1016,7 @@ static bool update_status(const char *message) {
     fprintf(json, "}\n");
 
     fclose(json);
+    monitor_metrics.status_file_writes++;
   } else {
     if (remove("/data/adb/rezygisk/state.json") == -1) {
       PLOGE("failed to remove state.json");
