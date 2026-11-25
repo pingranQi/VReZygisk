@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdint.h>
 
 #include <sys/types.h>
 
@@ -158,8 +159,8 @@ struct rezygisk_api {
    * Acquire before publishing/scheduling work; release exactly once when the
    * task can no longer execute module code. The lease may be released by a
    * different thread from the one that acquired it. */
-  bool (*acquire_execution_lease)(struct rezygisk_api *);
-  void (*release_execution_lease)(struct rezygisk_api *);
+  void *(*acquire_execution_lease)(struct rezygisk_api *);
+  void (*release_execution_lease)(struct rezygisk_api *, void *lease);
 };
 
 enum module_loader_backend {
