@@ -208,24 +208,21 @@ static void _linker_shared_dep_release(struct shared_dep_object *object) {
       LOGD("Using process-shared Bionic dependency object: %s (%p)",
            lib_name, (void *)current_dep->img->base);
     } else {
-      struct csoloader_elf *check_img = csoloader_elf_create(lib_name, NULL);
-      if (check_img && check_img->base) {
-        current_dep->img = check_img;
-        current_dep->is_manual_load = false;
-      } else {
-        void *base_addr = linker_load_library_manually(lib_full_path, current_dep);""",
-        "acquire process shared dependency before private mapping",
-    )
-
-    # Close the new fallback nesting without changing the pinned upstream
-    # failure paths. The old block ends after csoloader_elf_destroy(check_img).
-    source = replace_once(
-        source,
-        """      current_dep->is_manual_load = true;
-
-      csoloader_elf_destroy(check_img);
+      void *base_addr = linker_load_library_manually(lib_full_path, current_dep);
+      if (!base_addr) {
+        LOGE("Failed to manually load library: %s", lib_full_path);
+        carray_destroy(loaded_libs);
+        return false;
+      }
+      current_dep->img = csoloader_elf_create(lib_full_path, base_addr);
+      if (!current_dep->img) {
+        LOGE("Failed to create ELF image for manually loaded library: %s", lib_full_path);
+        if (current_dep->map_size > 0) munmap(base_addr, current_dep->map_size);
+        carray_destroy(loaded_libs);
+        return false;
+      }
+      current_dep->is_manual_load = true;
     }
-
     if (!current_dep->img) {""",
         """        current_dep->is_manual_load = true;
 
