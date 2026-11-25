@@ -71,6 +71,22 @@ def patch(linker_path: Path) -> None:
   struct csoloader_elf *img = _linker_image_from_handle(linker, handle);
   if (img) {
     bool released = _linker_adjust_handle_ref(linker, img, false);
+    _linker_registry_unlock();
+    return released ? 0 : -1;
+  }
+  _linker_registry_unlock();
+  return original_dlclose ? original_dlclose(handle) : -1;
+}""",
+            """static int custom_dlclose(void *handle) {
+  int (*original_dlclose)(void *) =
+      (int (*)(void *))_linker_get_original_libdl_symbol("dlclose");
+  if (!_linker_registry_lock())
+    return original_dlclose ? original_dlclose(handle) : -1;
+
+  struct linker *linker = _linker_find_owner_by_handle(handle);
+  struct csoloader_elf *img = _linker_image_from_handle(linker, handle);
+  if (img) {
+    bool released = _linker_adjust_handle_ref(linker, img, false);
     void *notify_owners[MAX_ACTIVE_LINKERS];
     size_t notify_count = 0;
     void (*callback)(void *) = g_deferred_unload_callback;
@@ -90,7 +106,8 @@ def patch(linker_path: Path) -> None:
   }
   _linker_registry_unlock();
   return original_dlclose ? original_dlclose(handle) : -1;
-}""",            "notify deferred unload after final handle release",
+}""",
+            "notify deferred unload after final handle release",
         )
 
         old_destroy = """bool linker_destroy(struct linker *linker) {
