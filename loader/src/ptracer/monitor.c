@@ -69,7 +69,7 @@ struct rezygiskd_status status32 = {
   .daemon_error_info = NULL
 };
 
-int monitor_epoll_fd;
+int monitor_epoll_fd = -1;
 bool monitor_events_running = true;
 typedef void (*monitor_event_callback_t)();
 
@@ -134,7 +134,7 @@ void monitor_events_loop() {
   monitor_epoll_fd = -1;
 }
 
-int monitor_sock_fd;
+int monitor_sock_fd = -1;
 
 bool rezygiskd_listener_init() {
   monitor_sock_fd = socket(PF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
@@ -510,7 +510,7 @@ static bool ensure_daemon_created(void) {
     }                                                                    \
   }
 
-int sigchld_signal_fd;
+int sigchld_signal_fd = -1;
 struct signalfd_siginfo sigchld_fdsi;
 int sigchld_status;
 
@@ -1062,14 +1062,15 @@ void init_monitor() {
 
   if (!prepare_environment()) exit(1);
 
-  if (!claim_init_tracer()) exit(1);
-
+  /* Prepare event sources before seizing init, avoiding a stranded PID 1
+     if monitor initialization fails. */
   if (!monitor_events_init()) exit(1);
 
   if (!rezygiskd_listener_init()) {
     LOGE("failed to create socket");
 
     close(monitor_epoll_fd);
+    monitor_epoll_fd = -1;
 
     exit(1);
   }
@@ -1077,6 +1078,7 @@ void init_monitor() {
   if (!monitor_events_register_event(rezygiskd_listener_callback, monitor_sock_fd, EPOLLIN | EPOLLET)) {
     rezygiskd_listener_stop();
     close(monitor_epoll_fd);
+    monitor_epoll_fd = -1;
     exit(1);
   }
 
@@ -1084,7 +1086,9 @@ void init_monitor() {
     LOGE("failed to create signalfd");
 
     rezygiskd_listener_stop();
+    sigchld_listener_stop();
     close(monitor_epoll_fd);
+    monitor_epoll_fd = -1;
 
     exit(1);
   }
@@ -1093,6 +1097,15 @@ void init_monitor() {
     rezygiskd_listener_stop();
     sigchld_listener_stop();
     close(monitor_epoll_fd);
+    monitor_epoll_fd = -1;
+    exit(1);
+  }
+
+  if (!claim_init_tracer()) {
+    rezygiskd_listener_stop();
+    sigchld_listener_stop();
+    close(monitor_epoll_fd);
+    monitor_epoll_fd = -1;
     exit(1);
   }
 
