@@ -1262,7 +1262,7 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
       ElfW(Sym) *sym_ent = &dynsym[r->sym_idx];
       struct csoloader_elf *tls_img = dep->img;
       ElfW(Addr) offset = sym_ent->st_value;
-      if (sym_ent->st_shndx == SHN_UNDEF) {
+      if (r->sym_idx != 0 && sym_ent->st_shndx == SHN_UNDEF) {
         uint8_t bind = ELF_ST_BIND(sym_ent->st_info);
         const char *tls_name = dynstr + sym_ent->st_name;
         struct linker_symbol_info sym =
