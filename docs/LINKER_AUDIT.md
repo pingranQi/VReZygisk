@@ -28,7 +28,14 @@ VReZygisk has two independent loading paths:
 - Missing direct dependencies, unreadable dependency metadata, invalid dynamic tables, and missing non-alias transitive dependencies fail closed.
 - CSOLoader uses actual `DT_SONAME` for in-linker de-duplication, dynamically grows its dependency array up to a bounded maximum, skips the Bionic-internal `ld-android.so` alias, and fails on unresolved required `DT_NEEDED` entries.
 - The in-process symbol scope searches the requester/main image and then the ordered dependency list. This is a dependency-local scope, not a complete Bionic global namespace implementation. It does not model arbitrary `RTLD_GLOBAL` objects, all namespace isolation rules, or every symbolic lookup corner case.
-- Separate CSOLoader instances do not share one process-wide dependency-object pool. Two independent module linkers can still map separate copies of the same private dependency.
+- A process-wide Bionic-backed dependency pool shares non-`PT_TLS` objects
+  across independent CSOLoader instances. One pool record owns the Bionic
+  `dlopen` reference and shared ELF metadata wrapper; each linker holds a
+  reference to that record. Bionic performs mapping, relocation,
+  constructor/destructor, TLS, unwind, and final-reference teardown. `PT_TLS`
+  dependencies use per-linker Bionic handles where possible. Dependencies
+  Bionic cannot load fall back to manual CSOLoader mapping and remain
+  per-linker; those fallback mappings are not pooled.
 
 ### Relocations and remote resolvers
 
@@ -45,8 +52,18 @@ VReZygisk has two independent loading paths:
 - Module callbacks acquire execution leases. The lease gate is closed and active callbacks are drained before either unload or abandon. Callback synchronization state is destroyed only after the gate is closed.
 - Modules can create tracked workers through `rz_module_pthread_create()`. The wrapper acquires a lease before `pthread_create` and releases it through a pthread cleanup handler, including normal return, `pthread_exit`, and cancellation. Closing the module lease gate waits for these workers. Direct `pthread_create`, `clone`, raw syscalls, and threads created by third-party runtimes are not intercepted; modules must use the wrapper for every worker that can execute module code.
 - Per-image constructor/destructor state prevents duplicate initialization/finalization. Main-image and dependency destructors run once in reverse initialization order.
-- Unload runs finalizers, then refuses to unmap if custom `dlopen` references remain. The image is retained/pinned rather than invalidating a live handle. A later handle close decrements the reference count, but automatic deferred unmapping is not implemented; a retained image can therefore remain mapped until process exit.
-- Handle accounting covers custom linker handles, not arbitrary detached threads executing module code without a tracked handle. Modules must synchronize such threads themselves.
+- If custom handles remain at unload request time, the linker enters
+  closing state without running finalizers or unmapping. The final custom
+  `dlclose` scans all closing linkers, including independent linkers sharing
+  the same dependency, and queues every owner whose references have drained.
+  A detached reaper waits for tracked module execution leases across the
+  process to reach zero, retries teardown, releases shared dependency refs,
+  and deinitializes CSOLoader when safe. The Zygisk runtime remains resident
+  while deferred images are pending.
+- Execution leases cover module callbacks and workers created with
+  `rz_module_pthread_create()`. Direct `pthread_create`, `clone`, raw syscalls,
+  and third-party thread pools are not transparently intercepted. Modules
+  must synchronize those threads before requesting unload.
 - Dependency ownership/reference counting is per CSOLoader instance for its dependency graph. There is no process-wide shared dependency reference-count registry across independent CSOLoader instances.
 
 ### TLS policy
@@ -58,7 +75,11 @@ VReZygisk has two independent loading paths:
 ## Remaining correctness gates
 
 1. **Global symbol scope**: implement only with explicit namespace and visibility semantics; do not resolve from arbitrary resident mappings as a shortcut.
-2. **Cross-linker shared dependency ownership**: separate CSOLoader instances can still map duplicate copies of the same private dependency. A process-wide shared image registry and deferred release protocol remain future work.
+2. **Cross-linker shared dependency ownership**: Bionic-loadable non-`PT_TLS`
+   dependencies are pooled process-wide. Manual-mapped fallback dependencies
+   are still private to one CSOLoader instance; sharing those requires moving
+   their TLS module state, relocation ownership, unwind registration, and
+   mapping lifetime into a common object record.
 3. **GNU versioning edge cases**: ordinary versioned relocations are now resolved natively by CSOLoader, but versioned TLS relocations, weak-version corner cases, nonstandard symbol namespaces, and full Bionic lookup parity remain unsupported or unverified.
 4. **Remote resolver ABI**: IFUNC/IRELATIVE execution needs device validation for target auxv/HWCAP, API-specific resolver calling convention, stack alignment, signal-stop verification, resolver reentrancy, and abnormal termination cleanup.
 5. **Relocation coverage**: Android packed REL and TLS relocation families remain unsupported in the ptracer; unsupported relocation types fail closed.
