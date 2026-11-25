@@ -316,7 +316,8 @@ static bool vaddr_file_bytes_remaining(const ElfW(Phdr) *phdr, int phnum,
 }
 
 static bool sysv_hash_symbol_count(int fd, const ElfW(Phdr) *phdr, int phnum,
-                                   ElfW(Addr) vaddr, size_t *out_count) {
+                                   ElfW(Addr) vaddr, size_t max_symbols,
+                                   size_t *out_count) {
   uint32_t header[2];
   off_t off = 0;
   if (!out_count || !vaddr_to_offset(phdr, phnum, vaddr, sizeof(header), &off) ||
@@ -328,13 +329,15 @@ static bool sysv_hash_symbol_count(int fd, const ElfW(Phdr) *phdr, int phnum,
   off_t checked_off = 0;
   if (!vaddr_to_offset(phdr, phnum, vaddr, bytes, &checked_off) || checked_off != off)
     return false;
+  if ((size_t)header[1] > max_symbols) return false;
   *out_count = (size_t)header[1];
   return true;
 }
 
 /* Validate every GNU hash bucket chain and derive the exclusive dynsym bound. */
 static bool gnu_hash_symbol_count(int fd, const ElfW(Phdr) *phdr, int phnum,
-                                  ElfW(Addr) vaddr, size_t *out_count) {
+                                  ElfW(Addr) vaddr, size_t max_symbols,
+                                  size_t *out_count) {
   uint32_t header[4];
   off_t hash_off = 0;
   size_t available = 0;
@@ -355,6 +358,9 @@ static bool gnu_hash_symbol_count(int fd, const ElfW(Phdr) *phdr, int phnum,
   off_t buckets_off = hash_off + (off_t)sizeof(header) + (off_t)bloom_bytes;
   off_t chains_off = buckets_off + (off_t)bucket_bytes;
   size_t chain_words = (available - prefix_bytes) / sizeof(uint32_t);
+  if ((size_t)symoffset > max_symbols) return false;
+  size_t max_chain_words = max_symbols - (size_t)symoffset;
+  if (chain_words > max_chain_words) chain_words = max_chain_words;
   size_t symbol_count = symoffset;
   for (uint32_t b = 0; b < nbuckets; b++) {
     uint32_t bucket = 0;
@@ -617,15 +623,28 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   needed_str_offsets = NULL; /* Ownership transferred to out. */
 
   out->nsyms = 0;
+  off_t symtab_bound_off = 0;
+  size_t symtab_file_remaining = 0;
+  if (!vaddr_file_bytes_remaining(phdr, eh->e_phnum, symtab_vaddr,
+                                  &symtab_bound_off, &symtab_file_remaining) ||
+      symtab_bound_off != out->symtab_off) {
+    LOGE("Dynamic symbol table is not contained in a file-backed PT_LOAD");
+    goto cleanup;
+  }
+  size_t max_symbols = symtab_file_remaining / sizeof(ElfW(Sym));
   size_t sysv_count = 0;
   size_t gnu_count = 0;
+  if (max_symbols == 0) {
+    LOGE("Dynamic symbol table has no file-backed entries");
+    goto cleanup;
+  }
   if (sysv_hash_vaddr &&
-      !sysv_hash_symbol_count(fd, phdr, eh->e_phnum, sysv_hash_vaddr, &sysv_count)) {
+      !sysv_hash_symbol_count(fd, phdr, eh->e_phnum, sysv_hash_vaddr, max_symbols, &sysv_count)) {
     LOGE("Malformed or out-of-bounds DT_HASH");
     goto cleanup;
   }
   if (gnu_hash_vaddr &&
-      !gnu_hash_symbol_count(fd, phdr, eh->e_phnum, gnu_hash_vaddr, &gnu_count)) {
+      !gnu_hash_symbol_count(fd, phdr, eh->e_phnum, gnu_hash_vaddr, max_symbols, &gnu_count)) {
     LOGE("Malformed or out-of-bounds DT_GNU_HASH");
     goto cleanup;
   }
