@@ -160,7 +160,13 @@ struct rezygisk_api {
    * task can no longer execute module code. The lease may be released by a
    * different thread from the one that acquired it. */
   void *(*acquire_execution_lease)(struct rezygisk_api *);
-  void (*release_execution_lease)(struct rezygisk_api *, void *lease);
+  /* Run the leased module entry on this host-side trampoline. The lease is
+   * consumed after entry returns, pthread_exit() or cancellation. */
+  void *(*run_with_execution_lease)(struct rezygisk_api *, void *lease,
+                                    void *(*entry)(void *), void *arg);
+  /* Cancel a task that will never run. If called from module code, the caller
+   * must itself still hold another execution lease until it returns. */
+  void (*cancel_execution_lease)(struct rezygisk_api *, void *lease);
 };
 
 enum module_loader_backend {
