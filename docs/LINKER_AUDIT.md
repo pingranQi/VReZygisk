@@ -19,7 +19,7 @@ VReZygisk has two independent loading paths:
 - Versioned lookup distinguishes explicit-version lookup from unversioned/default-version lookup. It filters symbol binding/visibility, checks symbol addresses against load segments, and reports symbol type so IFUNC resolvers are not mistaken for final function addresses.
 - The ptracer resolves requester `DT_VERSYM`/`DT_VERNEED` requirements against the named provider's actual `DT_SONAME`, performs exact version lookup in the local provider mapping, and translates the provider-relative offset to the target mapping. Weak version requirements may fall back to an unversioned/default lookup in the same provider.
 - Versioned provider IFUNC symbols return the resolver address and are executed in the target process. The resolver ABI is selected by Android API level.
-- The in-process pinned CSOLoader is patched to use the same bounded ELF64/AArch64 version parser. For non-TLS relocations it reads the requester's `DT_VERSYM`/`DT_VERNEED`, checks the provider `DT_SONAME`, and matches the provider's `DT_VERDEF` version name/hash. Unversioned references use default-version selection; IFUNC results are passed to the existing CSOLoader resolver. GNU-versioned TLS symbols are resolved to provider TLS offsets for CSOLoader-managed TLS images; DTPMOD, DTPREL, TPREL and TLSDESC consume the resolved provider. Bionic-owned TLS providers remain unsupported by the custom TLS module-ID ABI and fail closed. Main images with `PT_TLS` still route to Bionic.
+- The in-process pinned CSOLoader is patched to use the same bounded ELF64/AArch64 version parser. For non-TLS relocations it reads the requester's `DT_VERSYM`/`DT_VERNEED`, checks the provider `DT_SONAME`, and matches the provider's `DT_VERDEF` version name/hash. Unversioned references use default-version selection; IFUNC results are passed to the existing CSOLoader resolver. GNU-versioned TLS symbols are resolved to provider TLS offsets for CSOLoader-managed TLS images; DTPMOD, DTPREL, TPREL and TLSDESC consume the resolved provider. The custom TLS module-ID ABI cannot consume Bionic-owned provider TLS modules and fails closed for those references. Main images with `PT_TLS` still route to Bionic.
 
 ### Dependency graph and symbol scope
 
@@ -28,14 +28,15 @@ VReZygisk has two independent loading paths:
 - Missing direct dependencies, unreadable dependency metadata, invalid dynamic tables, and missing non-alias transitive dependencies fail closed.
 - CSOLoader uses actual `DT_SONAME` for in-linker de-duplication, dynamically grows its dependency array up to a bounded maximum, skips the Bionic-internal `ld-android.so` alias, and fails on unresolved required `DT_NEEDED` entries.
 - The in-process symbol scope searches the requester/main image and then the ordered dependency list. This is a dependency-local scope, not a complete Bionic global namespace implementation. It does not model arbitrary `RTLD_GLOBAL` objects, all namespace isolation rules, or every symbolic lookup corner case.
-- A process-wide Bionic-backed dependency pool shares non-`PT_TLS` objects
-  across independent CSOLoader instances. One pool record owns the Bionic
-  `dlopen` reference and shared ELF metadata wrapper; each linker holds a
-  reference to that record. Bionic performs mapping, relocation,
-  constructor/destructor, TLS, unwind, and final-reference teardown. `PT_TLS`
-  dependencies use per-linker Bionic handles where possible. Dependencies
-  Bionic cannot load fall back to manual CSOLoader mapping and remain
-  per-linker; those fallback mappings are not pooled.
+- There is currently **no process-wide dependency-object pool for CSOLoader
+  dependency mappings**. Each independent CSOLoader instance builds and owns its
+  own manual dependency graph; mapping, relocation state, emulated TLS module,
+  unwind registration, constructor state, and final unmap are per-linker.
+  This applies to dependencies with and without `PT_TLS`.
+- When a module's *main image* is routed to Bionic, Bionic owns that image and
+  its dependency closure under the selected linker namespace. This is ordinary
+  Bionic loader behavior, not a VReZygisk cross-Linker pool. It does not share
+  dependencies with independent CSOLoader graphs.
 
 ### Relocations and remote resolvers
 
