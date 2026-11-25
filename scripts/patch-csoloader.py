@@ -1224,12 +1224,21 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
     source = source.replace(old_dep, new_dep)
     if old_dep in source:
         raise RuntimeError("version-aware dependency lookup replacement incomplete")
+    tls_lookup_anchor = "_linker_find_symbol_in_linker_scope(linker, dep->img, sym_name)"
+    tls_lookup_count = source.count(tls_lookup_anchor)
+    if tls_lookup_count != 4:
+        raise RuntimeError(
+            "pinned CSOLoader TLS/symbol lookup layout changed: "
+            f"expected 4 symbol-index call sites, found {tls_lookup_count}"
+        )
     source = source.replace(
-        "_linker_find_symbol_in_linker_scope(linker, dep->img, sym_name)",
+        tls_lookup_anchor,
         "_linker_find_symbol_in_linker_scope(linker, dep->img, sym_name, r->sym_idx)",
     )
-    if "_linker_find_symbol_in_linker_scope(linker, dep->img, sym_name)" in source:
-        raise RuntimeError("not all relocation symbol lookup call sites were updated")
+    if source.count("_linker_find_symbol_in_linker_scope(linker, dep->img, sym_name, r->sym_idx)") != 4:
+        raise RuntimeError("not all four relocation symbol lookup call sites were versioned")
+    if tls_lookup_anchor in source:
+        raise RuntimeError("unversioned relocation symbol lookup call site remains")
 
     source = replace_once(
         source,
@@ -1243,10 +1252,19 @@ def patch_csoloader_gnu_versions(linker_path: Path) -> None:
         "reject foreign TLS module IDs in DTPMOD",
     )
 
+    tls_offset_anchor = "        tls_offset += sym_ent->st_value;"
+    tls_offset_count = source.count(tls_offset_anchor)
+    if tls_offset_count != 2:
+        raise RuntimeError(
+            "pinned CSOLoader TLSDESC/TPREL layout changed: "
+            f"expected 2 provider TLS-offset sites, found {tls_offset_count}"
+        )
     source = source.replace(
-        "        tls_offset += sym_ent->st_value;",
+        tls_offset_anchor,
         "        tls_offset += (ElfW(Addr))(uintptr_t)sym.addr;",
     )
+    if source.count("tls_offset += (ElfW(Addr))(uintptr_t)sym.addr;") != 2:
+        raise RuntimeError("TLSDESC/TPREL do not both consume the resolved provider TLS offset")
     source = source.replace(
         "if (!tls_img || !tls_img->tls_segment) {",
         "if (!tls_img || !tls_img->tls_segment || tls_img->tls_mod_id == 0) {",
