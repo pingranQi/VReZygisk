@@ -5,6 +5,7 @@ on:
     branches:
       - feature/csoloader-hardening
       - optimize/hiding-memory-concurrency
+      - rust/resource-lifecycle-hardening
   pull_request:
   merge_group:
   workflow_dispatch:
@@ -30,6 +31,9 @@ jobs:
 
       - name: Setup NDK_PATH
         run: echo "NDK_PATH=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
+
+      - name: Setup Rust target
+        run: rustup target add aarch64-linux-android
 
       - name: Build
         run: |

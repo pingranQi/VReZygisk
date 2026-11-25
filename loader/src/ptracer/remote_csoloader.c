@@ -51,6 +51,16 @@ static bool remote_syscall_failed(long result) {
   return result < 0 && result >= -4095;
 }
 
+/* Close a tracee fd once; close(EINTR) must not be blindly retried. */
+static void remote_close_fd(int pid, struct user_regs_struct *regs,
+                            uintptr_t syscall_gadget, long *remote_fd) {
+  if (!remote_fd || *remote_fd < 0) return;
+  long args[1] = { *remote_fd };
+  long result = remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+  if (result != 0) LOGE("Remote close(%ld) failed: %ld", *remote_fd, result);
+  *remote_fd = -1;
+}
+
 static long remote_mmap_offset_arg(off_t file_offset, size_t page_size) {
   /* INFO: mmap2 needs the offset in page units, unlike mmap */
   #ifdef __LP64__
@@ -280,6 +290,103 @@ static void elf_dyn_info_destroy(struct elf_dyn_info *info) {
   free(info->strtab);
   free(info->needed_str_offsets);
   memset(info, 0, sizeof(*info));
+}
+
+/* Return the file-backed bytes remaining in the PT_LOAD containing vaddr. */
+static bool vaddr_file_bytes_remaining(const ElfW(Phdr) *phdr, int phnum,
+                                       ElfW(Addr) vaddr, off_t *out_off,
+                                       size_t *out_remaining) {
+  if (!phdr || !out_off || !out_remaining) return false;
+  for (int i = 0; i < phnum; i++) {
+    if (phdr[i].p_type != PT_LOAD || vaddr < phdr[i].p_vaddr) continue;
+    if (phdr[i].p_vaddr > UINTPTR_MAX - phdr[i].p_filesz) continue;
+    ElfW(Addr) end = phdr[i].p_vaddr + phdr[i].p_filesz;
+    if (vaddr >= end) continue;
+    ElfW(Addr) delta = vaddr - phdr[i].p_vaddr;
+    if (phdr[i].p_offset > (ElfW(Off))INT64_MAX ||
+        delta > (ElfW(Addr))(INT64_MAX - (int64_t)phdr[i].p_offset)) return false;
+    ElfW(Off) file_off = phdr[i].p_offset + delta;
+    ElfW(Addr) remaining = end - vaddr;
+    if (remaining > SIZE_MAX) return false;
+    *out_off = (off_t)file_off;
+    *out_remaining = (size_t)remaining;
+    return true;
+  }
+  return false;
+}
+
+static bool sysv_hash_symbol_count(int fd, const ElfW(Phdr) *phdr, int phnum,
+                                   ElfW(Addr) vaddr, size_t max_symbols,
+                                   size_t *out_count) {
+  uint32_t header[2];
+  off_t off = 0;
+  if (!out_count || !vaddr_to_offset(phdr, phnum, vaddr, sizeof(header), &off) ||
+      !read_loop_offset(fd, header, sizeof(header), off) ||
+      header[0] == 0 || header[1] == 0) return false;
+  uint64_t words = UINT64_C(2) + (uint64_t)header[0] + (uint64_t)header[1];
+  if (words > SIZE_MAX / sizeof(uint32_t)) return false;
+  size_t bytes = (size_t)words * sizeof(uint32_t);
+  off_t checked_off = 0;
+  if (!vaddr_to_offset(phdr, phnum, vaddr, bytes, &checked_off) || checked_off != off)
+    return false;
+  if ((size_t)header[1] > max_symbols) return false;
+  *out_count = (size_t)header[1];
+  return true;
+}
+
+/* Validate every GNU hash bucket chain and derive the exclusive dynsym bound. */
+static bool gnu_hash_symbol_count(int fd, const ElfW(Phdr) *phdr, int phnum,
+                                  ElfW(Addr) vaddr, size_t max_symbols,
+                                  size_t *out_count) {
+  uint32_t header[4];
+  off_t hash_off = 0;
+  size_t available = 0;
+  if (!out_count ||
+      !vaddr_file_bytes_remaining(phdr, phnum, vaddr, &hash_off, &available) ||
+      available < sizeof(header) ||
+      !read_loop_offset(fd, header, sizeof(header), hash_off)) return false;
+  const uint32_t nbuckets = header[0], symoffset = header[1], bloom_size = header[2];
+  if (nbuckets == 0 || bloom_size == 0 ||
+      (uint64_t)bloom_size > SIZE_MAX / sizeof(ElfW(Addr)) ||
+      (uint64_t)nbuckets > SIZE_MAX / sizeof(uint32_t)) return false;
+  size_t bloom_bytes = (size_t)bloom_size * sizeof(ElfW(Addr));
+  size_t bucket_bytes = (size_t)nbuckets * sizeof(uint32_t);
+  if (bloom_bytes > SIZE_MAX - sizeof(header) ||
+      bucket_bytes > SIZE_MAX - sizeof(header) - bloom_bytes) return false;
+  size_t prefix_bytes = sizeof(header) + bloom_bytes + bucket_bytes;
+  if (prefix_bytes > available) return false;
+  off_t buckets_off = hash_off + (off_t)sizeof(header) + (off_t)bloom_bytes;
+  off_t chains_off = buckets_off + (off_t)bucket_bytes;
+  size_t chain_words = (available - prefix_bytes) / sizeof(uint32_t);
+  if ((size_t)symoffset > max_symbols) return false;
+  size_t max_chain_words = max_symbols - (size_t)symoffset;
+  if (chain_words > max_chain_words) chain_words = max_chain_words;
+  size_t symbol_count = symoffset;
+  for (uint32_t b = 0; b < nbuckets; b++) {
+    uint32_t bucket = 0;
+    off_t bucket_off = buckets_off + (off_t)((size_t)b * sizeof(uint32_t));
+    if (!read_loop_offset(fd, &bucket, sizeof(bucket), bucket_off)) return false;
+    if (bucket == 0) continue;
+    if (bucket < symoffset) return false;
+    size_t chain_index = (size_t)(bucket - symoffset);
+    size_t symbol_index = (size_t)bucket;
+    bool terminated = false;
+    while (chain_index < chain_words) {
+      uint32_t chain = 0;
+      off_t chain_off = chains_off + (off_t)(chain_index * sizeof(uint32_t));
+      if (!read_loop_offset(fd, &chain, sizeof(chain), chain_off)) return false;
+      if (symbol_index == SIZE_MAX) return false;
+      if (symbol_index + 1 > symbol_count) symbol_count = symbol_index + 1;
+      if (chain & 1U) { terminated = true; break; }
+      if (chain_index == SIZE_MAX || symbol_index == SIZE_MAX) return false;
+      chain_index++;
+      symbol_index++;
+    }
+    if (!terminated) return false;
+  }
+  if (symbol_count == 0) return false;
+  *out_count = symbol_count;
+  return true;
 }
 
 /* INFO: Parse PT_DYNAMIC and extract relocation/symbol table info. */
@@ -513,70 +620,43 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   out->strsz = strsz;
   out->needed_count = needed_count;
   out->needed_str_offsets = needed_str_offsets;
+  needed_str_offsets = NULL; /* Ownership transferred to out. */
 
   out->nsyms = 0;
-
-  if (sysv_hash_vaddr) {
-    off_t hash_off = 0;
-    uint32_t hash_header[2];
-    if (vaddr_to_offset(phdr, eh->e_phnum, sysv_hash_vaddr, sizeof(uint32_t) * 2, &hash_off) &&
-        read_loop_offset(fd, hash_header, sizeof(hash_header), hash_off) &&
-        hash_header[1] > 0) {
-      out->nsyms = hash_header[1];
-    }
+  off_t symtab_bound_off = 0;
+  size_t symtab_file_remaining = 0;
+  if (!vaddr_file_bytes_remaining(phdr, eh->e_phnum, symtab_vaddr,
+                                  &symtab_bound_off, &symtab_file_remaining) ||
+      symtab_bound_off != out->symtab_off) {
+    LOGE("Dynamic symbol table is not contained in a file-backed PT_LOAD");
+    goto cleanup;
   }
-
-  if (gnu_hash_vaddr) {
-    off_t gnu_hash_off = 0;
-
-    if (vaddr_to_offset(phdr, eh->e_phnum, gnu_hash_vaddr, sizeof(uint32_t) * 4, &gnu_hash_off)) {
-      uint32_t header[4];
-
-      if (read_loop_offset(fd, header, sizeof(header), gnu_hash_off)) {
-        uint32_t nbuckets = header[0];
-        uint32_t symoffset = header[1];
-        uint32_t bloom_size = header[2];
-
-        /* INFO: Calculate offset to buckets array (after bloom filter) */
-        size_t bloom_words = bloom_size * sizeof(ElfW(Addr));
-        off_t buckets_off = gnu_hash_off + 16 + (off_t)bloom_words;
-
-        /* INFO: Find max bucket value to determine highest symbol index */
-        uint32_t max_bucket = 0;
-
-        for (uint32_t b = 0; b < nbuckets; b++) {
-          uint32_t bucket_val;
-
-          if (!read_loop_offset(fd, &bucket_val, sizeof(bucket_val), buckets_off + (off_t)(b * 4)))
-            break;
-
-          if (bucket_val > max_bucket) max_bucket = bucket_val;
-        }
-
-        if (max_bucket >= symoffset) {
-          /* INFO: Walk chain from max_bucket to find last symbol */
-          off_t chains_off = buckets_off + (off_t)(nbuckets * 4);
-          uint32_t chain_idx = max_bucket - symoffset;
-          uint32_t chain_val;
-
-          while (read_loop_offset(fd, &chain_val, sizeof(chain_val), chains_off + (off_t)(chain_idx * 4))) {
-            if (chain_val & 1) {
-              out->nsyms = max_bucket + 1;
-
-              break;
-            }
-
-            max_bucket++;
-            chain_idx++;
-          }
-
-          if (!out->nsyms) out->nsyms = max_bucket + 1;
-        } else {
-          out->nsyms = symoffset;
-        }
-      }
-    }
+  size_t max_symbols = symtab_file_remaining / sizeof(ElfW(Sym));
+  size_t sysv_count = 0;
+  size_t gnu_count = 0;
+  if (max_symbols == 0) {
+    LOGE("Dynamic symbol table has no file-backed entries");
+    goto cleanup;
   }
+  if (sysv_hash_vaddr &&
+      !sysv_hash_symbol_count(fd, phdr, eh->e_phnum, sysv_hash_vaddr, max_symbols, &sysv_count)) {
+    LOGE("Malformed or out-of-bounds DT_HASH");
+    goto cleanup;
+  }
+  if (gnu_hash_vaddr &&
+      !gnu_hash_symbol_count(fd, phdr, eh->e_phnum, gnu_hash_vaddr, max_symbols, &gnu_count)) {
+    LOGE("Malformed or out-of-bounds DT_GNU_HASH");
+    goto cleanup;
+  }
+  if (!sysv_hash_vaddr && !gnu_hash_vaddr) {
+    LOGE("ELF has no supported dynamic symbol hash table");
+    goto cleanup;
+  }
+  if (sysv_count && gnu_count && gnu_count > sysv_count) {
+    LOGE("DT_GNU_HASH symbol bound exceeds DT_HASH nchain");
+    goto cleanup;
+  }
+  out->nsyms = sysv_count ? sysv_count : gnu_count;
 
   /* Validate the entire dynamic symbol table after deriving its bound from DT_HASH/GNU_HASH. */
   off_t checked_symtab_off = 0;
@@ -592,10 +672,10 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
 
 cleanup:
   free(dyn);
+  free(needed_str_offsets);
   if (!success) {
-    free(out->strtab);
-    out->strtab = NULL;
-    free(needed_str_offsets);
+    /* Destroy every partially initialized field on all failure edges. */
+    elf_dyn_info_destroy(out);
   }
 
   return success;
@@ -1001,7 +1081,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
     LOGE("Failed to allocate memory for zeroed path");
 
     args[0] = remote_fd;
-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+    remote_close_fd(pid, regs, syscall_gadget, &remote_fd);
 
     free(phdr);
     close(fd);
@@ -1015,7 +1095,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
     free(remote_path_zerod);
 
     args[0] = remote_fd;
-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+    remote_close_fd(pid, regs, syscall_gadget, &remote_fd);
 
     free(phdr);
     close(fd);
@@ -1042,7 +1122,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
 
     args[0] = remote_fd;
-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+    remote_close_fd(pid, regs, syscall_gadget, &remote_fd);
 
     free(phdr);
     close(fd);
@@ -1055,14 +1135,21 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 #define REMOTE_CLEANUP_MAPPING() do {                                      \
   if (remote_fd >= 0) {                                                    \
     args[0] = remote_fd;                                                   \
-    remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);         \
+    remote_close_fd(pid, regs, syscall_gadget, &remote_fd);         \
     remote_fd = -1;                                                        \
   }                                                                        \
   if (remote_mapping_active) {                                             \
     args[0] = (long)remote_base;                                           \
     args[1] = (long)map_size;                                              \
-    remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2);        \
-    remote_mapping_active = false;                                         \
+    long unmap_result = remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2); \
+    if (unmap_result == 0) {                                               \
+      remote_mapping_active = false;                                       \
+    } else {                                                               \
+      LOGE("Remote cleanup munmap failed for %p (%zu): %ld",               \
+           (void *)remote_base, map_size, unmap_result);                   \
+      *out_base = remote_base;                                             \
+      *out_total_size = map_size;                                          \
+    }                                                                      \
   }                                                                        \
 } while (0)
 
@@ -1145,8 +1232,14 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
         args[5] = remote_mmap_offset_arg(file_page_offset, page_size);
 
         long seg_map_result = remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
-        if (remote_syscall_failed(seg_map_result)) {
-          LOGE("remote mmap writable file-backed segment failed for phdr %d", i);
+        if (remote_syscall_failed(seg_map_result) || (uintptr_t)seg_map_result != seg_page) {
+          LOGE("remote MAP_FIXED writable segment mismatch for phdr %d: expected %p got %ld",
+               i, (void *)seg_page, seg_map_result);
+          if (!remote_syscall_failed(seg_map_result)) {
+            long cleanup_args[2] = { seg_map_result, (long)file_map_len };
+            long cleanup_result = remote_syscall(pid, regs, syscall_gadget, SYS_munmap, cleanup_args, 2);
+            if (cleanup_result != 0) LOGE("Failed to unmap unexpected writable segment: %ld", cleanup_result);
+          }
 
 
           REMOTE_CLEANUP_MAPPING();
@@ -1185,8 +1278,14 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
         args[5] = 0;
 
         long bss_map_result = remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
-        if (remote_syscall_failed(bss_map_result)) {
-          LOGE("remote mmap bss segment failed for phdr %d", i);
+        if (remote_syscall_failed(bss_map_result) || (uintptr_t)bss_map_result != file_page_end) {
+          LOGE("remote MAP_FIXED BSS mismatch for phdr %d: expected %p got %ld",
+               i, (void *)file_page_end, bss_map_result);
+          if (!remote_syscall_failed(bss_map_result)) {
+            long cleanup_args[2] = { bss_map_result, (long)(seg_page_end - file_page_end) };
+            long cleanup_result = remote_syscall(pid, regs, syscall_gadget, SYS_munmap, cleanup_args, 2);
+            if (cleanup_result != 0) LOGE("Failed to unmap unexpected BSS mapping: %ld", cleanup_result);
+          }
 
 
           REMOTE_CLEANUP_MAPPING();
@@ -1213,8 +1312,14 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
         args[5] = remote_mmap_offset_arg(file_page_offset, page_size);
 
         long seg_map_result = remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
-        if (remote_syscall_failed(seg_map_result)) {
-          LOGE("remote mmap file-backed segment failed for phdr %d", i);
+        if (remote_syscall_failed(seg_map_result) || (uintptr_t)seg_map_result != seg_page) {
+          LOGE("remote MAP_FIXED file-backed mismatch for phdr %d: expected %p got %ld",
+               i, (void *)seg_page, seg_map_result);
+          if (!remote_syscall_failed(seg_map_result)) {
+            long cleanup_args[2] = { seg_map_result, (long)file_map_len };
+            long cleanup_result = remote_syscall(pid, regs, syscall_gadget, SYS_munmap, cleanup_args, 2);
+            if (cleanup_result != 0) LOGE("Failed to unmap unexpected file mapping: %ld", cleanup_result);
+          }
 
 
           REMOTE_CLEANUP_MAPPING();
@@ -1235,8 +1340,14 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
         args[5] = 0;
 
         long bss_map_result = remote_syscall(pid, regs, syscall_gadget, SYS_mmap, args, 6);
-        if (remote_syscall_failed(bss_map_result)) {
-          LOGE("remote mmap bss segment failed for phdr %d", i);
+        if (remote_syscall_failed(bss_map_result) || (uintptr_t)bss_map_result != file_page_end) {
+          LOGE("remote MAP_FIXED BSS mismatch for phdr %d: expected %p got %ld",
+               i, (void *)file_page_end, bss_map_result);
+          if (!remote_syscall_failed(bss_map_result)) {
+            long cleanup_args[2] = { bss_map_result, (long)(seg_page_end - file_page_end) };
+            long cleanup_result = remote_syscall(pid, regs, syscall_gadget, SYS_munmap, cleanup_args, 2);
+            if (cleanup_result != 0) LOGE("Failed to unmap unexpected BSS mapping: %ld", cleanup_result);
+          }
 
 
           REMOTE_CLEANUP_MAPPING();
@@ -1265,7 +1376,7 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
 
 
   args[0] = remote_fd;
-  remote_syscall(pid, regs, syscall_gadget, SYS_close, args, 1);
+  remote_close_fd(pid, regs, syscall_gadget, &remote_fd);
   remote_fd = -1;
 
   struct elf_dyn_info dinfo;
@@ -1418,10 +1529,11 @@ bool remote_csoloader_unmap(int pid, struct user_regs_struct *regs,
   }
 
   long args[2] = { (long)base, (long)size };
-  long result = remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2);
-  if (result != 0) {
-    LOGE("Remote munmap failed for bootstrap image %p (%zu): %ld", (void *)base, size, result);
-    return false;
+  for (unsigned attempt = 1; attempt <= 3; attempt++) {
+    long result = remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2);
+    if (result == 0) return true;
+    LOGE("Remote munmap attempt %u/3 failed for bootstrap image %p (%zu): %ld",
+         attempt, (void *)base, size, result);
   }
-  return true;
+  return false;
 }

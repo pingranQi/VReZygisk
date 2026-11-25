@@ -91,7 +91,9 @@ struct maps_info *parse_maps(const char *pid) {
 
   char line[1024];
   while (fgets(line, sizeof(line), fp) != NULL) {
-    line[strlen(line) - 1] = '\0';
+    size_t line_len = strlen(line);
+    if (line_len > 0 && line[line_len - 1] == '\n')
+      line[line_len - 1] = '\0';
 
     uintptr_t start, end, offset;
     unsigned int dev_major, dev_minor;
@@ -164,6 +166,7 @@ struct maps_info *parse_maps(const char *pid) {
   if (info_array->length == 0) {
     LOGE("Failed to find any maps in %s", pid);
 
+    free(info_array->maps);
     free(info_array);
 
     return NULL;

@@ -7,6 +7,8 @@
 
 #include "utils.h"
 
+/* On false, out_base/out_total_size remain zero unless loader cleanup munmap failed;
+ * then they carry a retry handle. remote_csoloader_unmap() retries up to three times. */
 bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *regs,
                                              struct maps_info *remote_map, struct maps_info *local_map,
                                              const char *lib_path, uintptr_t *out_base,
