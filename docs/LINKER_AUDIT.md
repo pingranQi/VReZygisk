@@ -60,7 +60,8 @@ VReZygisk has two independent loading paths:
   process to reach zero, retries teardown, releases shared dependency refs,
   and deinitializes CSOLoader when safe. The Zygisk runtime remains resident
   while deferred images are pending.
-- Execution leases cover module callbacks and workers created with
+- Execution leases cover module callbacks and workers created through the
+  ReZygisk API v6 `pthread_create` callback, backed by
   `rz_module_pthread_create()`. Direct `pthread_create`, `clone`, raw syscalls,
   and third-party thread pools are not transparently intercepted. Modules
   must synchronize those threads before requesting unload.
