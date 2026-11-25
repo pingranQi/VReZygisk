@@ -143,6 +143,28 @@ def patch(header_path: Path, linker_path: Path) -> None:
         "release shared dependency with unload mode",
     )
 
+    source = replace_once(
+        source,
+        """  if (dep->system_handle) {
+    csoloader_elf_destroy(dep->img);
+    dep->img = NULL;
+    (void)dlclose(dep->system_handle);
+    dep->system_handle = NULL;
+    dep->map_size = 0;
+    return;
+  }""",
+        """  if (dep->system_handle) {
+    csoloader_elf_destroy(dep->img);
+    dep->img = NULL;
+    /* linker_abandon() deliberately pins Bionic mappings as well. */
+    if (unload) (void)dlclose(dep->system_handle);
+    dep->system_handle = NULL;
+    dep->map_size = 0;
+    return;
+  }""",
+        "preserve Bionic TLS dependency on linker abandon",
+    )
+
     # The TLS descriptor index array belongs to the provider image. A pooled
     # provider must therefore return the shared array, not the Linker-local
     # embedded array.
