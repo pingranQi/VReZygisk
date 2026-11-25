@@ -1326,6 +1326,23 @@ static int api_pthread_create(struct rezygisk_api *api, pthread_t *thread,
                                   entry, arg);
 }
 
+static struct rezygisk_module *api_get_module(struct rezygisk_api *api) {
+  if (!api || !zygisk_modules) return NULL;
+  size_t module_id = DECODE_ID(api->impl);
+  if (module_id >= zygisk_module_length) return NULL;
+  return &zygisk_modules[module_id];
+}
+
+static bool api_acquire_execution_lease(struct rezygisk_api *api) {
+  struct rezygisk_module *module = api_get_module(api);
+  return module && rz_module_call_enter(module);
+}
+
+static void api_release_execution_lease(struct rezygisk_api *api) {
+  struct rezygisk_module *module = api_get_module(api);
+  if (module) rz_module_call_leave(module);
+}
+
 bool rezygisk_module_register(struct rezygisk_api *api, struct rezygisk_abi const *target_module) {
   if (!g_ctx || !api || !target_module || target_module->api_version > REZYGISK_API_VERSION) return false;
 
@@ -1356,6 +1373,10 @@ bool rezygisk_module_register(struct rezygisk_api *api, struct rezygisk_abi cons
   }
   if (target_module->api_version >= 6)
     api->pthread_create = api_pthread_create;
+  if (target_module->api_version >= 7) {
+    api->acquire_execution_lease = api_acquire_execution_lease;
+    api->release_execution_lease = api_release_execution_lease;
+  }
 
   return true;
 }
