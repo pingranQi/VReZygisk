@@ -162,24 +162,6 @@ def patch(header_path: Path, linker_path: Path) -> None:
         "shared TLS indices for provider dependency",
     )
 
-    # If a dependency binds one of its relocations to the main image, that
-    # relocation embeds the main image's address. Such a closure is not
-    # reusable by another Linker even when the files are identical.
-    main_scope_anchor = """    if (addr) {
-      LOGD("Found exported symbol '%s' in main image:"""
-    main_scope_replacement = """    if (addr) {
-      if (requester != linker->img) {
-        for (int scope_i = 0; scope_i < linker->dep_count; ++scope_i) {
-          if (linker->dependencies[scope_i].img == requester)
-            linker->dependencies[scope_i].pool_uses_main = true;
-        }
-      }
-      LOGD("Found exported symbol '%s' in main image:"""
-    source = replace_once(
-        source, main_scope_anchor, main_scope_replacement,
-        "track dependency relocations bound to main image",
-    )
-
     # Do not run a pooled dependency's finalizer once per Linker. The shared
     # record runs it exactly once when its final reference is released.
     source = replace_once(
@@ -465,7 +447,7 @@ static void _linker_shared_manual_publish(struct linker *linker) {
     source = replace_once(
         source,
         """    if (addr) {
-      LOGD("Found exported symbol '%s' in main image:""",
+      LOGD("Found exported symbol '%s' in main image:"",
         """    if (addr) {
       if (requester != linker->img) {
         for (int scope_i = 0; scope_i < linker->dep_count; ++scope_i) {
@@ -473,7 +455,7 @@ static void _linker_shared_manual_publish(struct linker *linker) {
             linker->dependencies[scope_i].pool_uses_main = true;
         }
       }
-      LOGD("Found exported symbol '%s' in main image:""",
+      LOGD("Found exported symbol '%s' in main image:"",
         "mark main-image relocation bindings",
     )
 
