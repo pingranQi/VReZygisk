@@ -396,11 +396,13 @@ static bool requires_system_linker(const char *path) {
     LOGW("Unable to validate ELF metadata for [%s]; using Bionic linker", path);
     return true;
   }
-  if (features.has_pt_tls || features.has_gnu_versions) {
+  if (features.has_pt_tls) {
     LOGI("Using Bionic linker for [%s]: PT_TLS=%d GNU versions=%d",
          path, features.has_pt_tls, features.has_gnu_versions);
     return true;
   }
+  if (features.has_gnu_versions)
+    LOGI("Using CSOLoader native GNU version resolver for [%s]", path);
   return false;
 }
 
