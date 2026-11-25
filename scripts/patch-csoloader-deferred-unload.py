@@ -68,34 +68,26 @@ void linker_set_deferred_unload_callback(void (*callback)(void *)) {
   struct csoloader_elf *img = _linker_image_from_handle(linker, handle);
   if (img) {
     bool released = _linker_adjust_handle_ref(linker, img, false);
-    _linker_registry_unlock();
-    return released ? 0 : -1;
-  }
-  _linker_registry_unlock();
-  return original_dlclose ? original_dlclose(handle) : -1;
-}""",
-            """static int custom_dlclose(void *handle) {
-  int (*original_dlclose)(void *) =
-      (int (*)(void *))_linker_get_original_libdl_symbol("dlclose");
-  if (!_linker_registry_lock())
-    return original_dlclose ? original_dlclose(handle) : -1;
-
-  struct linker *linker = _linker_find_owner_by_handle(handle);
-  struct csoloader_elf *img = _linker_image_from_handle(linker, handle);
-  if (img) {
-    bool released = _linker_adjust_handle_ref(linker, img, false);
-    bool notify = released && linker->is_closing &&
-                  !_linker_has_open_handles(linker);
-    void *owner = linker->owner_context;
+    struct linker *notify_linkers[MAX_ACTIVE_LINKERS];
+    size_t notify_count = 0;
     void (*callback)(void *) = g_deferred_unload_callback;
+    if (released && callback) {
+      for (int i = 0; i < g_active_linker_count; ++i) {
+        struct linker *candidate = g_active_linkers[i];
+        if (candidate && candidate->is_closing &&
+            !_linker_has_open_handles(candidate) &&
+            candidate->owner_context && notify_count < MAX_ACTIVE_LINKERS)
+          notify_linkers[notify_count++] = candidate;
+      }
+    }
     _linker_registry_unlock();
-    if (notify && callback) callback(owner);
+    for (size_t i = 0; i < notify_count; ++i)
+      callback(notify_linkers[i]->owner_context);
     return released ? 0 : -1;
   }
   _linker_registry_unlock();
   return original_dlclose ? original_dlclose(handle) : -1;
-}""",
-            "notify deferred unload after final handle release",
+}""",            "notify deferred unload after final handle release",
         )
 
         old_destroy = """bool linker_destroy(struct linker *linker) {
