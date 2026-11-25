@@ -938,26 +938,8 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
     if (current_dep->is_manual_load && current_dep->img->header->e_phoff > 0 && current_dep->img->header->e_phnum > 0) {""",
             """    linker->dep_count++;
 
-    if (current_dep->is_manual_load) {
-      bool dependency_has_versions = false;
-      if (!_linker_image_has_gnu_versions(current_dep->img,
-                                          &dependency_has_versions)) {
-        LOGE("Malformed dynamic metadata in dependency %s",
-             current_dep->img->elf);
-        carray_destroy(loaded_libs);
-        return false;
-      }
-      if (dependency_has_versions) {
-        LOGE("Manual dependency %s requires GNU symbol versioning; "
-             "request Bionic fallback for the complete dependency closure",
-             current_dep->img->elf);
-        carray_destroy(loaded_libs);
-        return false;
-      }
-    }
-
     if (current_dep->is_manual_load && current_dep->img->header->e_phoff > 0 && current_dep->img->header->e_phnum > 0) {""",
-            "fail closed on versioned manual dependencies",
+            "enable native GNU versioned dependency relocations",
         )
         source = replace_once(
             source,
