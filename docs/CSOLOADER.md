@@ -29,15 +29,19 @@ There are two separate loading paths and they must not be conflated:
   entries, and per-image constructor/destructor states. Custom
   `dlopen`/`dlsym`/`dlclose` hooks are enabled; image handles carry reference
   counts and can be resolved/released by modules other than the original
-  caller. Destruction runs finalizers once and refuses to unmap an image while
-  tracked handles remain open.
+  caller. If custom handles remain when unload is requested, CSOLoader marks
+  the linker closing and defers finalizers and unmapping. The final custom
+  `dlclose` notifies every closing linker whose handle references have drained.
 - CSOLoader operations use a recursive process mutex. Its active-linker
   registry has a separate recursive mutex, coordinated with the injector's
   at-fork handlers in the same lock order. Module callbacks use execution
-  leases; the lease gate is closed and active callbacks drained before both
-  unload and abandon. A retained image is pinned if callbacks or custom
-  handles prevent safe teardown. The callback lease does not track arbitrary
-  detached threads that execute module code without a tracked custom handle.
+  leases; the lease gate is closed and active callbacks drained before unload.
+  A detached reaper waits for tracked module execution leases across the
+  process to drain, retries teardown, releases shared dependency references,
+  and deinitializes CSOLoader when safe. The Zygisk runtime stays resident while
+  deferred images are pending. Only workers created through
+  `rz_module_pthread_create()` are tracked; direct `pthread_create`, `clone`,
+  raw syscalls, and third-party thread pools are not intercepted.
 - The ptracer's bootstrap ELF mapper is a separate implementation. It supports
   standard and Android RELR, Android APS2 packed RELA, GNU versioned undefined
   symbol lookup, and target-process AArch64 IFUNC/IRELATIVE execution. It still
@@ -45,10 +49,14 @@ There are two separate loading paths and they must not be conflated:
   unsupported architecture relocation types. The resolver ABI is selected by
   runtime Android API level, but target auxv/HWCAP, stack alignment, signal-stop
   handling, reentrancy and abnormal cleanup still require device validation.
-- Dependency de-duplication is within each CSOLoader instance. Separate
-  CSOLoader instances do not share a process-wide dependency-object registry,
-  so duplicate private dependency mappings across independent module linkers
-  remain possible.
+- A process-wide shared dependency pool covers dependencies Bionic can
+  load that do not contain `PT_TLS`. It is keyed by SONAME, owns one Bionic
+  `dlopen` reference and one shared `csoloader_elf` metadata wrapper, and is
+  reference-counted across independent CSOLoader instances. Bionic owns mapping,
+  relocations, constructors, unwind registration, and final unload for these
+  objects. `PT_TLS` dependencies use per-linker Bionic handles when available;
+  dependencies Bionic cannot load still use the manual CSOLoader mapper and
+  are not cross-Linker shared.
 
 Do not claim complete TLS support for the ptracer mapper. IFUNC/IRELATIVE
 support is implemented using target-process execution, but must be validated
