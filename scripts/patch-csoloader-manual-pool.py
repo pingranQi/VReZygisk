@@ -36,12 +36,20 @@ def patch(header_path: Path, linker_path: Path) -> None:
         required = [
             "static bool _linker_shared_manual_adopt(struct linker *linker)",
             "static void _linker_shared_manual_publish(struct linker *linker)",
-            "object->manual && strcmp(object->scope_key, scope_key) == 0",
+            "it->manual && it->scope_key &&",
         ]
         for item in required:
             if item not in source:
                 raise RuntimeError(f"manual dependency pool is incomplete: {item}")
         return
+
+    source = replace_once(
+        source,
+        "struct shared_dep_object {",
+        "static void _linker_unregister_tls_segment(struct loaded_dep *dep);\n\n"
+        "struct shared_dep_object {",
+        "forward-declare TLS teardown for pooled manual images",
+    )
 
     source = replace_once(
         source,
