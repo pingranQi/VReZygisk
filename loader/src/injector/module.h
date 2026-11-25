@@ -14,7 +14,7 @@
 
 #include "logging.h"
 
-#define REZYGISK_API_VERSION 5
+#define REZYGISK_API_VERSION 6
 
 enum rezygiskd_flags : uint32_t {
   PROCESS_GRANTED_ROOT = (1u << 0),
@@ -149,6 +149,10 @@ struct rezygisk_api {
   void (*set_option)(void *, enum rezygisk_options opt);
   int (*get_module_dir)(void *);
   uint32_t (*get_flags)();
+
+  /* API v6: tracked module-owned worker creation. */
+  int (*pthread_create)(struct rezygisk_api *, pthread_t *,
+                        const pthread_attr_t *, void *(*)(void *), void *);
 };
 
 enum module_loader_backend {
