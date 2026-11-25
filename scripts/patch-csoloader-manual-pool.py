@@ -468,14 +468,14 @@ static void _linker_shared_manual_publish(struct linker *linker) {
     # version-aware resolver still contains this stable diagnostic anchor.
     source = replace_once(
         source,
-        "    if (addr) {\n      LOGD(\"Found exported symbol '%s' in main image:
+        "    if (addr) {\n      LOGD(\"Found exported symbol '%s' in main image:"
         "    if (addr) {\n      if (requester != linker->img) {\n"
         "        for (int scope_i = 0; scope_i < linker->dep_count; ++scope_i) {\n"
         "          if (linker->dependencies[scope_i].img == requester)\n"
         "            linker->dependencies[scope_i].pool_uses_main = true;\n"
         "        }\n"
         "      }\n"
-        "      LOGD(\"Found exported symbol '%s' in main image:
+        "      LOGD(\"Found exported symbol '%s' in main image:"
         "mark main-image relocation bindings",
     )
 
