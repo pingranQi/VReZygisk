@@ -71,12 +71,15 @@ Initialize the pinned revision:
 git submodule update --init --recursive loader/src/external/csoloader
 ```
 
-Python 3 is required for the build-time patch step. The loader Makefile applies the tracked TLS/lifecycle hardening patch before
-compiling the submodule. It validates TLS registration and allocation,
-preallocates path bookkeeping before constructors, and adds per-image
-constructor/destructor state to prevent duplicate initialization/finalization.
-The patch is idempotent and is based on the pinned upstream revision; do not
-commit the modified submodule worktree as a new upstream revision.
+Python 3 is required for the build-time patch pipeline. The loader Makefile
+applies `scripts/patch-csoloader.py`, then the process-shared dependency pool
+and deferred-unload patches before compiling the pinned submodule. The pipeline
+validates TLS registration/allocation, preallocates path bookkeeping before
+constructors, adds per-image lifecycle state, shares Bionic-owned dependency
+objects across Linker instances where supported, and defers final teardown
+until custom handles and tracked execution leases have drained. The patches are
+idempotent and target the pinned upstream revision; do not commit the modified
+submodule worktree as a new upstream revision.
 
 Inspect the current pin:
 
