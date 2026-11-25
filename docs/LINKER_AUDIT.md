@@ -63,9 +63,12 @@ VReZygisk has two independent loading paths:
   while deferred images are pending.
 - Execution leases cover module callbacks and workers created through the
   ReZygisk API v6 `pthread_create` callback, backed by
-  `rz_module_pthread_create()`. Direct `pthread_create`, `clone`, raw syscalls,
-  and third-party thread pools are not transparently intercepted. Modules
-  must synchronize those threads before requesting unload.
+  `rz_module_pthread_create()`. API v7 adds transferable opaque lease tokens:
+  acquire before publishing work to any thread pool (including a custom
+  `clone` worker), then release from the worker after its last possible
+  module-code execution. Direct `pthread_create`, `clone`, raw syscalls, and
+  third-party runtimes are not transparently intercepted; their work is safe
+  only when explicitly bracketed by a lease or when the image remains resident.
 - Dependency ownership/reference counting is per CSOLoader instance for its dependency graph. There is no process-wide shared dependency reference-count registry across independent CSOLoader instances.
 
 ### TLS policy
