@@ -608,10 +608,32 @@ static bool version_requirement_for_index(const struct image_view *view,
   return true;
 }
 
-uintptr_t elf_resolve_versioned_symbol(void *provider_base,
-                                       void *requester_base,
-                                       size_t requester_symbol_index,
-                                       const char *symbol_name) {
+int elf_symbol_version_requirement(void *requester_base,
+                                   size_t requester_symbol_index) {
+  if (!requester_base) return -1;
+  struct image_view view = {0};
+  const Elf64_Ehdr *eh = NULL;
+  const Elf64_Phdr *phdr = NULL;
+  if (!image_bounds(requester_base, &view, &eh, &phdr)) return -1;
+  struct dynamic_info di = {0};
+  if (!parse_dynamic(&view, eh, phdr, &di)) return -1;
+  if (!di.versym) return 0;
+  if (requester_symbol_index >= di.symbol_count) return -1;
+  uint16_t wanted = di.versym[requester_symbol_index] & VER_NDX_MASK;
+  if (wanted <= VER_NDX_GLOBAL) return 0;
+  const char *version = NULL, *provider = NULL;
+  uint32_t hash = 0;
+  return version_requirement_for_index(&view, phdr, eh->e_phnum, &di,
+                                       wanted, &version, &provider, &hash) &&
+         version && provider && hash == elf_name_hash(version) ? 1 : -1;
+}
+
+uintptr_t elf_resolve_versioned_symbol_info(void *provider_base,
+                                            void *requester_base,
+                                            size_t requester_symbol_index,
+                                            const char *symbol_name,
+                                            unsigned *out_type) {
+  if (out_type) *out_type = STT_NOTYPE;
   if (!provider_base || !requester_base || !symbol_name || !*symbol_name)
     return 0;
 
@@ -663,6 +685,17 @@ uintptr_t elf_resolve_versioned_symbol(void *provider_base,
         strcmp(soname, required_provider) != 0) return 0;
   }
 
-  return elf_find_versioned_symbol(provider_base, symbol_name,
-                                   required_version);
+  return elf_find_versioned_symbol_info(provider_base, symbol_name,
+                                        required_version, out_type);
+}
+
+uintptr_t elf_resolve_versioned_symbol(void *provider_base,
+                                       void *requester_base,
+                                       size_t requester_symbol_index,
+                                       const char *symbol_name) {
+  unsigned type = STT_NOTYPE;
+  uintptr_t address = elf_resolve_versioned_symbol_info(
+      provider_base, requester_base, requester_symbol_index, symbol_name,
+      &type);
+  return type == STT_GNU_IFUNC ? 0 : address;
 }
