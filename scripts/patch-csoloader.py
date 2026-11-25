@@ -1133,6 +1133,110 @@ static bool _linker_reserve_dependencies(struct linker *linker, size_t required)
         csoloader_path.write_text(csoloader)
 
 
+
+def patch_csoloader_gnu_versions(linker_path: Path) -> None:
+    """Compile and wire the native ARM64 GNU symbol-version resolver into CSOLoader."""
+    repo_root = Path(__file__).resolve().parent.parent
+    source_version = repo_root / "loader" / "src" / "common" / "elf_version.c"
+    header_version = repo_root / "loader" / "src" / "common" / "elf_version.h"
+    csoloader_root = linker_path.parent.parent
+    target_source = csoloader_root / "src" / "elf_version.c"
+    target_header = csoloader_root / "include" / "elf_version.h"
+    if not source_version.is_file() or not header_version.is_file():
+        raise RuntimeError("VReZygisk GNU version resolver sources are missing")
+    target_source.write_text(source_version.read_text())
+    target_header.write_text(header_version.read_text())
+
+    makefile_path = csoloader_root / "Makefile"
+    makefile = makefile_path.read_text()
+    if "src/elf_version.c" not in makefile:
+        makefile = replace_once(
+            makefile,
+            "src/elf_util.c src/linker.c src/sleb128.c",
+            "src/elf_util.c src/elf_version.c src/linker.c src/sleb128.c",
+            "compile native GNU version resolver",
+        )
+        makefile_path.write_text(makefile)
+
+    source = linker_path.read_text()
+    marker = "/* VREZYGISK_NATIVE_GNU_VERSIONED_RELOCATIONS */"
+    if marker in source:
+        return
+
+    source = replace_once(
+        source,
+        '#include "linker.h"',
+        '#include "linker.h"\n#include "elf_version.h"',
+        "include native GNU version resolver",
+    )
+    source = replace_once(
+        source,
+        "struct linker_symbol_info {\n  void *addr;",
+        "static ElfW(Addr) handle_indirect_symbol(uintptr_t resolver_addr);\n\n"
+        "struct linker_symbol_info {\n  void *addr;",
+        "IFUNC resolver forward declaration",
+    )
+    source = replace_once(
+        source,
+        "static struct linker_symbol_info _linker_find_symbol_in_linker_scope(struct linker *linker, struct csoloader_elf *requester, const char *sym_name) {",
+        "static struct linker_symbol_info _linker_find_symbol_in_linker_scope(struct linker *linker, struct csoloader_elf *requester, const char *sym_name, size_t sym_idx) {\n"
+        "  int version_status = requester ? elf_symbol_version_requirement(requester->base, sym_idx) : 0;\n"
+        "  if (version_status < 0) {\n"
+        "    LOGE(\"Malformed GNU version requirement for symbol '%s' in %s\", sym_name, requester ? requester->elf : \"<unknown>\");\n"
+        "    return (struct linker_symbol_info){ .addr = NULL, .img = NULL, .tls_indices = NULL };\n"
+        "  }\n"
+        "  if (version_status > 0 && requester && requester->dynsym_start &&\n"
+        "      ELF_ST_TYPE(requester->dynsym_start[sym_idx].st_info) == STT_TLS) {\n"
+        "    LOGE(\"Versioned TLS relocation for '%s' is not supported by CSOLoader\", sym_name);\n"
+        "    return (struct linker_symbol_info){ .addr = NULL, .img = NULL, .tls_indices = NULL };\n"
+        "  }",
+        "version-aware linker scope entry",
+    )
+
+    old_main = """  if (linker->img != requester) {
+    void *addr = (void *)csoloader_elf_symb_address_exported(linker->img, sym_name);
+    if (addr) {"""
+    new_main = """  if (linker->img != requester) {
+    unsigned symbol_type = STT_NOTYPE;
+    uintptr_t symbol_address = version_status > 0
+        ? elf_resolve_versioned_symbol_info(linker->img->base, requester->base,
+                                            sym_idx, sym_name, &symbol_type)
+        : elf_find_symbol_info(linker->img->base, sym_name, &symbol_type);
+    if (symbol_address && symbol_type == STT_GNU_IFUNC)
+      symbol_address = handle_indirect_symbol(symbol_address);
+    void *addr = (void *)symbol_address;
+    if (addr) {"""
+    source = replace_once(source, old_main, new_main,
+                          "version-aware main-image symbol lookup")
+
+    old_dep = """    void *addr = (void *)csoloader_elf_symb_address_exported(candidate->img, sym_name);
+    if (!addr) continue;"""
+    new_dep = """    unsigned symbol_type = STT_NOTYPE;
+    uintptr_t symbol_address = version_status > 0
+        ? elf_resolve_versioned_symbol_info(candidate->img->base, requester->base,
+                                            sym_idx, sym_name, &symbol_type)
+        : elf_find_symbol_info(candidate->img->base, sym_name, &symbol_type);
+    if (symbol_address && symbol_type == STT_GNU_IFUNC)
+      symbol_address = handle_indirect_symbol(symbol_address);
+    void *addr = (void *)symbol_address;
+    if (!addr) continue;"""
+    source = source.replace(old_dep, new_dep)
+    if old_dep in source:
+        raise RuntimeError("version-aware dependency lookup replacement incomplete")
+    source = source.replace(
+        "_linker_find_symbol_in_linker_scope(linker, dep->img, sym_name)",
+        "_linker_find_symbol_in_linker_scope(linker, dep->img, sym_name, r->sym_idx)",
+    )
+    if "_linker_find_symbol_in_linker_scope(linker, dep->img, sym_name)" in source:
+        raise RuntimeError("not all relocation symbol lookup call sites were updated")
+
+    source = source.replace(
+        "/* INFO: Internal functions END */",
+        marker + "\n\n/* INFO: Internal functions END */",
+        1,
+    )
+    linker_path.write_text(source)
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(f"usage: {sys.argv[0]} <CSOLoader/src/linker.c>", file=sys.stderr)
@@ -1145,6 +1249,7 @@ def main() -> int:
         patch_csoloader_api(csoloader_path)
         patch_csoloader_lifecycle(path)
         patch_csoloader_linker_lifetime(path)
+        patch_csoloader_gnu_versions(path)
         if REGISTRATION_MARKER not in source:
             source = replace_once(
                 source,
