@@ -27,6 +27,9 @@
 #include "misc.h"
 #include "module.h"
 
+/* Added by the pinned CSOLoader build-time patch. */
+extern void csoloader_set_deferred_unload_callback(void (*callback)(void *));
+
 #include "art_method.h"
 #include "cpp_strings.h"
 #include "registers.h"
