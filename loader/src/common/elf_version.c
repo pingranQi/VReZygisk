@@ -617,8 +617,11 @@ int elf_symbol_version_requirement(void *requester_base,
   if (!image_bounds(requester_base, &view, &eh, &phdr)) return -1;
   struct dynamic_info di = {0};
   if (!parse_dynamic(&view, eh, phdr, &di)) return -1;
-  if (!di.versym) return 0;
   if (requester_symbol_index >= di.symbol_count) return -1;
+  /* Defined symbols use DT_VERDEF, not DT_VERNEED. They are not external
+   * relocation requirements and must stay on the local-symbol path. */
+  if (di.symtab[requester_symbol_index].st_shndx != SHN_UNDEF) return 0;
+  if (!di.versym) return 0;
   uint16_t wanted = di.versym[requester_symbol_index] & VER_NDX_MASK;
   if (wanted <= VER_NDX_GLOBAL) return 0;
   const char *version = NULL, *provider = NULL;
