@@ -513,6 +513,7 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
   out->strsz = strsz;
   out->needed_count = needed_count;
   out->needed_str_offsets = needed_str_offsets;
+  needed_str_offsets = NULL; /* Ownership transferred to out. */
 
   out->nsyms = 0;
 
@@ -592,10 +593,10 @@ static bool elf_load_dyn_info(int fd, const ElfW(Ehdr) *eh, const ElfW(Phdr) *ph
 
 cleanup:
   free(dyn);
+  free(needed_str_offsets);
   if (!success) {
-    free(out->strtab);
-    out->strtab = NULL;
-    free(needed_str_offsets);
+    /* Destroy every partially initialized field on all failure edges. */
+    elf_dyn_info_destroy(out);
   }
 
   return success;
@@ -1061,8 +1062,15 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
   if (remote_mapping_active) {                                             \
     args[0] = (long)remote_base;                                           \
     args[1] = (long)map_size;                                              \
-    remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2);        \
-    remote_mapping_active = false;                                         \
+    long unmap_result = remote_syscall(pid, regs, syscall_gadget, SYS_munmap, args, 2); \
+    if (unmap_result == 0) {                                               \
+      remote_mapping_active = false;                                       \
+    } else {                                                               \
+      LOGE("Remote cleanup munmap failed for %p (%zu): %ld",               \
+           (void *)remote_base, map_size, unmap_result);                   \
+      *out_base = remote_base;                                             \
+      *out_total_size = map_size;                                          \
+    }                                                                      \
   }                                                                        \
 } while (0)
 
