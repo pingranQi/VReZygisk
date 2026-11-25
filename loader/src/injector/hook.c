@@ -1354,9 +1354,7 @@ static void *api_acquire_execution_lease(struct rezygisk_api *api) {
   return lease;
 }
 
-static void api_release_execution_lease(struct rezygisk_api *api,
-                                        void *opaque_lease) {
-  (void)api;
+static void api_release_execution_lease_token(void *opaque_lease) {
   struct rz_execution_lease *lease = opaque_lease;
   if (!lease || lease->magic != RZ_EXECUTION_LEASE_MAGIC) return;
 
@@ -1365,6 +1363,27 @@ static void api_release_execution_lease(struct rezygisk_api *api,
   lease->module = NULL;
   free(lease);
   rz_module_call_leave(module);
+}
+
+static void *api_run_with_execution_lease(struct rezygisk_api *api,
+                                          void *opaque_lease,
+                                          void *(*entry)(void *), void *arg) {
+  (void)api;
+  struct rz_execution_lease *lease = opaque_lease;
+  if (!lease || lease->magic != RZ_EXECUTION_LEASE_MAGIC || !entry)
+    return NULL;
+
+  void *result = NULL;
+  pthread_cleanup_push(api_release_execution_lease_token, lease);
+  result = entry(arg);
+  pthread_cleanup_pop(1);
+  return result;
+}
+
+static void api_cancel_execution_lease(struct rezygisk_api *api,
+                                       void *opaque_lease) {
+  (void)api;
+  api_release_execution_lease_token(opaque_lease);
 }
 
 bool rezygisk_module_register(struct rezygisk_api *api, struct rezygisk_abi const *target_module) {
@@ -1399,7 +1418,8 @@ bool rezygisk_module_register(struct rezygisk_api *api, struct rezygisk_abi cons
     api->pthread_create = api_pthread_create;
   if (target_module->api_version >= 7) {
     api->acquire_execution_lease = api_acquire_execution_lease;
-    api->release_execution_lease = api_release_execution_lease;
+    api->run_with_execution_lease = api_run_with_execution_lease;
+    api->cancel_execution_lease = api_cancel_execution_lease;
   }
 
   return true;
