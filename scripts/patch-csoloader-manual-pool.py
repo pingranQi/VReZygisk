@@ -219,11 +219,20 @@ def patch(header_path: Path, linker_path: Path) -> None:
 static bool _linker_scope_append_image(char *buffer, size_t capacity,
                                        size_t *used,
                                        const struct csoloader_elf *img,
-                                       bool manual) {
-  if (!buffer || !used || !img || !img->elf || *used >= capacity) return false;
+                                       bool manual, bool main_image) {
+  if (!buffer || !used || !img || !img->elf || !img->header ||
+      *used >= capacity) return false;
   struct stat st;
   int written;
-  if (stat(img->elf, &st) == 0) {
+  if (stat(img->elf, &st) == 0 && !manual && !main_image) {
+    /* Bionic provider mappings are part of the relocation scope by address. */
+    written = snprintf(buffer + *used, capacity - *used,
+        "%c:%s:%p:%llu:%llu:%llu:%lld:%u:%u;",
+        'B', img->elf, img->base,
+        (unsigned long long)st.st_dev, (unsigned long long)st.st_ino,
+        (unsigned long long)st.st_size, (long long)st.st_mtime,
+        (unsigned)img->header->e_machine, (unsigned)img->header->e_type);
+  } else if (stat(img->elf, &st) == 0) {
     written = snprintf(buffer + *used, capacity - *used,
         "%c:%s:%llu:%llu:%llu:%lld:%u:%u;",
         manual ? 'M' : 'B', img->elf,
@@ -231,8 +240,7 @@ static bool _linker_scope_append_image(char *buffer, size_t capacity,
         (unsigned long long)st.st_size, (long long)st.st_mtime,
         (unsigned)img->header->e_machine, (unsigned)img->header->e_type);
   } else {
-    /* Bionic images may be represented by a SONAME rather than a path.
-     * Their process-wide mapping address is stable while the dlopen ref lives. */
+    /* Unstatable images are keyed by their live mapping address. */
     written = snprintf(buffer + *used, capacity - *used,
         "%c:%s:%p:%u:%u;",
         manual ? 'M' : 'B', img->elf, img->base,
@@ -252,12 +260,12 @@ static char *_linker_shared_manual_scope_key(struct linker *linker,
   char *key = calloc(1, capacity);
   if (!key) return NULL;
   size_t used = 0;
-  if (!_linker_scope_append_image(key, capacity, &used, linker->img, false))
+  if (!_linker_scope_append_image(key, capacity, &used, linker->img, false, true))
     goto fail;
   for (int i = 0; i < linker->dep_count; ++i) {
     struct loaded_dep *dep = &linker->dependencies[i];
     if (!_linker_scope_append_image(key, capacity, &used, dep->img,
-                                    dep->is_manual_load))
+                                    dep->is_manual_load, false))
       goto fail;
   }
   int written = snprintf(key + used, capacity - used, "#requester=%d",
