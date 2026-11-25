@@ -9,25 +9,17 @@ use core::ptr;
 const MAX_WIRE_STRING: usize = 1024 * 1024;
 
 unsafe extern "C" {
-    fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+    fn read_loop(fd: c_int, buf: *mut c_void, count: usize) -> isize;
     fn malloc(size: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
 }
 
-unsafe fn read_exact(fd: c_int, mut dst: *mut u8, mut remaining: usize) -> bool {
-    while remaining != 0 {
-        let n = read(fd, dst.cast(), remaining);
-        if n <= 0 {
-            return false;
-        }
-        let consumed = n as usize;
-        if consumed > remaining {
-            return false;
-        }
-        dst = dst.add(consumed);
-        remaining -= consumed;
+unsafe fn read_exact(fd: c_int, dst: *mut u8, count: usize) -> bool {
+    if count == 0 {
+        return true;
     }
-    true
+    let n = read_loop(fd, dst.cast(), count);
+    n >= 0 && n as usize == count
 }
 
 #[no_mangle]
