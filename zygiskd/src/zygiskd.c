@@ -404,6 +404,13 @@ void zygiskd_start(char *restrict argv[]) {
         break;
       }
       case ZygoteRestart: {
+        /*
+         * zygiskd may outlive Zygote during a soft reboot. Drop both Clean and
+         * Mounted namespace snapshots so the next app uses the current mounts.
+         */
+        clear_mns_cache();
+        first_process = true;
+
         for (size_t i = 0; i < context.len; i++) {
           if (context.modules[i].companion <= -1) continue;
 
