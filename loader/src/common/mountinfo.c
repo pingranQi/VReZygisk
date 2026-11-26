@@ -1,6 +1,4 @@
 /* /data/adb/modules/rezygisk/loader/src/common/mountinfo.c */
-#define _GNU_SOURCE
-
 #include "mountinfo.h"
 
 #include <errno.h>
@@ -259,7 +257,7 @@ int mountinfo_parse_file(const char *path,
   *out_table = NULL;
   if (error_line != NULL) *error_line = 0;
 
-  FILE *file = fopen(path, "re");
+  FILE *file = fopen(path, "r");
   if (file == NULL) return -1;
 
   struct mountinfo_table *table = calloc(1, sizeof(*table));
