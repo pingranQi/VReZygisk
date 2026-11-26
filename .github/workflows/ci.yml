@@ -6,6 +6,7 @@ on:
       - feature/csoloader-hardening
       - optimize/hiding-memory-concurrency
       - rust/resource-lifecycle-hardening
+      - port/treat-wheel-high-value
   pull_request:
   merge_group:
   workflow_dispatch:
@@ -34,6 +35,9 @@ jobs:
 
       - name: Setup Rust target
         run: rustup target add aarch64-linux-android
+
+      - name: Test mountinfo parser
+        run: make -C loader test-mountinfo
 
       - name: Build
         run: |
