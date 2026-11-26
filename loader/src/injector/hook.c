@@ -22,6 +22,7 @@
 #include "daemon.h"
 #include "hook.h"
 #include "hiding.h"
+#include "treat_wheel_port.h"
 #include "misc.h"
 #include "module.h"
 
@@ -1399,6 +1400,18 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   */
   if (!in_denylist && FLAG_GET(ctx, DO_REVERT_UNMOUNT))
     update_mnt_ns(Clean, target_uid, ctx->process, false);
+
+  /*
+   * Treat Wheel compatibility features are explicitly opt-in and fail open.
+   * P3/P4 apply to denylisted processes; P5 only applies to non-manager,
+   * non-denylisted processes, matching the upstream feature's scope.
+   */
+  if (in_denylist) {
+    treat_wheel_hide_frida_traces();
+    treat_wheel_scrub_mntent_buffer();
+  } else if ((ctx->info_flags & PROCESS_IS_MANAGER) == 0) {
+    treat_wheel_umount_revanced_mounts(ctx->process);
+  }
 }
 
 static void rz_app_specialize_post(struct zygisk_context *ctx) {
