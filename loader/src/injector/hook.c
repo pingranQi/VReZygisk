@@ -473,63 +473,112 @@ void hook_jni_methods(JNIEnv *env, const char *clz, JNINativeMethod *methods, in
 /* INFO: JNI method hook definitions */
 #include "jni_hooks.h"
 
+/*
+ * Collect every page-rounded PT_LOAD range. A shared object commonly has
+ * separate R, RX and RW load segments; recording only p_offset == 0 misses
+ * most of its mapped image and can leave later segments identifiable.
+ */
+static bool append_loaded_segment(struct maps_info *maps,
+                                  const struct dl_phdr_info *info,
+                                  const ElfW(Phdr) *phdr,
+                                  size_t page_size,
+                                  dev_t dev,
+                                  ino_t ino) {
+  const uintptr_t load_bias = (uintptr_t)info->dlpi_addr;
+  const uintptr_t vaddr = (uintptr_t)phdr->p_vaddr;
+  const uintptr_t memsz = (uintptr_t)phdr->p_memsz;
+
+  if (memsz == 0 || vaddr > UINTPTR_MAX - load_bias) return true;
+  const uintptr_t raw_start = load_bias + vaddr;
+  if (memsz > UINTPTR_MAX - raw_start) return true;
+  const uintptr_t raw_end = raw_start + memsz;
+  const uintptr_t mask = (uintptr_t)page_size - 1;
+
+  if ((page_size & (page_size - 1)) != 0 || raw_end > UINTPTR_MAX - mask)
+    return true;
+
+  const uintptr_t start = raw_start & ~mask;
+  const uintptr_t end = (raw_end + mask) & ~mask;
+  if (end <= start) return true;
+
+  if (maps->length == SIZE_MAX / sizeof(*maps->maps)) {
+    LOGE("Loaded-library segment count overflow");
+    return false;
+  }
+
+  struct map_entry *new_maps =
+      realloc(maps->maps, (maps->length + 1) * sizeof(*maps->maps));
+  if (!new_maps) {
+    LOGE("Failed to reallocate memory for loaded-library segments");
+    return false;
+  }
+  maps->maps = new_maps;
+
+  char *path = strdup(info->dlpi_name);
+  if (!path) {
+    LOGE("Failed to duplicate path for %s", info->dlpi_name);
+    return false;
+  }
+
+  int perms = 0;
+  if (phdr->p_flags & PF_R) perms |= PROT_READ;
+  if (phdr->p_flags & PF_W) perms |= PROT_WRITE;
+  if (phdr->p_flags & PF_X) perms |= PROT_EXEC;
+
+  maps->maps[maps->length++] = (struct map_entry) {
+    .start = start,
+    .end = end,
+    .offset = 0,
+    .dev = dev,
+    .inode = ino,
+    .perms = perms,
+    .is_private = true,
+    .path = path
+  };
+  return true;
+}
+
 /* INFO: Collect candidate libraries across Bionic, ReZygisk, and loaded modules without procfs */
 static int collect_dl_libs(struct dl_phdr_info *info, size_t size, void *data) {
-  (void) size;
+  (void)size;
 
   struct maps_info *maps = (struct maps_info *)data;
   if (!info->dlpi_name || info->dlpi_name[0] == '\0') return 0;
 
+  long raw_page_size = sysconf(_SC_PAGESIZE);
+  if (raw_page_size <= 0) {
+    LOGE("Unable to determine page size while enumerating ELF segments");
+    return 0;
+  }
+  const size_t page_size = (size_t)raw_page_size;
+
+  /* Device/inode identify the container for APK-backed libraries as well. */
+  struct stat st;
+  dev_t dev = 0;
+  ino_t ino = 0;
+  const char *zip = strstr(info->dlpi_name, "!/");
+  if (zip) {
+    char *container = strndup(info->dlpi_name, (size_t)(zip - info->dlpi_name));
+    if (container) {
+      if (stat(container, &st) == 0) {
+        dev = st.st_dev;
+        ino = st.st_ino;
+      }
+      free(container);
+    }
+  } else if (stat(info->dlpi_name, &st) == 0) {
+    dev = st.st_dev;
+    ino = st.st_ino;
+  }
+
   for (ElfW(Half) i = 0; i < info->dlpi_phnum; i++) {
     const ElfW(Phdr) *phdr = &info->dlpi_phdr[i];
-    if (phdr->p_type != PT_LOAD || phdr->p_offset != 0 || !(phdr->p_flags & PF_R)) continue;
+    if (phdr->p_type != PT_LOAD) continue;
 
-    struct map_entry *new_maps = realloc(maps->maps, (maps->length + 1) * sizeof(struct map_entry));
-    if (!new_maps) {
-      LOGE("Failed to reallocate memory for maps");
-
-      return 0;
+    if (!append_loaded_segment(maps, info, phdr, page_size, dev, ino)) {
+      /* Stop this object's enumeration; retain already collected valid ranges. */
+      break;
     }
-
-    /* INFO: The device and inode belong to the container when the library lives
-               inside of an APK (e.g. /data/app/.../base.apk!/lib/arm64-v8a/x.so). */
-    struct stat st;
-    dev_t dev = 0;
-    ino_t ino = 0;
-    char *zip = strstr(info->dlpi_name, "!/");
-    if (zip) {
-      char *container = strndup(info->dlpi_name, (size_t)(zip - info->dlpi_name));
-      if (container) {
-        if (stat(container, &st) == 0) {
-          dev = st.st_dev;
-          ino = st.st_ino;
-        }
-
-        free(container);
-      }
-    } else if (stat(info->dlpi_name, &st) == 0) {
-      dev = st.st_dev;
-      ino = st.st_ino;
-    }
-
-    maps->maps = new_maps;
-    maps->maps[maps->length++] = (struct map_entry){
-      .start = (uintptr_t)info->dlpi_addr + phdr->p_vaddr,
-      .end = (uintptr_t)info->dlpi_addr + phdr->p_vaddr + phdr->p_memsz,
-      .offset = 0,
-      .dev = dev,
-      .inode = ino,
-      .perms = PROT_READ,
-      .is_private = true,
-      .path = strdup(info->dlpi_name)
-    };
-    if (!maps->maps[maps->length - 1].path) {
-      LOGE("Failed to duplicate path for %s", info->dlpi_name);
-
-      return 0;
-    }
-
-    break;
   }
 
   return 0;
