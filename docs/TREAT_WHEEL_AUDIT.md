@@ -37,7 +37,7 @@ Do not merge Treat Wheel wholesale into ReZygisk. Treat Wheel is a separate Zygi
 
 Any runtime change must pass:
 - Build for supported Android ABIs and the repository's existing NDK/toolchain.
-- Android API 25, 29,  treinta, 34, and current platform coverage where available.
+- Android API 25, 29, 30, 34, and current platform coverage where available.
 - Magisk, KernelSU, and APatch runtime checks.
 - App launch, WebView provider initialization, file picker, DocumentsUI, Download, and app-private file access.
 - Soft reboot followed by a full reboot regression.
