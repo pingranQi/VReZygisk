@@ -576,8 +576,8 @@ static int collect_dl_libs(struct dl_phdr_info *info, size_t size, void *data) {
     if (phdr->p_type != PT_LOAD) continue;
 
     if (!append_loaded_segment(maps, info, phdr, page_size, dev, ino)) {
-      /* Stop this object's enumeration; retain already collected valid ranges. */
-      break;
+      /* Abort the snapshot: partial ranges must never drive destructive VMA replacement. */
+      return 1;
     }
   }
 
@@ -589,7 +589,11 @@ static struct maps_info *get_loaded_libraries(void) {
   if (!maps) return NULL;
 
   /* INFO: 1.: Libraries loaded by system linker */
-  dl_iterate_phdr(collect_dl_libs, maps);
+  if (dl_iterate_phdr(collect_dl_libs, maps) != 0) {
+    LOGE("Failed to enumerate all ELF load segments; skip anonymous-memory pass");
+    free_maps(maps);
+    return NULL;
+  }
 
   /* INFO: 2.: ReZygisk itself (loaded via RCSOLoader) */
   if (start_addr && block_size > 0 && self_dev) {
