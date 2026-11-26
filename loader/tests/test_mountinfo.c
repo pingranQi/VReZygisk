@@ -1,6 +1,4 @@
 /* /data/adb/modules/rezygisk/loader/tests/test_mountinfo.c */
-#define _GNU_SOURCE
-
 #include "mountinfo.h"
 
 #include <assert.h>
