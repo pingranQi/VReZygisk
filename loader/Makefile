@@ -31,7 +31,7 @@ COMMON_LDFLAGS = -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment       
 				 -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined \
 				 -Qunused-arguments -Wl,--gc-sections
 
-COMMON_SRCS = src/common/daemon.c src/common/elf_util.c   \
+COMMON_SRCS = src/common/daemon.c src/common/elf_util.c src/common/mountinfo.c \\
 			  src/common/misc.c src/common/socket_utils.c
 INJECTOR_SRCS = src/injector/alloc.c src/injector/cpp_strings.c src/injector/entry.c \
 				src/injector/hook.c src/injector/hiding.c src/injector/ptrace_clear.c
@@ -68,6 +68,13 @@ all:
 	@touch $(OBJ_ROOT)/.done
 
 arch: $(LIBZYGISK_STRIPPED) $(LIBPTRACE_STRIPPED)
+
+HOST_CC ?= cc
+
+test-mountinfo:
+	@mkdir -p $(BUILD_DIR)/tests
+	$(HOST_CC) -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror -Isrc/include src/common/mountinfo.c tests/test_mountinfo.c -o $(BUILD_DIR)/tests/test_mountinfo
+	$(BUILD_DIR)/tests/test_mountinfo
 
 clean:
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/loader
