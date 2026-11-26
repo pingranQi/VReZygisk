@@ -4,6 +4,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <link.h>
+#include <limits.h>
+#include <stddef.h>
 #include <mntent.h>
 #include <stdbool.h>
 #include <stdint.h>
