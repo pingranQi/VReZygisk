@@ -57,7 +57,7 @@ CSOLOADER_DIR = src/external/csoloader
 COMMON_INCLUDES = -Isrc/include
 INJECTOR_INCLUDES = -Isrc/include -I$(PLTI_DIR)/src -I$(CSOLOADER_DIR)/include
 
-.PHONY: all arch clean
+.PHONY: all arch clean test-mountinfo
 
 all:
 	@for arch in $(ARCHS); do                                                                                  \
