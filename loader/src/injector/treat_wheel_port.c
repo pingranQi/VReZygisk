@@ -29,6 +29,13 @@
 #define TW_MAX_LINKER_OBJECTS 4096U
 
 typedef void SoInfo;
+struct tw_link_map_abi {
+  ElfW(Addr) l_addr;
+  char *l_name;
+  ElfW(Dyn) *l_ld;
+  struct tw_link_map_abi *l_next;
+  struct tw_link_map_abi *l_prev;
+};
 typedef const char *(*get_realpath_fn)(void *);
 typedef void (*soinfo_unload_fn)(SoInfo *);
 typedef void (*linker_guard_fn)(void);
@@ -162,12 +169,12 @@ bool treat_wheel_hide_frida_traces(void) {
     if (constructors_offset < 0) {
       const uintptr_t candidate_address =
           (uintptr_t)solinker + i * sizeof(void *);
-      struct link_map candidate_map;
+      struct tw_link_map_abi candidate_map;
       memcpy(&candidate_map, (const void *)candidate_address,
              sizeof(candidate_map));
 
       const size_t map_slots =
-          (sizeof(struct link_map) + sizeof(void *) - 1U) / sizeof(void *);
+          (sizeof(struct tw_link_map_abi) + sizeof(void *) - 1U) / sizeof(void *);
       const uintptr_t bool_address =
           candidate_address + map_slots * sizeof(void *);
       bool constructors_called = false;
