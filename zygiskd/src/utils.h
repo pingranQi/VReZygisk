@@ -98,5 +98,6 @@ void stringify_root_impl_name(struct root_impl impl, char *restrict output);
 bool should_preserve_mount_namespace(uid_t uid, const char *process);
 
 int save_mns_fd(int pid, uid_t uid, enum MountNamespaceState mns_state, struct root_impl impl);
+void clear_mns_cache(void);
 
 #endif /* UTILS_H */

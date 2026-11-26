@@ -908,6 +908,26 @@ struct mns_cache_entry {
 
 static struct mns_cache_entry *mns_cache;
 
+/*
+ * A Zygote restart can happen without restarting zygiskd (e.g. soft reboot).
+ * Namespace fds describe the old mount topology, so they must not survive it.
+ */
+void clear_mns_cache(void) {
+  size_t cleared = 0;
+  struct mns_cache_entry *entry = mns_cache;
+  mns_cache = NULL;
+
+  while (entry != NULL) {
+    struct mns_cache_entry *next = entry->next;
+    if (entry->fd >= 0) close(entry->fd);
+    free(entry);
+    entry = next;
+    cleared++;
+  }
+
+  LOGI("Cleared %zu cached mount namespace fd(s) after Zygote restart", cleared);
+}
+
 static int find_cached_mns_fd(uid_t uid, enum MountNamespaceState state) {
   for (struct mns_cache_entry *entry = mns_cache; entry != NULL; entry = entry->next) {
     if (entry->uid == uid && entry->state == state) return entry->fd;

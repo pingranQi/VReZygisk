@@ -676,6 +676,8 @@ void sigchld_listener_callback() {
           LOGV("%d program %s", pid, program);
 
           const char *tracer = NULL;
+          /* Snapshot before PRE_INJECT_64 may create the daemon for first boot. */
+          bool restart_daemon = status64.daemon_pid != -1;
           do {
             if (tracing_state != TRACING) {
               LOGD("Stopped injecting %d because status is not set to tracing", pid);
@@ -711,8 +713,8 @@ void sigchld_listener_callback() {
 
                   LOGI("exec tracer command: %s trace %s", tracer, pid_str);
 
-                  /* INFO: Only restart companions if it's not the first time */
-                  if (count_zygote64 > 1)
+                  /* INFO: Invalidate daemon state on every Zygote restart, including delayed soft reboots. */
+                  if (restart_daemon)
                     execl(tracer, basename(tracer), "trace", pid_str, "--restart", NULL);
                   else
                     execl(tracer, basename(tracer), "trace", pid_str, NULL);
