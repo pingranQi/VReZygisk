@@ -21,9 +21,9 @@
 #include "logging.h"
 #include "mountinfo.h"
 
-#define TW_ENABLE_FRIDA_FILE "/data/adb/rezygisk/enable-frida-trace-cleanup"
-#define TW_ENABLE_MNTENT_FILE "/data/adb/rezygisk/enable-mntent-buffer-scrub"
-#define TW_ENABLE_RVU_FILE "/data/adb/rezygisk/enable-revanced-mount-umount"
+#define TW_DISABLE_FRIDA_FILE "/data/adb/rezygisk/disable-frida-trace-cleanup"
+#define TW_DISABLE_MNTENT_FILE "/data/adb/rezygisk/disable-mntent-buffer-scrub"
+#define TW_DISABLE_RVU_FILE "/data/adb/rezygisk/disable-revanced-mount-umount"
 #define TW_MODULES_DIR "/data/adb/modules"
 #define TW_MNTENT_SCAN_LIMIT 1024U
 #define TW_MAX_LINKER_OBJECTS 4096U
@@ -74,8 +74,8 @@ static bool is_frida_agent_path(const char *path) {
  * and discovered offset is checked; unsupported layouts are skipped.
  */
 bool treat_wheel_hide_frida_traces(void) {
-  if (access(TW_ENABLE_FRIDA_FILE, F_OK) != 0) {
-    LOGD("TreatWheel P3 disabled; create %s to enable", TW_ENABLE_FRIDA_FILE);
+  if (access(TW_DISABLE_FRIDA_FILE, F_OK) == 0) {
+    LOGD("TreatWheel P3 disabled by %s", TW_DISABLE_FRIDA_FILE);
     return true;
   }
 
@@ -263,8 +263,8 @@ bool treat_wheel_hide_frida_traces(void) {
  * This does not alter mount tables or the active mount namespace.
  */
 bool treat_wheel_scrub_mntent_buffer(void) {
-  if (access(TW_ENABLE_MNTENT_FILE, F_OK) != 0) {
-    LOGD("TreatWheel P4 disabled; create %s to enable", TW_ENABLE_MNTENT_FILE);
+  if (access(TW_DISABLE_MNTENT_FILE, F_OK) == 0) {
+    LOGD("TreatWheel P4 disabled by %s", TW_DISABLE_MNTENT_FILE);
     return true;
   }
 
@@ -427,8 +427,8 @@ static int compare_mount_paths_desc(const void *left, const void *right) {
  * No cross-process setns() and no daemon pointer protocol are used.
  */
 bool treat_wheel_umount_revanced_mounts(const char *process_name) {
-  if (access(TW_ENABLE_RVU_FILE, F_OK) != 0) {
-    LOGD("TreatWheel P5 disabled; create %s to enable", TW_ENABLE_RVU_FILE);
+  if (access(TW_DISABLE_RVU_FILE, F_OK) == 0) {
+    LOGD("TreatWheel P5 disabled by %s", TW_DISABLE_RVU_FILE);
     return true;
   }
 
