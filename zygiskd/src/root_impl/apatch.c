@@ -11,7 +11,7 @@
 #include "apatch.h"
 
 void apatch_get_existence(struct root_impl_state *state) {
-  if (access("/data/adb/ap/bin/apd", F_OK) != 0) {
+  if (access("/data/adb/apd", F_OK) != 0) {
     state->state = Inexistent;
 
     return;
@@ -26,7 +26,7 @@ void apatch_get_existence(struct root_impl_state *state) {
     return;
   }
 
-  if (strstr(PATH, "/data/adb/ap/bin") == NULL) {
+  if (strstr(PATH, "/data/adb") == NULL) {
     LOGE("APatch's APD binary is not in PATH");
 
     state->state = Inexistent;
@@ -34,7 +34,7 @@ void apatch_get_existence(struct root_impl_state *state) {
     return;
   }
 
-  char apatch_version[32];
+  char apatch_version[32] = {0};
   const char *const argv[] = { "apd", "-V", NULL };
 
   if (!exec_command(apatch_version, sizeof(apatch_version), "/data/adb/apd", argv)) {
@@ -45,7 +45,16 @@ void apatch_get_existence(struct root_impl_state *state) {
     return;
   }
 
-  int version = atoi(apatch_version + strlen("apd "));
+  char *version_text = apatch_version;
+  if (strncmp(version_text, "apd ", 4) == 0) version_text += 4;
+  char *version_end = NULL;
+  errno = 0;
+  unsigned long parsed_version = strtoul(version_text, &version_end, 10);
+  if (errno != 0 || version_end == version_text || (*version_end != '\\0' && *version_end != '\\n') || parsed_version > 999999UL) {
+    state->state = Abnormal;
+    return;
+  }
+  int version = (int)parsed_version;
 
   if (version == 0) state->state = Abnormal;
   else if (version >= MIN_APATCH_VERSION && version <= 999999) state->state = Supported;
