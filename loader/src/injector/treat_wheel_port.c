@@ -21,9 +21,7 @@
 #include "logging.h"
 #include "mountinfo.h"
 
-#define TW_ENABLE_FRIDA_FILE "/data/adb/rezygisk/enable-frida-trace-cleanup"
 #define TW_DISABLE_FRIDA_FILE "/data/adb/rezygisk/disable-frida-trace-cleanup"
-#define TW_ENABLE_MNTENT_FILE "/data/adb/rezygisk/enable-mntent-buffer-scrub"
 #define TW_DISABLE_MNTENT_FILE "/data/adb/rezygisk/disable-mntent-buffer-scrub"
 #define TW_DISABLE_RVU_FILE "/data/adb/rezygisk/disable-revanced-mount-umount"
 #define TW_MODULES_DIR "/data/adb/modules"
@@ -80,11 +78,6 @@ bool treat_wheel_hide_frida_traces(void) {
     LOGD("TreatWheel P3 disabled by %s", TW_DISABLE_FRIDA_FILE);
     return true;
   }
-  if (access(TW_ENABLE_FRIDA_FILE, F_OK) != 0) {
-    LOGD("TreatWheel P3 is opt-in; create %s to enable", TW_ENABLE_FRIDA_FILE);
-    return true;
-  }
-
   struct linker_path_context path_ctx = { 0 };
   dl_iterate_phdr(find_linker_path, &path_ctx);
   if (path_ctx.path[0] == '\0') {
@@ -273,8 +266,13 @@ bool treat_wheel_scrub_mntent_buffer(void) {
     LOGD("TreatWheel P4 disabled by %s", TW_DISABLE_MNTENT_FILE);
     return true;
   }
-  if (access(TW_ENABLE_MNTENT_FILE, F_OK) != 0) {
-    LOGD("TreatWheel P4 is opt-in; create %s to enable", TW_ENABLE_MNTENT_FILE);
+  /*
+   * getmntent() returns Bionic's process-local static line buffer. This hook
+   * runs in the freshly forked app before app threads are started; refuse to
+   * touch the non-reentrant buffer if that lifecycle assumption is violated.
+   */
+  if (gettid() != getpid()) {
+    LOGW("TreatWheel P4: skip static mntent buffer scrub outside main thread");
     return true;
   }
 
@@ -285,12 +283,9 @@ bool treat_wheel_scrub_mntent_buffer(void) {
     return true;
   }
 
-  char line_storage[TW_MNTENT_SCAN_LIMIT];
-  struct mntent entry_storage;
   struct mntent *entry = NULL;
   char *line_buffer = NULL;
-  while ((entry = getmntent_r(mounts, &entry_storage, line_storage,
-                              (int)sizeof(line_storage))) != NULL) {
+  while ((entry = getmntent(mounts)) != NULL) {
     if (entry->mnt_fsname != NULL) line_buffer = entry->mnt_fsname;
   }
 
@@ -309,7 +304,7 @@ bool treat_wheel_scrub_mntent_buffer(void) {
 
   memset(line_buffer, 0, length + 1U);
   endmntent(mounts);
-  LOGD("TreatWheel P4: cleared %zu bytes from the process-local mntent buffer",
+  LOGD("TreatWheel P4: cleared %zu bytes from Bionic's process-local mntent buffer",
        length + 1U);
   return true;
 }
