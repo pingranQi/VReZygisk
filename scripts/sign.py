@@ -90,6 +90,32 @@ def sign_machikado(module_dir: str, sig_name: str, abi: str, is_64bit: bool, pri
   print(f"  Signed {sig_name}")
 
 
+def discover_abis(module_dir: str):
+  root = Path(module_dir)
+  layouts = [
+    ("arm64-v8a", "64", True),
+    ("armeabi-v7a", "32", False),
+    ("x86_64", "64", True),
+    ("x86", "32", False),
+  ]
+  found = []
+  errors = []
+  for abi, suffix, is_64bit in layouts:
+    required = [root / "lib" / abi / "libzygisk.so",
+                root / "lib" / abi / "libzygisk_ptrace.so",
+                root / "bin" / abi / "zygiskd"]
+    present = [path.is_file() for path in required]
+    if any(present) and not all(present):
+      errors.extend(str(path.relative_to(root)) for path, exists in zip(required, present) if not exists)
+    elif all(present):
+      found.append((abi, suffix, is_64bit))
+  if errors:
+    raise FileNotFoundError("Incomplete ABI payload; missing: " + ", ".join(errors))
+  if not found:
+    raise FileNotFoundError("No complete supported ABI payload found in module directory")
+  return found
+
+
 def compute_sha256_hashes(module_dir: str):
   """Compute SHA-256 hash for every file in the module directory."""
 
@@ -153,8 +179,10 @@ def main():
 
     print("No private_key and public_key found, this build will not be signed")
 
-    # INFO: Create empty machikado files
-    for name in ["machikado.arm64", "machikado.arm", "machikado.x86_64", "machikado.x86"]:
+    # INFO: Create unsigned markers only for packaged ABIs.
+    for abi, suffix, is_64bit in discover_abis(module_dir):
+      name = {"arm64-v8a": "machikado.arm64", "armeabi-v7a": "machikado.arm",
+              "x86_64": "machikado.x86_64", "x86": "machikado.x86"}[abi]
       (root / name).touch()
 
     # INFO: Compute SHA256 hashes
@@ -175,11 +203,11 @@ def main():
 
   print("=== Guards the peace of Machikado ===")
 
-  # INFO: Sign machikado for each architecture
-  sign_machikado(module_dir, "machikado.arm64", "arm64-v8a", True, private_key_bytes, public_key_bytes)
-  sign_machikado(module_dir, "machikado.arm", "armeabi-v7a", False, private_key_bytes, public_key_bytes)
-  sign_machikado(module_dir, "machikado.x86_64", "x86_64", True, private_key_bytes, public_key_bytes)
-  sign_machikado(module_dir, "machikado.x86", "x86", False, private_key_bytes, public_key_bytes)
+  # INFO: Sign only ABIs actually packaged; fail early on partial payloads.
+  for abi, suffix, is_64bit in discover_abis(module_dir):
+    sig_name = {"arm64-v8a": "machikado.arm64", "armeabi-v7a": "machikado.arm",
+                "x86_64": "machikado.x86_64", "x86": "machikado.x86"}[abi]
+    sign_machikado(module_dir, sig_name, abi, is_64bit, private_key_bytes, public_key_bytes)
 
   # INFO: Compute SHA256 hashes for all files (including machikado)
   compute_sha256_hashes(module_dir)
