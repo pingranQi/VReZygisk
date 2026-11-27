@@ -1062,8 +1062,7 @@ static void rz_fork_pre(struct zygisk_context *ctx) {
     if (fd == -1) continue;
 
     if (fd >= MAX_FD_SIZE) {
-      close(fd);
-
+      /* Keep valid descriptors outside the tracking bitmap; never close them. */
       continue;
     }
 
@@ -1081,6 +1080,10 @@ static void mark_fds_allowed(struct zygisk_context *ctx, JNIEnv *env, jintArray 
   if (!fdsArray) return;
 
   jint *arr = (*env)->GetIntArrayElements(env, fdsArray, NULL);
+  if (arr == NULL) {
+    LOGE("GetIntArrayElements failed while marking allowed file descriptors");
+    return;
+  }
   jint len = (*env)->GetArrayLength(env, fdsArray);
 
   for (jint i = 0; i < len; ++i) {
