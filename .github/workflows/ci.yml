@@ -40,6 +40,12 @@ jobs:
       - name: Setup Rust target
         run: rustup target add aarch64-linux-android
 
+      - name: Verify generated JNI hooks
+        working-directory: loader/src/injector
+        run: |
+          python3 gen_jni_hooks.py
+          git diff --exit-code -- jni_hooks.h
+
       - name: Test mountinfo parser
         run: make -C loader test-mountinfo
 
