@@ -14,7 +14,8 @@ allow zygote ksu dir search
 allow zygote ksu {lnk_file file} read
 
 allow zygote adb_data_file dir search
-allow zygote adb_data_file file *
+# Zygote only needs to inspect/map module payloads under /data/adb.
+allow zygote adb_data_file file {read open getattr map execute}
 allow zygote proc file {read open}
 allow zygote nsfs file {read open}
 allow zygote zygote process execmem
