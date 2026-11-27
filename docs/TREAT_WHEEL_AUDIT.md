@@ -12,19 +12,27 @@ P3, P4, and P5 are now implemented independently in:
 - `loader/src/injector/hook.c`
 - `loader/Makefile`
 
-The implementation does not reuse Treat Wheel's companion protocol, daemon operation enums, or module ABI. P3/P4/P5 are enabled by default, fail-open, and can each be disabled with a marker file. P5 retains an explicit per-module opt-in gate.
+The implementation does not reuse Treat Wheel's companion protocol, daemon operation enums, or module ABI. P3 and P4 are opt-in because they touch private linker state and Bionic process-local buffers. P5 remains guarded by explicit per-module opt-in. All three features also have global disable markers.
 
 | Feature | Runtime scope | Default | Disable switch | Behavior |
 |---|---|---|---|---|
-| P3 Frida linker-entry cleanup | Denylisted app processes | Enabled | `/data/adb/rezygisk/disable-frida-trace-cleanup` | Runtime-probes linker symbols and soinfo layout; removes only exact known Frida agent memfd entries. Unknown linker layouts are skipped. |
-| P4 mntent buffer scrub | Denylisted app processes | Enabled | `/data/adb/rezygisk/disable-mntent-buffer-scrub` | Clears the process-local last Bionic `getmntent` line buffer. Does not alter the mount table or call setns/umount. |
+| P3 Frida linker-entry cleanup | Denylisted app processes | Opt-in | `/data/adb/rezygisk/disable-frida-trace-cleanup` | Runtime-probes linker symbols and soinfo layout; removes only exact known Frida agent memfd entries. Unknown linker layouts are skipped. |
+| P4 mntent buffer scrub | Denylisted app processes | Opt-in | `/data/adb/rezygisk/disable-mntent-buffer-scrub` | Clears the process-local last Bionic `getmntent` line buffer. Does not alter the mount table or call setns/umount. |
 | P5 ReVanced mount detach | Non-denylisted, non-manager app processes | Enabled when at least one module explicitly opts in | `/data/adb/rezygisk/disable-revanced-mount-umount` | Requires an enabled module with `tw_config` containing `module_type=revanced` and `allow_umount=true`. Parses current `/proc/self/mountinfo`, checks candidate count against opted-in modules, preserves current app package mount, and calls `umount2(MNT_DETACH)` only in the current process mount namespace. |
 
 ## Enable / disable
 
-P3 and P4 run by default for their documented process scopes. P5 runs by default only when at least one enabled ReVanced module has explicitly opted in. No enable marker files are required.
+P3 and P4 are disabled unless their respective enable marker exists. P5's code path is considered only for enabled ReVanced modules with explicit opt-in configuration.
 
-To disable individual features:
+To enable P3/P4 explicitly:
+
+```sh
+su -c 'mkdir -p /data/adb/rezygisk'
+su -c 'touch /data/adb/rezygisk/enable-frida-trace-cleanup'
+su -c 'touch /data/adb/rezygisk/enable-mntent-buffer-scrub'
+```
+
+A corresponding `disable-*` marker always takes precedence. To disable individual features:
 
 ```sh
 su -c 'mkdir -p /data/adb/rezygisk'
@@ -43,9 +51,9 @@ allow_umount=true
 Place that content in `/data/adb/modules/<module_id>/tw_config`. Remove the corresponding `disable-*` file to re-enable a feature. Restart affected app processes after changing switches.
 ## Safety and implementation notes
 
-- P3 is enabled by default for Denylisted processes and depends on private Android linker symbols and internal `soinfo` layout. Symbol presence and candidate offsets are checked at runtime, but this is not a stable Android ABI. Unknown layouts are skipped; disable it with the documented `disable-frida-trace-cleanup` marker if device testing exposes regressions.
+- P3 is disabled by default and depends on private Android linker symbols and internal `soinfo` layout. Explicit opt-in does not make this a stable Android ABI. Unknown layouts are skipped; keep it disabled unless validated on the exact device build.
 - P3 only recognizes the two exact upstream memfd names. It does not claim to hide all Frida versions, Gum mappings, threads, sockets, file descriptors, or other instrumentation artifacts.
-- P4 only clears the last line buffer returned by Bionic `getmntent`; it does not hide entries from a fresh read of `/proc/self/mounts` or `/proc/self/mountinfo`.
+- P4 is disabled by default and uses the reentrant `getmntent_r` interface with a private bounded buffer. It only clears the last line buffer; it does not hide entries from a fresh read of `/proc/self/mounts` or `/proc/self/mountinfo`.
 - P5's global code path is enabled by default, but actual detach remains explicitly opt-in per ReVanced module through `tw_config`. It deliberately avoids Treat Wheel's cross-process `setns(pid)` companion protocol. It acts only on the current process namespace, only after ReZygisk has completed its own namespace selection, and skips when the number of candidate `/data/app/~~...` mounts does not match the number of opted-in modules.
 - P5 uses lazy detach. It can affect other processes sharing the same mount namespace. The current package's mount is preserved, but app/WebView/file-picker regression testing is mandatory.
 - Any failure in P3/P4/P5 is logged and does not abort app specialization.
@@ -72,11 +80,11 @@ Workflow run: https://github.com/pingranQi/VReZygisk/actions/runs/45843830408
   - SHA-256: `9fb4fc3208337a29ca131e40025cee2ffe22e5f5145c714763ac5e562a289947`
 - Debug artifact: `ReZygisk-v1.0.0-706-457afdd-debug.zip`
   - SHA-256: `eb33d727db19878b878fd70b7ae525ce26d743c0e79ffda074d398c2570cf32e`
-- CI did not sign the artifacts because no private/public signing keys were configured.
+- Current packaging emits per-file SHA-256 sidecars for accidental-corruption detection only. It does not provide artifact authenticity; the legacy Ed25519 files had no consumer and were removed.
 
 ## Device validation still required
 
-Because P3/P4 now run by default and P5 can run when a module opts in, test before daily use:
+P3/P4 require explicit enable markers; P5 can run only when a module opts in. Test before enabling any of them:
 - Android API 25, 29, 30, 34, and current platform releases where available.
 - Magisk, KernelSU, and APatch installations supported by the repository.
 - App launch, current app APK/resource loading, WebView provider initialization, file picker, DocumentsUI, Download, and app-private file access.
