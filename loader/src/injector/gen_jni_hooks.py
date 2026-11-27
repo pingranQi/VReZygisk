@@ -70,7 +70,7 @@ class JNIHook(Method):
         return f'{self.base_name()}_fn'
 
     def orig_method(self):
-        return f'(({self.func_ptr_type()}){self.base_name()}_orig)'
+        return f'(({self.func_ptr_type()}){self.name}_orig)'
 
 def ind(i):
     return '\n' + '  ' * i
@@ -279,6 +279,7 @@ def gen_jni_def(clz, methods):
     decl += ind(0) + f'typedef {first_m.ret.type.cpp} (*{func_ptr_type})(JNIEnv *, jclass, ...);'
 
     for m in methods:
+        decl += ind(0) + f'static void *{m.name}_orig = NULL;'
         decl += ind(0) + f'__attribute__((no_stack_protector)) static {m.ret.type.cpp} {m.name}(JNIEnv *env, jclass clazz, {m.cpp()}) {{'
         decl += m.body()
         if m.ret.value:
@@ -293,7 +294,6 @@ def gen_jni_def(clz, methods):
         decl += ind(2) + f'(void *) &{m.name}'
         decl += ind(1) + '},'
     decl += ind(0) + '};'
-    decl = ind(0) + f'static void *{m.base_name()}_orig = NULL;' + decl
     decl += ind(0)
 
     hook_map[clz].append(m.base_name())
