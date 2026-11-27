@@ -1210,6 +1210,7 @@ static bool load_modules_only(void) {
     return false;
   }
 
+  size_t daemon_index = 0;
   for (size_t i = 0; i < ms.modules_count; i++) {
     const char *lib_path = ms.modules[i];
     struct rezygisk_module *module = &zygisk_modules[zygisk_module_length];
@@ -1232,7 +1233,7 @@ static bool load_modules_only(void) {
         LOGE("Both loaders failed for [%s]; system linker: %s",
              lib_path, error ? error : "unknown dlopen error");
 
-        rezygiskd_remove_module(i);
+        rezygiskd_remove_module(daemon_index);
         continue;
       }
       module->loader_backend = MODULE_LOADER_SYSTEM;
@@ -1242,7 +1243,7 @@ static bool load_modules_only(void) {
     if (stat(lib_path, &st) != 0) {
       PLOGE("Failed to stat module [%s]", lib_path);
       release_unregistered_module(module, lib_path);
-      rezygiskd_remove_module(i);
+      rezygiskd_remove_module(daemon_index);
       continue;
     }
 
@@ -1265,7 +1266,7 @@ static bool load_modules_only(void) {
     if (!entry) {
       LOGE("Failed to find entry point in module [%s]", lib_path);
       release_unregistered_module(module, lib_path);
-      rezygiskd_remove_module(i);
+      rezygiskd_remove_module(daemon_index);
       continue;
     }
 
@@ -1278,6 +1279,7 @@ static bool load_modules_only(void) {
 
     module->unload = false;
     zygisk_module_length++;
+    daemon_index++;
   }
 
   free_modules(&ms);
