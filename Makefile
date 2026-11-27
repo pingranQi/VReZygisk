@@ -32,7 +32,6 @@ ZYGISKD_INPUTS = common.mk zygiskd/Makefile \
 
 MODULE_INPUTS = scripts/sign.py \
         $(shell find module/src -type f | sort) \
-        $(wildcard module/private_key module/public_key)
 
 .PHONY: debug release build clean                                         \
         installKsu installMagisk installAPatch                            \
