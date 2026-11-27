@@ -1,6 +1,8 @@
 #ifndef TEST_LOGGING_H
 #define TEST_LOGGING_H
 #include <elf.h>
+#include <string.h>
+#include "misc.h"
 #define ELF_ST_TYPE(info) ELF64_ST_TYPE(info)
 #define LOGE(...) ((void)0)
 #define LOGW(...) ((void)0)
