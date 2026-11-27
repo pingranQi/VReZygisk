@@ -24,7 +24,7 @@ static bool range_in_file(const ElfImg *img, uint64_t offset, uint64_t length) {
 }
 
 static bool bounded_string(const char *table, size_t table_size, size_t offset) {
-  return table != NULL && offset < table_size && memchr(table + offset, '\\0', table_size - offset) != NULL;
+  return table != NULL && offset < table_size && memchr(table + offset, '\0', table_size - offset) != NULL;
 }
 
 uint32_t ElfHash(const char *name) {
