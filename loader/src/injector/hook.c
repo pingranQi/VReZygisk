@@ -751,8 +751,16 @@ static void api_plt_hook_register(const char *regex, const char *symbol, void *f
 
   pthread_mutex_lock(&g_ctx->hook_info_lock);
 
+  char *symbol_copy = strdup(symbol);
+  if (symbol_copy == NULL) {
+    pthread_mutex_unlock(&g_ctx->hook_info_lock);
+    regfree(&re);
+    LOGE("Failed to duplicate PLT hook symbol name");
+    return;
+  }
+
   g_ctx->register_info[g_ctx->register_info_count].regex = re;
-  g_ctx->register_info[g_ctx->register_info_count].symbol = strdup(symbol);
+  g_ctx->register_info[g_ctx->register_info_count].symbol = symbol_copy;
   g_ctx->register_info[g_ctx->register_info_count].callback = fn;
   g_ctx->register_info[g_ctx->register_info_count].backup = backup;
   g_ctx->register_info_count++;
