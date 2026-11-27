@@ -1366,12 +1366,18 @@ bool remote_csoloader_load_and_resolve_entry(int pid, struct user_regs_struct *r
     if (phdr[i].p_flags & PF_W) prot |= PROT_WRITE;
     if (phdr[i].p_flags & PF_X) prot |= PROT_EXEC;
 
-    if (segs_count < (sizeof(segs) / sizeof(segs[0]))) {
-      segs[segs_count].addr = seg_page;
-      segs[segs_count].len = seg_page_len;
-      segs[segs_count].final_prot = prot;
-      segs_count++;
+    if (segs_count >= (sizeof(segs) / sizeof(segs[0]))) {
+      LOGE("ELF has more PT_LOAD segments than the CSOLoader limit (%zu)",
+           sizeof(segs) / sizeof(segs[0]));
+      REMOTE_CLEANUP_MAPPING();
+      free(phdr);
+      close(fd);
+      return false;
     }
+    segs[segs_count].addr = seg_page;
+    segs[segs_count].len = seg_page_len;
+    segs[segs_count].final_prot = prot;
+    segs_count++;
   }
 
 
