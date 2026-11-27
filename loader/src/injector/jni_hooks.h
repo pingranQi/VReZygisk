@@ -18,16 +18,6 @@ static void *nativeForkAndSpecialize_samsung_b_orig = NULL;
 static void *nativeForkAndSpecialize_grapheneos_u_orig = NULL;
 static void *nativeForkAndSpecialize_grapheneos_u_alt_orig = NULL;
 static void *nativeForkAndSpecialize_grapheneos_c_orig = NULL;
-static void *nativeSpecializeAppProcess_q_orig = NULL;
-static void *nativeSpecializeAppProcess_q_alt_orig = NULL;
-static void *nativeSpecializeAppProcess_r_orig = NULL;
-static void *nativeSpecializeAppProcess_u_orig = NULL;
-static void *nativeSpecializeAppProcess_c_orig = NULL;
-static void *nativeSpecializeAppProcess_samsung_q_orig = NULL;
-static void *nativeSpecializeAppProcess_grapheneos_u_orig = NULL;
-static void *nativeSpecializeAppProcess_grapheneos_c_orig = NULL;
-static void *nativeForkSystemServer_l_orig = NULL;
-static void *nativeForkSystemServer_samsung_q_orig = NULL;
 typedef jint (*nativeForkAndSpecialize_fn)(JNIEnv *, jclass, ...);
 __attribute__((no_stack_protector)) static jint nativeForkAndSpecialize_l(JNIEnv *env, jclass clazz, jint uid, jint gid, jintArray gids, jint runtime_flags, jobjectArray rlimits, jint mount_external, jstring se_info, jstring nice_name, jintArray fds_to_close, jstring instruction_set, jstring app_data_dir) {
   struct app_specialize_args_v5 args = { .uid = &uid, .gid = &gid, .gids = &gids, .runtime_flags = &runtime_flags, .rlimits = &rlimits, .mount_external = &mount_external, .se_info = &se_info, .nice_name = &nice_name, .instruction_set = &instruction_set, .app_data_dir = &app_data_dir };
@@ -351,6 +341,14 @@ static JNINativeMethod nativeForkAndSpecialize_methods[] = {
   },
 };
 
+static void *nativeSpecializeAppProcess_q_orig = NULL;
+static void *nativeSpecializeAppProcess_q_alt_orig = NULL;
+static void *nativeSpecializeAppProcess_r_orig = NULL;
+static void *nativeSpecializeAppProcess_u_orig = NULL;
+static void *nativeSpecializeAppProcess_c_orig = NULL;
+static void *nativeSpecializeAppProcess_samsung_q_orig = NULL;
+static void *nativeSpecializeAppProcess_grapheneos_u_orig = NULL;
+static void *nativeSpecializeAppProcess_grapheneos_c_orig = NULL;
 typedef void (*nativeSpecializeAppProcess_fn)(JNIEnv *, jclass, ...);
 __attribute__((no_stack_protector)) static void nativeSpecializeAppProcess_q(JNIEnv *env, jclass clazz, jint uid, jint gid, jintArray gids, jint runtime_flags, jobjectArray rlimits, jint mount_external, jstring se_info, jstring nice_name, jboolean is_child_zygote, jstring instruction_set, jstring app_data_dir) {
   struct app_specialize_args_v5 args = { .uid = &uid, .gid = &gid, .gids = &gids, .runtime_flags = &runtime_flags, .rlimits = &rlimits, .mount_external = &mount_external, .se_info = &se_info, .nice_name = &nice_name, .instruction_set = &instruction_set, .app_data_dir = &app_data_dir };
@@ -521,6 +519,8 @@ static JNINativeMethod nativeSpecializeAppProcess_methods[] = {
   },
 };
 
+static void *nativeForkSystemServer_l_orig = NULL;
+static void *nativeForkSystemServer_samsung_q_orig = NULL;
 typedef jint (*nativeForkSystemServer_fn)(JNIEnv *, jclass, ...);
 __attribute__((no_stack_protector)) static jint nativeForkSystemServer_l(JNIEnv *env, jclass clazz, jint uid, jint gid, jintArray gids, jint runtime_flags, jobjectArray rlimits, jlong permitted_capabilities, jlong effective_capabilities) {
   struct server_specialize_args_v1 args = { .uid = &uid, .gid = &gid, .gids = &gids, .runtime_flags = &runtime_flags, .permitted_capabilities = &permitted_capabilities, .effective_capabilities = &effective_capabilities };
