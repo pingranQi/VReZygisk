@@ -717,8 +717,8 @@ bool wait_linker_ready(int pid, uintptr_t *out_libc_init_resolved, uintptr_t *ou
     return false;
   }
 
-  /* INFO: Loop till linker changes the value (resolves the symbol) */
-  while (1) {
+  /* Bound syscall stepping so a never-resolved slot cannot stall zygote tracing forever. */
+  for (size_t attempts = 0; attempts < 8192; ++attempts) {
     uintptr_t current_value = 0;
     if (read_proc(pid, *out_libc_init_got_slot, &current_value, sizeof(current_value)) != sizeof(current_value)) {
       LOGE("Failed to read current value of __libc_init GOT slot at 0x%" PRIxPTR, *out_libc_init_got_slot);
@@ -745,10 +745,12 @@ bool wait_linker_ready(int pid, uintptr_t *out_libc_init_resolved, uintptr_t *ou
     int status = 0;
     if (!wait_for_ptrace_syscall_stop(pid, &status)) {
       LOGE("wait_for_ptrace_syscall_stop failed");
-
       return false;
     }
   }
+
+  LOGE("Timed out waiting for __libc_init GOT resolution in pid %d", pid);
+  return false;
 }
 
 bool ptrace_poke_uintptr(pid_t pid, uintptr_t addr, uintptr_t value) {
