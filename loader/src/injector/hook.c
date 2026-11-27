@@ -473,63 +473,104 @@ void hook_jni_methods(JNIEnv *env, const char *clz, JNINativeMethod *methods, in
 /* INFO: JNI method hook definitions */
 #include "jni_hooks.h"
 
-/* INFO: Collect candidate libraries across Bionic, ReZygisk, and loaded modules without procfs */
+/* INFO: Collect every PT_LOAD segment across Bionic, ReZygisk, and modules without procfs. */
 static int collect_dl_libs(struct dl_phdr_info *info, size_t size, void *data) {
   (void) size;
 
   struct maps_info *maps = (struct maps_info *)data;
   if (!info->dlpi_name || info->dlpi_name[0] == '\0') return 0;
 
+  const long raw_page_size = sysconf(_SC_PAGESIZE);
+  if (raw_page_size <= 0) {
+    LOGE("Failed to determine page size while enumerating ELF segments");
+    return 1;
+  }
+
+  const uintptr_t page_size = (uintptr_t)raw_page_size;
+  if ((page_size & (page_size - 1)) != 0) {
+    LOGE("Unexpected non-power-of-two page size: %zu", (size_t)page_size);
+    return 1;
+  }
+
+  /* INFO: Resolve backing-file identity once per loaded object. */
+  struct stat st;
+  dev_t dev = 0;
+  ino_t ino = 0;
+  char *zip = strstr(info->dlpi_name, "!/");
+  if (zip) {
+    char *container = strndup(info->dlpi_name, (size_t)(zip - info->dlpi_name));
+    if (container) {
+      if (stat(container, &st) == 0) {
+        dev = st.st_dev;
+        ino = st.st_ino;
+      }
+      free(container);
+    }
+  } else if (stat(info->dlpi_name, &st) == 0) {
+    dev = st.st_dev;
+    ino = st.st_ino;
+  }
+
   for (ElfW(Half) i = 0; i < info->dlpi_phnum; i++) {
     const ElfW(Phdr) *phdr = &info->dlpi_phdr[i];
-    if (phdr->p_type != PT_LOAD || phdr->p_offset != 0 || !(phdr->p_flags & PF_R)) continue;
+    if (phdr->p_type != PT_LOAD || phdr->p_memsz == 0) continue;
 
-    struct map_entry *new_maps = realloc(maps->maps, (maps->length + 1) * sizeof(struct map_entry));
+    const uintptr_t load_bias = (uintptr_t)info->dlpi_addr;
+    if ((uintptr_t)phdr->p_vaddr > UINTPTR_MAX - load_bias) {
+      LOGW("Skip overflowing PT_LOAD start in %s", info->dlpi_name);
+      continue;
+    }
+
+    const uintptr_t segment_start = load_bias + (uintptr_t)phdr->p_vaddr;
+    if ((uintptr_t)phdr->p_memsz > UINTPTR_MAX - segment_start) {
+      LOGW("Skip overflowing PT_LOAD end in %s", info->dlpi_name);
+      continue;
+    }
+
+    const uintptr_t segment_end = segment_start + (uintptr_t)phdr->p_memsz;
+    const uintptr_t aligned_start = segment_start & ~(page_size - 1);
+    if (segment_end > UINTPTR_MAX - (page_size - 1)) {
+      LOGW("Skip PT_LOAD whose page-aligned end overflows in %s", info->dlpi_name);
+      continue;
+    }
+    const uintptr_t aligned_end =
+        (segment_end + page_size - 1) & ~(page_size - 1);
+    if (aligned_end <= aligned_start) continue;
+
+    if (maps->length >= SIZE_MAX / sizeof(struct map_entry)) {
+      LOGE("ELF segment table capacity overflow");
+      return 1;
+    }
+
+    struct map_entry *new_maps =
+        realloc(maps->maps, (maps->length + 1) * sizeof(struct map_entry));
     if (!new_maps) {
-      LOGE("Failed to reallocate memory for maps");
-
-      return 0;
+      LOGE("Failed to reallocate memory for ELF segments");
+      return 1;
     }
-
-    /* INFO: The device and inode belong to the container when the library lives
-               inside of an APK (e.g. /data/app/.../base.apk!/lib/arm64-v8a/x.so). */
-    struct stat st;
-    dev_t dev = 0;
-    ino_t ino = 0;
-    char *zip = strstr(info->dlpi_name, "!/");
-    if (zip) {
-      char *container = strndup(info->dlpi_name, (size_t)(zip - info->dlpi_name));
-      if (container) {
-        if (stat(container, &st) == 0) {
-          dev = st.st_dev;
-          ino = st.st_ino;
-        }
-
-        free(container);
-      }
-    } else if (stat(info->dlpi_name, &st) == 0) {
-      dev = st.st_dev;
-      ino = st.st_ino;
-    }
-
     maps->maps = new_maps;
-    maps->maps[maps->length++] = (struct map_entry){
-      .start = (uintptr_t)info->dlpi_addr + phdr->p_vaddr,
-      .end = (uintptr_t)info->dlpi_addr + phdr->p_vaddr + phdr->p_memsz,
-      .offset = 0,
+
+    int perms = 0;
+    if (phdr->p_flags & PF_R) perms |= PROT_READ;
+    if (phdr->p_flags & PF_W) perms |= PROT_WRITE;
+    if (phdr->p_flags & PF_X) perms |= PROT_EXEC;
+
+    char *path = strdup(info->dlpi_name);
+    if (!path) {
+      LOGE("Failed to duplicate path for %s", info->dlpi_name);
+      return 1;
+    }
+
+    maps->maps[maps->length++] = (struct map_entry) {
+      .start = aligned_start,
+      .end = aligned_end,
+      .offset = (uintptr_t)phdr->p_offset,
       .dev = dev,
       .inode = ino,
-      .perms = PROT_READ,
+      .perms = perms,
       .is_private = true,
-      .path = strdup(info->dlpi_name)
+      .path = path
     };
-    if (!maps->maps[maps->length - 1].path) {
-      LOGE("Failed to duplicate path for %s", info->dlpi_name);
-
-      return 0;
-    }
-
-    break;
   }
 
   return 0;
@@ -539,8 +580,13 @@ static struct maps_info *get_loaded_libraries(void) {
   struct maps_info *maps = calloc(1, sizeof(struct maps_info));
   if (!maps) return NULL;
 
-  /* INFO: 1.: Libraries loaded by system linker */
-  dl_iterate_phdr(collect_dl_libs, maps);
+  /* INFO: 1.: Libraries loaded by system linker. A non-zero callback result
+             means enumeration stopped because the segment table is incomplete. */
+  if (dl_iterate_phdr(collect_dl_libs, maps) != 0) {
+    LOGE("ELF PT_LOAD enumeration failed; discard incomplete library table");
+    free_maps(maps);
+    return NULL;
+  }
 
   /* INFO: 2.: ReZygisk itself (loaded via RCSOLoader) */
   if (start_addr && block_size > 0 && self_dev) {
