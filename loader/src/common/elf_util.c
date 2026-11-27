@@ -498,12 +498,8 @@ bool _load_symtabs(ElfImg *img) {
     unsigned int st_type = ELF_ST_TYPE(current_sym->st_info);
 
     if ((st_type == STT_FUNC || st_type == STT_OBJECT) && current_sym->st_size > 0 && current_sym->st_name != 0) {
-      const char *st_name = symtab_strings + current_sym->st_name;
-      if (!st_name)
-        continue;
-
       ElfW(Shdr) *symtab_str_shdr = img->section_header + img->symtab->sh_link;
-      if (current_sym->st_name >= symtab_str_shdr->sh_size) {
+      if (!bounded_string(symtab_strings, symtab_str_shdr->sh_size, current_sym->st_name)) {
         LOGE("Symbol name offset out of bounds");
 
         continue;
@@ -520,7 +516,9 @@ bool _load_symtabs(ElfImg *img) {
 }
 
 ElfW(Addr) GnuLookup(ElfImg *restrict img, const char *name, uint32_t hash, unsigned char *sym_type) {
-  if (img->gnu_nbucket_ == 0 || img->gnu_bloom_size_ == 0 || !img->gnu_bloom_filter_ || !img->gnu_bucket_ || !img->gnu_chain_ || !img->dynsym_start || !img->strtab_start)
+  if (img->gnu_nbucket_ == 0 || img->gnu_bloom_size_ == 0 || img->gnu_shift2_ >= 32 ||
+      !img->gnu_bloom_filter_ || !img->gnu_bucket_ || !img->gnu_chain_ ||
+      !img->dynsym_start || !img->strtab_start || !img->strtab || !img->dynsym)
     return 0;
 
   static const size_t bloom_mask_bits = sizeof(uintptr_t) * 8;
@@ -564,8 +562,8 @@ ElfW(Addr) GnuLookup(ElfImg *restrict img, const char *name, uint32_t hash, unsi
 
   ElfW(Sym) *sym = img->dynsym_start + sym_index;
 
-  if (sym->st_name >= img->strtab->sh_size) {
-    LOGE("Symbol name offset %u out of bounds", sym->st_name);
+  if (!bounded_string(strings, img->strtab->sh_size, sym->st_name)) {
+    LOGE("Symbol name offset %u is invalid or unterminated", sym->st_name);
 
     return 0;
   }
@@ -590,8 +588,8 @@ ElfW(Addr) GnuLookup(ElfImg *restrict img, const char *name, uint32_t hash, unsi
     chain_val = img->gnu_chain_[sym_index - img->gnu_symndx_];
     sym = img->dynsym_start + sym_index;
 
-    if (sym->st_name >= img->strtab->sh_size) {
-      LOGE("Symbol name offset %u out of bounds", sym->st_name);
+    if (!bounded_string(strings, img->strtab->sh_size, sym->st_name)) {
+      LOGE("Symbol name offset %u is invalid or unterminated", sym->st_name);
 
       break;
     }
@@ -644,7 +642,10 @@ ElfW(Addr) LinearLookup(ElfImg *img, const char *restrict name, unsigned char *s
   for (size_t i = 0; i < img->symtabs_count_; i++) {
     ElfW(Sym) *sym = img->symtabs_[i];
 
-    const char *sym_name = offsetOf_char(img->header, img->symstr_offset_for_symtab) + sym->st_name;
+    const char *symtab_strings = offsetOf_char(img->header, img->symstr_offset_for_symtab);
+    ElfW(Shdr) *symtab_str_shdr = img->section_header + img->symtab->sh_link;
+    if (!bounded_string(symtab_strings, symtab_str_shdr->sh_size, sym->st_name)) continue;
+    const char *sym_name = symtab_strings + sym->st_name;
     if (sym->st_shndx == SHN_UNDEF || strcmp(name, sym_name) != 0)
       continue;
 
@@ -672,7 +673,10 @@ ElfW(Addr) LinearLookupByPrefix(ElfImg *img, const char *prefix, unsigned char *
   for (size_t i = 0; i < img->symtabs_count_; i++) {
     ElfW(Sym) *sym = img->symtabs_[i];
 
-    const char *name = offsetOf_char(img->header, img->symstr_offset_for_symtab) + sym->st_name;
+    const char *symtab_strings = offsetOf_char(img->header, img->symstr_offset_for_symtab);
+    ElfW(Shdr) *symtab_str_shdr = img->section_header + img->symtab->sh_link;
+    if (!bounded_string(symtab_strings, symtab_str_shdr->sh_size, sym->st_name)) continue;
+    const char *name = symtab_strings + sym->st_name;
     if (sym->st_shndx == SHN_UNDEF || strncmp(name, prefix, prefix_len) != 0)
       continue;
 
