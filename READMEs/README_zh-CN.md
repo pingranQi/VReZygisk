@@ -17,7 +17,7 @@ ReZygisk 是从 Zygisk Next 分支出来的 Zygisk API 独立实现，为 **Kern
 
 ### 高副作用清理功能
 
-- Treat Wheel P3（linker 私有结构清理）和 P4（mntent 缓冲区清理）默认关闭，需分别创建 `/data/adb/rezygisk/enable-frida-trace-cleanup`、`/data/adb/rezygisk/enable-mntent-buffer-scrub` 才会执行；对应 `disable-*` 文件优先级更高。
+- Treat Wheel P3（linker 私有结构清理）和 P4（Bionic `getmntent` 进程内静态缓冲区清理）默认开启；可分别创建 `/data/adb/rezygisk/disable-frida-trace-cleanup`、`/data/adb/rezygisk/disable-mntent-buffer-scrub` 关闭。P3 使用 Android linker 私有 ABI，存在 ROM/API 兼容风险；P4 仅在进程主线程执行。
 - P5 ReVanced mount detach 仍要求模块 `tw_config` 显式设置 `module_type=revanced` 和 `allow_umount=true`。
 - 安装包内 SHA-256 sidecar 仅检测传输/存储损坏，不提供发布者身份认证；旧 Ed25519 签名文件未被运行时消费，已从构建产物中移除。
 
