@@ -54,9 +54,12 @@ pub unsafe extern "C" fn read_string(fd: c_int) -> *mut c_char {
     allocation.cast()
 }
 
+extern "C" {
+    fn _exit(status: i32) -> !;
+}
+
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    // A panic in an injected app must terminate this helper, never spin forever.
+    unsafe { _exit(134) }
 }
