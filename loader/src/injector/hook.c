@@ -537,7 +537,7 @@ static int collect_dl_libs(struct dl_phdr_info *info, size_t size, void *data) {
         (segment_end + page_size - 1) & ~(page_size - 1);
     if (aligned_end <= aligned_start) continue;
 
-    if (maps->length == SIZE_MAX / sizeof(struct map_entry)) {
+    if (maps->length >= SIZE_MAX / sizeof(struct map_entry)) {
       LOGE("ELF segment table capacity overflow");
       return 1;
     }
