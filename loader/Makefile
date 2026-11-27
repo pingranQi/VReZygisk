@@ -111,7 +111,7 @@ $(OBJ_DIR)/ptracer/%.o: src/ptracer/%.c
 
 $(RUST_LIB): $(RUST_MANIFEST) src/rust/src/lib.rs
 
-	@cargo build --locked --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET) --release --target-dir $(RUST_TARGET_DIR)
+	@cargo build --manifest-path $(RUST_MANIFEST) --target $(RUST_TARGET) --release --target-dir $(RUST_TARGET_DIR)
 
 $(LIBCOMMON): $(COMMON_OBJS)
 	@mkdir -p $(dir $@)
