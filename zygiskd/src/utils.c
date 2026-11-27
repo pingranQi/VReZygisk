@@ -356,50 +356,60 @@ ssize_t read_string(int fd, char *restrict buf, size_t buf_size) {
 
 /* INFO: Cannot use restrict here as execv does not have restrict */
 bool exec_command(char *restrict buf, size_t len, const char *restrict file, const char *const argv[]) {
-  int link[2];
-  pid_t pid;
+  if (buf == NULL || len == 0 || file == NULL || argv == NULL) return false;
+  buf[0] = '\0';
 
+  int link[2];
   if (pipe(link) == -1) {
     LOGE("pipe: %s", strerror(errno));
-
     return false;
   }
 
-  if ((pid = fork()) == -1) {
+  pid_t pid = fork();
+  if (pid == -1) {
     LOGE("fork: %s", strerror(errno));
-
     close(link[0]);
     close(link[1]);
-
     return false;
   }
 
   if (pid == 0) {
-    dup2(link[1], STDOUT_FILENO);
     close(link[0]);
+    if (dup2(link[1], STDOUT_FILENO) == -1) _exit(126);
     close(link[1]);
-
-    /* NOTE: Sonarlint complains about a const qualifier drop here (c:S859),
-               but this cast is deliberate and unavoidable.
-    */
+    /* NOTE: const cast required by execv's POSIX signature. */
     execv(file, (char *const *)argv);
-
-    LOGE("execv failed: %s", strerror(errno));
-    _exit(1);
-  } else {
-    close(link[1]);
-
-    ssize_t nbytes = read(link[0], buf, len);
-    if (nbytes > 0) buf[nbytes - 1] = '\0';
-    /* INFO: If something went wrong, at least we must ensure it is NULL-terminated */
-    else buf[0] = '\0';
-
-    wait(NULL);
-
-    close(link[0]);
+    _exit(127);
   }
 
-  return true;
+  close(link[1]);
+  size_t used = 0;
+  char discard[256];
+  for (;;) {
+    char *target = used < len - 1 ? buf + used : discard;
+    size_t available = used < len - 1 ? len - 1 - used : sizeof(discard);
+    ssize_t nread = read(link[0], target, available);
+    if (nread > 0) {
+      if (used < len - 1) used += (size_t)nread;
+      continue;
+    }
+    if (nread == -1 && errno == EINTR) continue;
+    if (nread == -1) LOGE("read command output: %s", strerror(errno));
+    break;
+  }
+  buf[used] = '\0';
+  close(link[0]);
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = waitpid(pid, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+  if (waited == -1) {
+    LOGE("waitpid: %s", strerror(errno));
+    return false;
+  }
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 bool check_unix_socket(int fd, bool block) {
