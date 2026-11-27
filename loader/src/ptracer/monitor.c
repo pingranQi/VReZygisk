@@ -765,31 +765,64 @@ void sigchld_listener_stop() {
   sigchld_process_count = 0;
 }
 
-static char pre_section[1024];
-static char post_section[1024];
+static char pre_section[8192];
+static char post_section[8192];
+
+static bool append_text(char *buffer, size_t capacity, const char *value) {
+  if (buffer == NULL || capacity == 0 || value == NULL) return false;
+  size_t used = strnlen(buffer, capacity);
+  if (used >= capacity) return false;
+  size_t remaining = capacity - used - 1;
+  size_t length = strnlen(value, remaining + 1);
+  if (length > remaining) length = remaining;
+  memcpy(buffer + used, value, length);
+  buffer[used + length] = '\0';
+  return value[length] == '\0';
+}
+
+static void json_write_string(FILE *fp, const char *value) {
+  fputc('"', fp);
+  if (value != NULL) {
+    for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
+      switch (*p) {
+        case '"': fputs("\\\"", fp); break;
+        case '\\': fputs("\\\\", fp); break;
+        case '\b': fputs("\\b", fp); break;
+        case '\f': fputs("\\f", fp); break;
+        case '\n': fputs("\\n", fp); break;
+        case '\r': fputs("\\r", fp); break;
+        case '\t': fputs("\\t", fp); break;
+        default: if (*p < 0x20) fprintf(fp, "\\u%04x", *p); else fputc(*p, fp);
+      }
+    }
+  }
+  fputc('"', fp);
+}
 
 #define WRITE_STATUS_ABI(suffix)                                                     \
   if (status ## suffix.supported) {                                                  \
-    strcat(status_text, ", ReZygisk " # suffix "-bit: ");                            \
+    append_text(status_text, sizeof(status_text), ", ReZygisk " # suffix "-bit: ");                            \
                                                                                      \
-    if (tracing_state != TRACING) strcat(status_text, "❌");                         \
+    if (tracing_state != TRACING) append_text(status_text, sizeof(status_text), "❌");                         \
     else if (status ## suffix.zygote_injected && status ## suffix.daemon_running)    \
-      strcat(status_text, "✅");                                                     \
-    else strcat(status_text, "⚠️");                                                  \
+      append_text(status_text, sizeof(status_text), "✅");                                                     \
+    else append_text(status_text, sizeof(status_text), "⚠️");                                                  \
                                                                                      \
     if (!status ## suffix.daemon_running) {                                          \
       if (status ## suffix.daemon_error_info) {                                      \
-        strcat(status_text, "(ReZygiskd: ");                                         \
-        strcat(status_text, status ## suffix.daemon_error_info);                     \
-        strcat(status_text, ")");                                                    \
+        append_text(status_text, sizeof(status_text), "(ReZygiskd: ");                                         \
+        append_text(status_text, sizeof(status_text), status ## suffix.daemon_error_info);                     \
+        append_text(status_text, sizeof(status_text), ")");                                                    \
       } else {                                                                       \
-        strcat(status_text, "(ReZygiskd: not running)");                             \
+        append_text(status_text, sizeof(status_text), "(ReZygiskd: not running)");                             \
       }                                                                              \
     }                                                                                \
   }
 
 static bool update_status(const char *message) {
-  FILE *prop = fopen("/data/adb/modules/rezygisk/module.prop", "w");
+  const char *prop_path = "/data/adb/modules/rezygisk/module.prop";
+  const char *prop_tmp = "/data/adb/modules/rezygisk/module.prop.tmp";
+  FILE *prop = fopen(prop_tmp, "w");
   if (prop == NULL) {
     PLOGE("failed to open prop");
 
@@ -798,26 +831,29 @@ static bool update_status(const char *message) {
 
   if (message) {
     fprintf(prop, "%s[%s] %s", pre_section, message, post_section);
-    fclose(prop);
-
+    if (fclose(prop) != 0 || rename(prop_tmp, prop_path) != 0) {
+      PLOGE("failed to atomically replace module.prop");
+      unlink(prop_tmp);
+      return false;
+    }
     return true;
   }
 
   char status_text[2048] = "Monitor: ";
   switch (tracing_state) {
     case TRACING: {
-      strcat(status_text, "✅");
+      append_text(status_text, sizeof(status_text), "✅");
 
       break;
     }
     case STOPPING: [[fallthrough]];
     case STOPPED: {
-      strcat(status_text, "⛔");
+      append_text(status_text, sizeof(status_text), "⛔");
 
       break;
     }
     case EXITING: {
-      strcat(status_text, "❌");
+      append_text(status_text, sizeof(status_text), "❌");
 
       break;
     }
@@ -840,10 +876,16 @@ static bool update_status(const char *message) {
   }
 
   fprintf(prop, "%s[%s] %s", pre_section, status_text, post_section);
-  fclose(prop);
+  if (fclose(prop) != 0 || rename(prop_tmp, prop_path) != 0) {
+    PLOGE("failed to atomically replace module.prop");
+    unlink(prop_tmp);
+    return false;
+  }
 
   if (environment_information64.root_impl || environment_information32.root_impl) {
-    FILE *json = fopen("/data/adb/rezygisk/state.json", "w");
+    const char *json_path = "/data/adb/rezygisk/state.json";
+    const char *json_tmp = "/data/adb/rezygisk/state.json.tmp";
+    FILE *json = fopen(json_tmp, "w");
     if (json == NULL) {
       PLOGE("failed to open state.json");
 
@@ -851,11 +893,15 @@ static bool update_status(const char *message) {
     }
 
     fprintf(json, "{\n");
-    fprintf(json, "  \"root\": \"%s\",\n", environment_information64.root_impl ? environment_information64.root_impl : environment_information32.root_impl);
+    fprintf(json, "  \"root\": ");
+    json_write_string(json, environment_information64.root_impl ? environment_information64.root_impl : environment_information32.root_impl);
+    fprintf(json, ",\n");
 
     fprintf(json, "  \"monitor\": {\n");
     fprintf(json, "    \"state\": \"%d\"", tracing_state);
-    if (monitor_stop_reason) fprintf(json, ",\n    \"reason\": \"%s\",\n", monitor_stop_reason);
+    if (monitor_stop_reason) {
+      fprintf(json, ",\n    \"reason\": "); json_write_string(json, monitor_stop_reason); fprintf(json, ",\n");
+    }
     else fprintf(json, "\n");
 
     if (status64.supported || status32.supported)
@@ -869,12 +915,14 @@ static bool update_status(const char *message) {
       if (status64.supported) {
         fprintf(json, "    \"64\": {\n");
         fprintf(json, "      \"state\": %d,\n", status64.daemon_running);
-        if (status64.daemon_error_info) fprintf(json, "      \"reason\": \"%s\",\n", status64.daemon_error_info);
+        if (status64.daemon_error_info) {
+          fprintf(json, "      \"reason\": "); json_write_string(json, status64.daemon_error_info); fprintf(json, ",\n");
+        }
         fprintf(json, "      \"modules\": [");
 
         if (environment_information64.modules) for (uint32_t i = 0; i < environment_information64.modules_len; i++) {
           if (i > 0) fprintf(json, ", ");
-          fprintf(json, "\"%s\"", environment_information64.modules[i]);
+          json_write_string(json, environment_information64.modules[i]);
         }
 
         fprintf(json, "]\n");
@@ -886,12 +934,14 @@ static bool update_status(const char *message) {
       if (status32.supported) {
         fprintf(json, "    \"32\": {\n");
         fprintf(json, "      \"state\": %d,\n", status32.daemon_running);
-        if (status32.daemon_error_info) fprintf(json, "      \"reason\": \"%s\",\n", status32.daemon_error_info);
+        if (status32.daemon_error_info) {
+          fprintf(json, "      \"reason\": "); json_write_string(json, status32.daemon_error_info); fprintf(json, ",\n");
+        }
         fprintf(json, "      \"modules\": [");
 
         if (environment_information32.modules) for (uint32_t i = 0; i < environment_information32.modules_len; i++) {
           if (i > 0) fprintf(json, ", ");
-          fprintf(json, "\"%s\"", environment_information32.modules[i]);
+          json_write_string(json, environment_information32.modules[i]);
         }
 
         fprintf(json, "]\n");
@@ -914,7 +964,11 @@ static bool update_status(const char *message) {
 
     fprintf(json, "}\n");
 
-    fclose(json);
+    if (fclose(json) != 0 || rename(json_tmp, json_path) != 0) {
+      PLOGE("failed to atomically replace state.json");
+      unlink(json_tmp);
+      return false;
+    }
   } else {
     if (remove("/data/adb/rezygisk/state.json") == -1) {
       PLOGE("failed to remove state.json");
@@ -939,15 +993,15 @@ static bool prepare_environment() {
   char line[1024];
   while (fgets(line, sizeof(line), orig_prop) != NULL) {
     if (strncmp(line, "description=", strlen("description=")) == 0) {
-      strcat(pre_section, "description=");
-      strcat(post_section, line + strlen("description="));
+      append_text(pre_section, sizeof(pre_section), "description=");
+      append_text(post_section, sizeof(post_section), line + strlen("description="));
       after_description = true;
 
       continue;
     }
 
-    if (after_description) strcat(post_section, line);
-    else strcat(pre_section, line);
+    if (after_description) append_text(post_section, sizeof(post_section), line);
+    else append_text(pre_section, sizeof(pre_section), line);
   }
 
   fclose(orig_prop);
