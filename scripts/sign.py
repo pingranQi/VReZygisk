@@ -29,7 +29,7 @@ def compute_sha256_hashes(module_dir: str) -> None:
 
         sidecar = Path(str(file_path) + ".sha256")
         temporary = Path(str(sidecar) + ".tmp")
-        temporary.write_text(digest.hexdigest() + "\\n", encoding="ascii")
+        temporary.write_text(digest.hexdigest() + "\n", encoding="ascii")
         os.replace(temporary, sidecar)
 
 
