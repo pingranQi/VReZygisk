@@ -57,7 +57,7 @@ jobs:
           archive: false
 
       - name: Upload debug
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
           path: "build/out/ReZygisk-v*-debug.zip"
           archive: false
