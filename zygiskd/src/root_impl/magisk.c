@@ -56,7 +56,7 @@ void magisk_get_existence(struct root_impl_state *state) {
 
 bool magisk_uid_granted_root(uid_t uid) {
   char sqlite_cmd[256];
-  snprintf(sqlite_cmd, sizeof(sqlite_cmd), "select 1 from policies where uid=%d and policy=2 limit 1", uid);
+  snprintf(sqlite_cmd, sizeof(sqlite_cmd), "select 1 from policies where uid=%u and policy=2 limit 1", (unsigned int)uid);
 
   const char *const argv[] = { "magisk", "--sqlite", sqlite_cmd, NULL };
 
@@ -71,10 +71,23 @@ bool magisk_uid_granted_root(uid_t uid) {
 }
 
 bool magisk_uid_should_umount(const char *const process) {
-  /* INFO: PROCESS_NAME_MAX_LEN already has a +1 for NULL */
-  char sqlite_cmd[59 + PROCESS_NAME_MAX_LEN];
-  /* INFO: Find if process string starts with any data in "process" column */
-  snprintf(sqlite_cmd, sizeof(sqlite_cmd), "SELECT 1 FROM denylist WHERE \"%s\" LIKE process || '%%' LIMIT 1", process);
+  /* Escape SQLite quoted-identifier delimiters before interpolation. */
+  if (process == NULL) return false;
+  size_t process_len = strnlen(process, PROCESS_NAME_MAX_LEN);
+  if (process_len == 0 || process_len >= PROCESS_NAME_MAX_LEN) return false;
+  char escaped_process[2 * PROCESS_NAME_MAX_LEN];
+  size_t out = 0;
+  for (size_t i = 0; i < process_len; ++i) {
+    if (process[i] == '"') escaped_process[out++] = '"';
+    escaped_process[out++] = process[i];
+  }
+  escaped_process[out] = '\0';
+
+  char sqlite_cmd[96 + sizeof(escaped_process)];
+  /* INFO: Find if process string starts with any data in "process" column. */
+  int written = snprintf(sqlite_cmd, sizeof(sqlite_cmd),
+      "SELECT 1 FROM denylist WHERE \"%s\" LIKE process || '%%' LIMIT 1", escaped_process);
+  if (written < 0 || (size_t)written >= sizeof(sqlite_cmd)) return false;
 
   const char *const argv[] = { "magisk", "--sqlite", sqlite_cmd, NULL };
 
