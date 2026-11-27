@@ -29,6 +29,10 @@ int main(int argc, char **argv) {
 
       return 0;
   } else if (argc >= 2 && strcmp(argv[1], "ctl") == 0) {
+    if (argc < 3 || argv[2] == NULL) {
+      printf("[ReZygisk]: Usage: %s ctl <start|stop|exit>\\n", argv[0]);
+      return 1;
+    }
     enum rezygiskd_command command;
 
     if (strcmp(argv[2], "start") == 0) command = START;
@@ -54,7 +58,7 @@ int main(int argc, char **argv) {
 
     return 0;
   } else if (argc >= 2 && strcmp(argv[1], "info") == 0) {
-    struct rezygisk_info info;
+    struct rezygisk_info info = {0};
     rezygiskd_get_info(&info);
 
     printf("Daemon process PID: %d\n", info.pid);
