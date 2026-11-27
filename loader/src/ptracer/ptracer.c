@@ -30,7 +30,8 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
 
   if (ptrace(PTRACE_CONT, pid, 0, 0) == -1) {
     PLOGE("Failed to continue to GOT break");
-
+    if (!ptrace_poke_uintptr(pid, libc_init_got_slot, libc_init_target))
+      LOGE("Failed to restore __libc_init GOT slot after PTRACE_CONT failure");
     return false;
   }
 
@@ -42,14 +43,16 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
     parse_status(status, status_str, sizeof(status_str));
 
     LOGE("expected SIGSEGV on __libc_init GOT call, got: %s", status_str);
-
+    if (!ptrace_poke_uintptr(pid, libc_init_got_slot, libc_init_target))
+      LOGE("Failed to restore __libc_init GOT slot after unexpected stop");
     return false;
   }
 
   struct user_regs_struct regs = { 0 };
   if (!get_regs(pid, &regs)) {
     LOGE("Failed to get regs after GOT break");
-
+    if (!ptrace_poke_uintptr(pid, libc_init_got_slot, libc_init_target))
+      LOGE("Failed to restore __libc_init GOT slot after register read failure");
     return false;
   }
 
