@@ -15,6 +15,7 @@
 #include <sys/ptrace.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <sys/stat.h>
 
 #include "elf_util.h"
@@ -797,8 +798,19 @@ bool ptrace_poke_uintptr(pid_t pid, uintptr_t addr, uintptr_t value) {
 
 bool wait_for_ptrace_syscall_stop(int pid, int *status) {
   int step_retries = 0;
+  int empty_retries = 0;
+  const struct timespec retry_delay = { .tv_sec = 0, .tv_nsec = 1000000L };
   while (1) {
-    pid_t waited = waitpid(pid, status, __WALL);
+    pid_t waited = waitpid(pid, status, __WALL | WNOHANG);
+    if (waited == 0) {
+      if (++empty_retries >= 5000) {
+        errno = ETIMEDOUT;
+        PLOGE("Timed out waiting for ptrace syscall stop");
+        return false;
+      }
+      nanosleep(&retry_delay, NULL);
+      continue;
+    }
     if (waited == -1) {
       if (errno == EINTR) continue;
 
