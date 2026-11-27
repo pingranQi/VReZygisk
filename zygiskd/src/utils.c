@@ -917,6 +917,8 @@ struct mns_cache_entry {
 };
 
 static struct mns_cache_entry *mns_cache;
+static size_t mns_cache_count;
+#define MNS_CACHE_LIMIT 256
 
 /*
  * A Zygote restart can happen without restarting zygiskd (e.g. soft reboot).
@@ -926,6 +928,7 @@ void clear_mns_cache(void) {
   size_t cleared = 0;
   struct mns_cache_entry *entry = mns_cache;
   mns_cache = NULL;
+  mns_cache_count = 0;
 
   while (entry != NULL) {
     struct mns_cache_entry *next = entry->next;
@@ -939,8 +942,19 @@ void clear_mns_cache(void) {
 }
 
 static int find_cached_mns_fd(uid_t uid, enum MountNamespaceState state) {
-  for (struct mns_cache_entry *entry = mns_cache; entry != NULL; entry = entry->next) {
-    if (entry->uid == uid && entry->state == state) return entry->fd;
+  struct mns_cache_entry **cursor = &mns_cache;
+  while (*cursor != NULL) {
+    struct mns_cache_entry *entry = *cursor;
+    if (entry->uid == uid && entry->state == state) {
+      /* Move hit to the front (LRU/MRU ordering). */
+      if (cursor != &mns_cache) {
+        *cursor = entry->next;
+        entry->next = mns_cache;
+        mns_cache = entry;
+      }
+      return entry->fd;
+    }
+    cursor = &entry->next;
   }
   return -1;
 }
@@ -957,6 +971,19 @@ static void cache_mns_fd(uid_t uid, enum MountNamespaceState state, int fd) {
   entry->fd = fd;
   entry->next = mns_cache;
   mns_cache = entry;
+  mns_cache_count++;
+
+  if (mns_cache_count > MNS_CACHE_LIMIT) {
+    struct mns_cache_entry **cursor = &mns_cache;
+    while ((*cursor)->next != NULL && (*cursor)->next->next != NULL)
+      cursor = &(*cursor)->next;
+    struct mns_cache_entry *oldest = (*cursor)->next ? (*cursor)->next : *cursor;
+    *cursor = NULL;
+    if (oldest->fd >= 0) close(oldest->fd);
+    free(oldest);
+    mns_cache_count--;
+    LOGW("Evicted oldest mount namespace cache entry (limit=%d)", MNS_CACHE_LIMIT);
+  }
 }
 
 int save_mns_fd(int pid, uid_t uid, enum MountNamespaceState mns_state, struct root_impl impl) {
@@ -1088,17 +1115,22 @@ int save_mns_fd(int pid, uid_t uid, enum MountNamespaceState mns_state, struct r
     return -1;
   }
 
-  if (close(socket_parent) == -1) {
-    LOGE("Failed to close socket_parent: %s", strerror(errno));
+  int close_result = close(socket_parent);
+  int close_errno = errno;
 
+  pid_t waited;
+  do {
+    waited = waitpid(fork_pid, NULL, 0);
+  } while (waited == -1 && errno == EINTR);
+  if (waited == -1) {
+    LOGE("waitpid: %s", strerror(errno));
     close(ns_fd);
-
     return -1;
   }
 
-  if (waitpid(fork_pid, NULL, 0) == -1) {
-    LOGE("waitpid: %s", strerror(errno));
-
+  if (close_result == -1) {
+    LOGE("Failed to close socket_parent: %s", strerror(close_errno));
+    close(ns_fd);
     return -1;
   }
 
