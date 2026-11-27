@@ -507,7 +507,18 @@ static bool append_loaded_segment(struct maps_info *maps,
   const uintptr_t end = (raw_end + mask) & ~mask;
   if (end <= start) return true;
 
-  if (maps->length == SIZE_MAX / sizeof(*maps->maps)) {
+  /* Adjacent ELF PT_LOAD headers may round to the same VMA page range. */
+  for (size_t i = 0; i < maps->length; ++i) {
+    const struct map_entry *existing = &maps->maps[i];
+    if (existing->start == start && existing->end == end &&
+        existing->dev == dev && existing->inode == ino &&
+        existing->path != NULL &&
+        strcmp(existing->path, info->dlpi_name) == 0) {
+      return true;
+    }
+  }
+
+  if (maps->length >= SIZE_MAX / sizeof(*maps->maps)) {
     LOGE("Loaded-library segment count overflow");
     return false;
   }
