@@ -718,7 +718,14 @@ bool wait_linker_ready(int pid, uintptr_t *out_libc_init_resolved, uintptr_t *ou
     return false;
   }
 
-  /* Bound syscall stepping so a never-resolved slot cannot stall zygote tracing forever. */
+  /* Bound both the total wait and each individual ptrace stop wait. */
+  struct timespec deadline;
+  if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+    PLOGE("clock_gettime while waiting for linker");
+    return false;
+  }
+  deadline.tv_sec += 5;
+
   for (size_t attempts = 0; attempts < 8192; ++attempts) {
     uintptr_t current_value = 0;
     if (read_proc(pid, *out_libc_init_got_slot, &current_value, sizeof(current_value)) != sizeof(current_value)) {
@@ -746,6 +753,14 @@ bool wait_linker_ready(int pid, uintptr_t *out_libc_init_resolved, uintptr_t *ou
     int status = 0;
     if (!wait_for_ptrace_syscall_stop(pid, &status)) {
       LOGE("wait_for_ptrace_syscall_stop failed");
+      return false;
+    }
+
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 ||
+        now.tv_sec > deadline.tv_sec ||
+        (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+      LOGE("Timed out waiting for __libc_init GOT resolution in pid %d", pid);
       return false;
     }
   }
