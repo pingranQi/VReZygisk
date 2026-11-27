@@ -99,13 +99,8 @@ $(MODULE_DONE): $(LOADER_DONE) $(ZYGISKD_DONE) $(MODULE_INPUTS)
 	done
 
 
-	@if [ -f module/private_key ]; then                                             \
-		echo "Signing module...";                                                   \
-		python3 scripts/sign.py $(MODULE_OUT) module/private_key module/public_key; \
-	else                                                                            \
-	    echo "No private key found, skipping signing...";                           \
-		python3 scripts/sign.py --no-sign $(MODULE_OUT);                            \
-	fi
+	@echo "Generating installer integrity hashes (not cryptographic signatures)..."
+	@python3 scripts/sign.py --hash-only $(MODULE_OUT)
 
 	@mkdir -p $(dir $@)
 	@touch $@
