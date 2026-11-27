@@ -384,6 +384,7 @@ bool exec_command(char *restrict buf, size_t len, const char *restrict file, con
 
   close(link[1]);
   size_t used = 0;
+  bool read_ok = true;
   char discard[256];
   for (;;) {
     char *target = used < len - 1 ? buf + used : discard;
@@ -394,7 +395,10 @@ bool exec_command(char *restrict buf, size_t len, const char *restrict file, con
       continue;
     }
     if (nread == -1 && errno == EINTR) continue;
-    if (nread == -1) LOGE("read command output: %s", strerror(errno));
+    if (nread == -1) {
+      LOGE("read command output: %s", strerror(errno));
+      read_ok = false;
+    }
     break;
   }
   buf[used] = '\0';
@@ -409,7 +413,7 @@ bool exec_command(char *restrict buf, size_t len, const char *restrict file, con
     LOGE("waitpid: %s", strerror(errno));
     return false;
   }
-  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+  return read_ok && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 bool check_unix_socket(int fd, bool block) {
