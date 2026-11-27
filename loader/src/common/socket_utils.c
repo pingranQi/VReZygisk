@@ -149,6 +149,11 @@ int read_fd(int fd) {
 }
 
 ssize_t write_string(int fd, const char *str) {
+  if (str == NULL) {
+    errno = EINVAL;
+    LOGE("write_string called with NULL");
+    return -1;
+  }
   size_t str_len = strlen(str);
   ssize_t write_bytes = write_loop(fd, &str_len, sizeof(size_t));
   if (write_bytes != (ssize_t)sizeof(size_t)) {
