@@ -58,7 +58,7 @@ CSOLOADER_DIR = src/external/csoloader
 COMMON_INCLUDES = -Isrc/include
 INJECTOR_INCLUDES = -Isrc/include -I$(PLTI_DIR)/src -I$(CSOLOADER_DIR)/include
 
-.PHONY: all arch clean test-mountinfo
+.PHONY: all arch clean test-mountinfo test-elf-asan
 
 all:
 	@for arch in $(ARCHS); do                                                                                  \
@@ -76,6 +76,12 @@ test-mountinfo:
 	@mkdir -p $(BUILD_DIR)/tests
 	$(HOST_CC) -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror -Isrc/include src/common/mountinfo.c tests/test_mountinfo.c -o $(BUILD_DIR)/tests/test_mountinfo
 	$(BUILD_DIR)/tests/test_mountinfo
+
+test-elf-asan:
+	@mkdir -p $(BUILD_DIR)/tests/elf-fuzz
+	$(HOST_CC) -std=c18 -D_GNU_SOURCE -Wall -Wextra -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -Itests/stubs -Isrc/include src/common/elf_util.c tests/test_elf_bounds.c -ldl -o $(BUILD_DIR)/tests/test_elf_bounds
+	python3 tests/mutate_elf.py /bin/ls $(BUILD_DIR)/tests/elf-fuzz
+	ASAN_OPTIONS=detect_leaks=1 $(BUILD_DIR)/tests/test_elf_bounds /bin/ls $(BUILD_DIR)/tests/elf-fuzz/gnu_hash_section_oob.elf $(BUILD_DIR)/tests/elf-fuzz/gnu_hash_chain_oob.elf
 
 clean:
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/loader
