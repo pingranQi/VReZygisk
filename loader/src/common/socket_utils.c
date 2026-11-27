@@ -14,7 +14,7 @@
 ssize_t write_loop(int fd, const void *buf, size_t count) {
   size_t written = 0;
   while (written < count) {
-    ssize_t ret = TEMP_FAILURE_RETRY(write(fd, (const char *)buf + written, count - written));
+    ssize_t ret = TEMP_FAILURE_RETRY(send(fd, (const char *)buf + written, count - written, MSG_NOSIGNAL));
     if (ret == -1) {
       if (errno == EAGAIN) {
         LOGW("Got EAGAIN while writing to fd %d, retrying...\n", fd);
