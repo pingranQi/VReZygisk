@@ -15,6 +15,12 @@ ReZygisk 是从 Zygisk Next 分支出来的 Zygisk API 独立实现，为 **Kern
 - Root 管理器的模块描述会显示运行状态和检测到的 Zygisk 模块名称。
 - 不包含 WebUI。
 
+### 高副作用清理功能
+
+- Treat Wheel P3（linker 私有结构清理）和 P4（mntent 缓冲区清理）默认关闭，需分别创建 `/data/adb/rezygisk/enable-frida-trace-cleanup`、`/data/adb/rezygisk/enable-mntent-buffer-scrub` 才会执行；对应 `disable-*` 文件优先级更高。
+- P5 ReVanced mount detach 仍要求模块 `tw_config` 显式设置 `module_type=revanced` 和 `allow_umount=true`。
+- 安装包内 SHA-256 sidecar 仅检测传输/存储损坏，不提供发布者身份认证；旧 Ed25519 签名文件未被运行时消费，已从构建产物中移除。
+
 ## 兼容性
 
 | 项目 | 支持情况 |
