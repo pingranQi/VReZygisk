@@ -12,25 +12,19 @@ P3, P4, and P5 are now implemented independently in:
 - `loader/src/injector/hook.c`
 - `loader/Makefile`
 
-The implementation does not reuse Treat Wheel's companion protocol, daemon operation enums, or module ABI. P3 and P4 are opt-in because they touch private linker state and Bionic process-local buffers. P5 remains guarded by explicit per-module opt-in. All three features also have global disable markers.
+The implementation does not reuse Treat Wheel's companion protocol, daemon operation enums, or module ABI. P3 and P4 are enabled by default at the user's request, with independent global disable markers because they touch private linker state and Bionic process-local buffers. P5 remains guarded by explicit per-module opt-in. All three features also have global disable markers.
 
 | Feature | Runtime scope | Default | Disable switch | Behavior |
 |---|---|---|---|---|
-| P3 Frida linker-entry cleanup | Denylisted app processes | Opt-in | `/data/adb/rezygisk/disable-frida-trace-cleanup` | Runtime-probes linker symbols and soinfo layout; removes only exact known Frida agent memfd entries. Unknown linker layouts are skipped. |
-| P4 mntent buffer scrub | Denylisted app processes | Opt-in | `/data/adb/rezygisk/disable-mntent-buffer-scrub` | Clears the process-local last Bionic `getmntent` line buffer. Does not alter the mount table or call setns/umount. |
+| P3 Frida linker-entry cleanup | Denylisted app processes | Enabled by default; global opt-out | `/data/adb/rezygisk/disable-frida-trace-cleanup` | Runtime-probes linker symbols and soinfo layout; removes only exact known Frida agent memfd entries. Unknown linker layouts are skipped. |
+| P4 mntent buffer scrub | Denylisted app processes | Enabled by default; global opt-out | `/data/adb/rezygisk/disable-mntent-buffer-scrub` | Clears the process-local last Bionic `getmntent` line buffer. Does not alter the mount table or call setns/umount. |
 | P5 ReVanced mount detach | Non-denylisted, non-manager app processes | Enabled when at least one module explicitly opts in | `/data/adb/rezygisk/disable-revanced-mount-umount` | Requires an enabled module with `tw_config` containing `module_type=revanced` and `allow_umount=true`. Parses current `/proc/self/mountinfo`, checks candidate count against opted-in modules, preserves current app package mount, and calls `umount2(MNT_DETACH)` only in the current process mount namespace. |
 
 ## Enable / disable
 
-P3 and P4 are disabled unless their respective enable marker exists. P5's code path is considered only for enabled ReVanced modules with explicit opt-in configuration.
+P3 and P4 run by default unless their respective disable marker exists. P5's code path is considered only for enabled ReVanced modules with explicit opt-in configuration.
 
-To enable P3/P4 explicitly:
-
-```sh
-su -c 'mkdir -p /data/adb/rezygisk'
-su -c 'touch /data/adb/rezygisk/enable-frida-trace-cleanup'
-su -c 'touch /data/adb/rezygisk/enable-mntent-buffer-scrub'
-```
+P3/P4 are enabled by default; no enable marker is required.
 
 A corresponding `disable-*` marker always takes precedence. To disable individual features:
 
@@ -51,9 +45,9 @@ allow_umount=true
 Place that content in `/data/adb/modules/<module_id>/tw_config`. Remove the corresponding `disable-*` file to re-enable a feature. Restart affected app processes after changing switches.
 ## Safety and implementation notes
 
-- P3 is disabled by default and depends on private Android linker symbols and internal `soinfo` layout. Explicit opt-in does not make this a stable Android ABI. Unknown layouts are skipped; keep it disabled unless validated on the exact device build.
+- P3 is enabled by default and depends on private Android linker symbols and internal `soinfo` layout. This is not a stable Android ABI. Unknown layouts are skipped; create `/data/adb/rezygisk/disable-frida-trace-cleanup` to disable it if the exact device build has not been validated.
 - P3 only recognizes the two exact upstream memfd names. It does not claim to hide all Frida versions, Gum mappings, threads, sockets, file descriptors, or other instrumentation artifacts.
-- P4 is disabled by default and uses the reentrant `getmntent_r` interface with a private bounded buffer. It only clears the last line buffer; it does not hide entries from a fresh read of `/proc/self/mounts` or `/proc/self/mountinfo`.
+- P4 is enabled by default and uses Bionic `getmntent()`'s process-local static line buffer, clearing the last `mnt_fsname`. It only runs on the process main thread (the pre-specialize call site is expected to be before app threads start); it does not hide entries from a fresh read of `/proc/self/mounts` or `/proc/self/mountinfo`. Because `getmntent()` is non-reentrant, disable it with `/data/adb/rezygisk/disable-mntent-buffer-scrub` if the call timing/thread assumption is not valid for a target ROM.
 - P5's global code path is enabled by default, but actual detach remains explicitly opt-in per ReVanced module through `tw_config`. It deliberately avoids Treat Wheel's cross-process `setns(pid)` companion protocol. It acts only on the current process namespace, only after ReZygisk has completed its own namespace selection, and skips when the number of candidate `/data/app/~~...` mounts does not match the number of opted-in modules.
 - P5 uses lazy detach. It can affect other processes sharing the same mount namespace. The current package's mount is preserved, but app/WebView/file-picker regression testing is mandatory.
 - Any failure in P3/P4/P5 is logged and does not abort app specialization.
@@ -84,7 +78,7 @@ Workflow run: https://github.com/pingranQi/VReZygisk/actions/runs/45843830408
 
 ## Device validation still required
 
-P3/P4 require explicit enable markers; P5 can run only when a module opts in. Test before enabling any of them:
+P3/P4 are enabled unless disabled by their respective marker files; P5 can run only when a module opts in. Test before enabling any of them:
 - Android API 25, 29, 30, 34, and current platform releases where available.
 - Magisk, KernelSU, and APatch installations supported by the repository.
 - App launch, current app APK/resource loading, WebView provider initialization, file picker, DocumentsUI, Download, and app-private file access.
