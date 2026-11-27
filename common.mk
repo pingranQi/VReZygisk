@@ -20,7 +20,8 @@ MIN_KSU_VERSION ?= 10940
 MIN_KSUD_VERSION ?= 11425
 MIN_MAGISK_VERSION ?= 26402
 
-MODULE_ID ?= rezygisk
+# Runtime paths are currently compiled against this fixed module ID.
+override MODULE_ID := rezygisk
 MODULE_NAME ?= ReZygisk
 
 NDK_VERSION ?= 30.0.16248370
