@@ -17,23 +17,6 @@ void apatch_get_existence(struct root_impl_state *state) {
     return;
   }
 
-  const char *PATH = getenv("PATH");
-  if (PATH == NULL) {
-    LOGE("Failed to get PATH environment variable");
-
-    state->state = Inexistent;
-
-    return;
-  }
-
-  if (strstr(PATH, "/data/adb") == NULL) {
-    LOGE("APatch's APD binary is not in PATH");
-
-    state->state = Inexistent;
-
-    return;
-  }
-
   char apatch_version[32] = {0};
   const char *const argv[] = { "apd", "-V", NULL };
 
