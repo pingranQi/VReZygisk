@@ -26,6 +26,7 @@ typedef struct {
   void *strtab_start;
 
   uint32_t nbucket_;
+  uint32_t hash_chain_count_;
   uint32_t *bucket_;
   uint32_t *chain_;
 
@@ -33,6 +34,8 @@ typedef struct {
   uint32_t gnu_symndx_;
   uint32_t gnu_bloom_size_;
   uint32_t gnu_shift2_;
+  size_t gnu_chain_count_;
+  size_t dynsym_count_;
   uintptr_t *gnu_bloom_filter_;
   uint32_t *gnu_bucket_;
   uint32_t *gnu_chain_;
