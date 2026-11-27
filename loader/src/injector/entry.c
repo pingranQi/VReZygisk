@@ -31,7 +31,10 @@ int entry(void *addr, size_t size, int tango_flag) {
   }
 
   LOGD("start plt hooking");
-  hook_functions();
+  if (!hook_functions()) {
+    LOGE("Critical PLT hook setup failed; refusing to continue injection");
+    return -3;
+  }
 
   struct kernel_version version = parse_kversion();
   if (version.major > 3 || (version.major == 3 && version.minor >= 8)) {
