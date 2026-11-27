@@ -17,6 +17,15 @@
 
 #define SHT_GNU_HASH 0x6ffffff6
 
+/* Validate file-backed ELF ranges before deriving pointers into mmap. */
+static bool range_in_file(const ElfImg *img, uint64_t offset, uint64_t length) {
+  return offset <= img->size && length <= (uint64_t)img->size - offset;
+}
+
+static bool bounded_string(const char *table, size_t table_size, size_t offset) {
+  return table != NULL && offset < table_size && memchr(table + offset, '\\0', table_size - offset) != NULL;
+}
+
 uint32_t ElfHash(const char *name) {
   uint32_t h = 0, g = 0;
 
@@ -211,22 +220,38 @@ ElfImg *ElfImg_create(const char *elf, void *base) {
     return NULL;
   }
 
-  if (memcmp(img->header->e_ident, ELFMAG, SELFMAG) != 0) {
-    LOGE("Invalid ELF header for %s", elf);
-
+  if (memcmp(img->header->e_ident, ELFMAG, SELFMAG) != 0 ||
+      img->header->e_ident[EI_CLASS] != (sizeof(ElfW(Ehdr)) == sizeof(Elf64_Ehdr) ? ELFCLASS64 : ELFCLASS32) ||
+      img->header->e_ident[EI_DATA] != ELFDATA2LSB ||
+      img->header->e_ehsize < sizeof(ElfW(Ehdr))) {
+    LOGE("Invalid or unsupported ELF header for %s", elf);
     ElfImg_destroy(img);
-
     return NULL;
   }
 
-  if (img->header->e_shoff == 0 || img->header->e_shentsize == 0 || img->header->e_shnum == 0) {
-    LOGW("Section header table missing or invalid in %s", elf);
-  } else {
+  if (img->header->e_shoff != 0 && img->header->e_shnum != 0) {
+    if (img->header->e_shentsize != sizeof(ElfW(Shdr)) ||
+        !range_in_file(img, img->header->e_shoff,
+                       (uint64_t)img->header->e_shnum * sizeof(ElfW(Shdr)))) {
+      LOGE("Invalid section header table range in %s", elf);
+      ElfImg_destroy(img);
+      return NULL;
+    }
     img->section_header = offsetOf_Shdr(img->header, img->header->e_shoff);
+  } else {
+    LOGW("Section header table missing in %s", elf);
   }
 
-  if (img->header->e_phoff == 0 || img->header->e_phentsize == 0 || img->header->e_phnum == 0) {
-    LOGW("Program header table missing or invalid in %s", elf);
+  if (img->header->e_phoff != 0 && img->header->e_phnum != 0) {
+    if (img->header->e_phentsize != sizeof(ElfW(Phdr)) ||
+        !range_in_file(img, img->header->e_phoff,
+                       (uint64_t)img->header->e_phnum * sizeof(ElfW(Phdr)))) {
+      LOGE("Invalid program header table range in %s", elf);
+      ElfImg_destroy(img);
+      return NULL;
+    }
+  } else {
+    LOGW("Program header table missing in %s", elf);
   }
 
   ElfW(Shdr) *dynsym_shdr = NULL;
@@ -236,7 +261,14 @@ ElfImg *ElfImg_create(const char *elf, void *base) {
   if (img->section_header && img->header->e_shstrndx != SHN_UNDEF) {
     if (img->header->e_shstrndx < img->header->e_shnum) {
       ElfW(Shdr) *shstrtab_hdr = img->section_header + img->header->e_shstrndx;
-      section_str = offsetOf_char(img->header, shstrtab_hdr->sh_offset);
+      if (shstrtab_hdr->sh_type == SHT_STRTAB &&
+          range_in_file(img, shstrtab_hdr->sh_offset, shstrtab_hdr->sh_size))
+        section_str = offsetOf_char(img->header, shstrtab_hdr->sh_offset);
+      else {
+        LOGE("Invalid section-name string table in %s", elf);
+        ElfImg_destroy(img);
+        return NULL;
+      }
     } else {
       LOGW("Section header string table index (%u) out of bounds (%u)", img->header->e_shstrndx, img->header->e_shnum);
     }
@@ -248,14 +280,24 @@ ElfImg *ElfImg_create(const char *elf, void *base) {
     uintptr_t shoff = (uintptr_t)img->section_header;
     for (int i = 0; i < img->header->e_shnum; i++, shoff += img->header->e_shentsize) {
       ElfW(Shdr) *section_h = (ElfW(Shdr *))shoff;
-      char *sname = section_str ? (section_h->sh_name + section_str) : "<?>";
+      if (section_h->sh_type != SHT_NOBITS &&
+          !range_in_file(img, section_h->sh_offset, section_h->sh_size)) {
+        LOGW("Skipping section %d with out-of-file range", i);
+        continue;
+      }
+      char *sname = (section_str && bounded_string(section_str,
+          (size_t)img->section_header[img->header->e_shstrndx].sh_size,
+          section_h->sh_name)) ? section_str + section_h->sh_name : "<?>";
       size_t entsize = section_h->sh_entsize;
 
       switch (section_h->sh_type) {
         case SHT_DYNSYM: {
+          if (section_h->sh_entsize < sizeof(ElfW(Sym)) ||
+              section_h->sh_size % section_h->sh_entsize != 0) break;
           dynsym_shdr = section_h;
           img->dynsym_offset = section_h->sh_offset;
           img->dynsym_start = offsetOf_Sym(img->header, img->dynsym_offset);
+          img->dynsym_count_ = section_h->sh_size / section_h->sh_entsize;
 
           break;
         }
@@ -283,8 +325,10 @@ ElfImg *ElfImg_create(const char *elf, void *base) {
 
           if (section_h->sh_size >= 2 * sizeof(ElfW(Word))) {
             img->nbucket_ = d_un[0];
+            img->hash_chain_count_ = d_un[1];
+            uint64_t word_count = (uint64_t)2 + img->nbucket_ + img->hash_chain_count_;
 
-            if (img->nbucket_ > 0 && section_h->sh_size >= (2 + img->nbucket_ + d_un[1]) * sizeof(ElfW(Word))) {
+            if (img->nbucket_ > 0 && word_count <= section_h->sh_size / sizeof(ElfW(Word))) {
               img->bucket_ = d_un + 2;
               img->chain_ = img->bucket_ + img->nbucket_;
             } else {
@@ -298,6 +342,7 @@ ElfImg *ElfImg_create(const char *elf, void *base) {
           break;
         }
         case SHT_GNU_HASH: {
+          if (section_h->sh_size < 4 * sizeof(ElfW(Word))) break;
           ElfW(Word) *d_buf = offsetOf_Word(img->header, section_h->sh_offset);
 
           if (section_h->sh_size >= 4 * sizeof(ElfW(Word))) {
@@ -306,14 +351,17 @@ ElfImg *ElfImg_create(const char *elf, void *base) {
             img->gnu_bloom_size_ = d_buf[2];
             img->gnu_shift2_ = d_buf[3];
 
-            size_t expected_min_size = 4 * sizeof(ElfW(Word)) +
-                                      img->gnu_bloom_size_ * sizeof(uintptr_t) +
-                                      img->gnu_nbucket_ * sizeof(uint32_t);
+            uint64_t bloom_bytes = (uint64_t)img->gnu_bloom_size_ * sizeof(uintptr_t);
+            uint64_t bucket_bytes = (uint64_t)img->gnu_nbucket_ * sizeof(uint32_t);
+            uint64_t expected_min_size = 4 * sizeof(ElfW(Word)) + bloom_bytes + bucket_bytes;
 
-            if (img->gnu_nbucket_ > 0 && img->gnu_bloom_size_ > 0 && section_h->sh_size >= expected_min_size) {
+            if (img->gnu_nbucket_ > 0 && img->gnu_bloom_size_ > 0 &&
+                expected_min_size <= section_h->sh_size &&
+                section_h->sh_size - expected_min_size >= sizeof(uint32_t)) {
               img->gnu_bloom_filter_ = (uintptr_t *)(d_buf + 4);
               img->gnu_bucket_ = (uint32_t *)(img->gnu_bloom_filter_ + img->gnu_bloom_size_);
               img->gnu_chain_ = img->gnu_bucket_ + img->gnu_nbucket_;
+              img->gnu_chain_count_ = (section_h->sh_size - (size_t)expected_min_size) / sizeof(uint32_t);
 
               uintptr_t chain_start_offset = (uintptr_t)img->gnu_chain_ - (uintptr_t)img->header;
               if (chain_start_offset < section_h->sh_offset || chain_start_offset >= section_h->sh_offset + section_h->sh_size) {
@@ -491,6 +539,8 @@ ElfW(Addr) GnuLookup(ElfImg *restrict img, const char *name, uint32_t hash, unsi
     return 0;
   }
 
+  if (img->dynsym_count_ == 0 || img->dynsym == NULL || img->dynsym->sh_entsize < sizeof(ElfW(Sym))) return 0;
+
   uint32_t sym_index = img->gnu_bucket_[hash % img->gnu_nbucket_];
   if (sym_index < img->gnu_symndx_) {
     LOGW("Symbol %s hash %u maps to bucket %u index %u (below gnu_symndx %u), not exported?", name, hash, hash % img->gnu_nbucket_, sym_index, img->gnu_symndx_);
@@ -498,10 +548,14 @@ ElfW(Addr) GnuLookup(ElfImg *restrict img, const char *name, uint32_t hash, unsi
     return 0;
   }
 
+  if (sym_index >= img->dynsym_count_ || (size_t)(sym_index - img->gnu_symndx_) >= img->gnu_chain_count_) {
+    LOGE("GNU hash symbol or chain index out of bounds");
+    return 0;
+  }
+
   char *strings = (char *)img->strtab_start;
   uint32_t chain_val = img->gnu_chain_[sym_index - img->gnu_symndx_];
-
-  ElfW(Word) dynsym_count = img->dynsym->sh_size / img->dynsym->sh_entsize;
+  size_t dynsym_count = img->dynsym_count_;
   if (sym_index >= dynsym_count) {
     LOGE("Symbol index %u out of bounds", sym_index);
 
@@ -532,6 +586,7 @@ ElfW(Addr) GnuLookup(ElfImg *restrict img, const char *name, uint32_t hash, unsi
       return 0;
     }
 
+    if ((size_t)(sym_index - img->gnu_symndx_) >= img->gnu_chain_count_) return 0;
     chain_val = img->gnu_chain_[sym_index - img->gnu_symndx_];
     sym = img->dynsym_start + sym_index;
 
@@ -558,8 +613,12 @@ ElfW(Addr) ElfLookup(ElfImg *restrict img, const char *restrict name, uint32_t h
 
   char *strings = (char *)img->strtab_start;
 
-  for (size_t n = img->bucket_[hash % img->nbucket_]; n != STN_UNDEF; n = img->chain_[n]) {
+  if (img->dynsym_count_ == 0 || img->hash_chain_count_ == 0 || img->dynsym == NULL || img->strtab == NULL) return 0;
+  size_t n = img->bucket_[hash % img->nbucket_];
+  for (size_t steps = 0; n != STN_UNDEF && steps < img->hash_chain_count_; ++steps) {
+    if (n >= img->dynsym_count_ || n >= img->hash_chain_count_) return 0;
     ElfW(Sym) *sym = img->dynsym_start + n;
+    if (!bounded_string((const char *)strings, img->strtab->sh_size, sym->st_name)) return 0;
 
     if (strcmp(name, strings + sym->st_name) == 0 && sym->st_shndx != SHN_UNDEF) {
       unsigned int type = ELF_ST_TYPE(sym->st_info);
@@ -567,6 +626,7 @@ ElfW(Addr) ElfLookup(ElfImg *restrict img, const char *restrict name, uint32_t h
 
       return sym->st_value;
     }
+    n = img->chain_[n];
   }
 
   return 0;
