@@ -50,7 +50,8 @@ void apatch_get_existence(struct root_impl_state *state) {
   char *version_end = NULL;
   errno = 0;
   unsigned long parsed_version = strtoul(version_text, &version_end, 10);
-  if (errno != 0 || version_end == version_text || (*version_end != '\\0' && *version_end != '\\n') || parsed_version > 999999UL) {
+  while (*version_end == ' ' || *version_end == '\\n' || *version_end == '\\r' || *version_end == '\\t') version_end++;
+  if (errno != 0 || version_end == version_text || *version_end != '\\0' || parsed_version > 999999UL) {
     state->state = Abnormal;
     return;
   }
