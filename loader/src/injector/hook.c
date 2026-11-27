@@ -449,6 +449,12 @@ void hook_jni_methods(JNIEnv *env, const char *clz, JNINativeMethod *methods, in
     }
 
     void *art_method = amethod_from_reflected_method(env, method);
+    if (art_method == NULL) {
+      LOGW("ToReflectedMethod did not yield an ART method for %s", nm->name);
+      nm->fnPtr = NULL;
+      (*env)->DeleteLocalRef(env, method);
+      continue;
+    }
     if (hooks_count < 32)
       hooks[hooks_count++] = *nm;
 
