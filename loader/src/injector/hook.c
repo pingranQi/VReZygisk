@@ -1684,15 +1684,21 @@ static bool hook_unregister(const char *lib_name, const char *symbol, bool is_pr
 #define PLT_HOOK_UNREGISTER(LIB, SYM, IS_PREFIX)     \
   PLT_HOOK_UNREGISTER_SYM(LIB, #SYM, SYM, IS_PREFIX)
 
-void hook_functions(void) {
+bool hook_functions(void) {
   plti_init(&plti_ctx);
 
-  plti_add_lib(&plti_ctx, "libandroid_runtime.so");
+  bool success = plti_add_lib(&plti_ctx, "libandroid_runtime.so");
+  success = PLT_HOOK_REGISTER("libandroid_runtime.so", fork, false) && success;
+  success = PLT_HOOK_REGISTER("libandroid_runtime.so", strdup, false) && success;
+  success = PLT_HOOK_REGISTER("libandroid_runtime.so", property_get, false) && success;
+  success = PLT_HOOK_REGISTER_SYM("libandroid_runtime.so", "_ZNK18FileDescriptorInfo14ReopenOrDetach", _ZNK18FileDescriptorInfo14ReopenOrDetach, true) && success;
 
-  PLT_HOOK_REGISTER("libandroid_runtime.so", fork, false);
-  PLT_HOOK_REGISTER("libandroid_runtime.so", strdup, false);
-  PLT_HOOK_REGISTER("libandroid_runtime.so", property_get, false);
-  PLT_HOOK_REGISTER_SYM("libandroid_runtime.so", "_ZNK18FileDescriptorInfo14ReopenOrDetach", _ZNK18FileDescriptorInfo14ReopenOrDetach, true);
+  if (!success) {
+    LOGE("Critical Zygote PLT hook setup failed; tearing down partial hook state");
+    plti_deinit(&plti_ctx);
+    return false;
+  }
+  return true;
 }
 
 static void hook_unloader(void) {
