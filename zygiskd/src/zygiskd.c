@@ -384,11 +384,10 @@ void zygiskd_start(char *restrict argv[]) {
 
       break;
     } else if (len == 0) {
-      LOGI("Client disconnected");
-
+      /* A client that connects and closes without a request is isolated. */
+      LOGI("Client disconnected before sending a request");
       close(client_fd);
-
-      break;
+      continue;
     }
 
     enum DaemonSocketAction action = (enum DaemonSocketAction)action8;
