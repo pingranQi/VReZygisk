@@ -293,8 +293,11 @@ ElfImg *ElfImg_create(const char *elf, void *base) {
 
       switch (section_h->sh_type) {
         case SHT_DYNSYM: {
-          if (section_h->sh_entsize < sizeof(ElfW(Sym)) ||
-              section_h->sh_size % section_h->sh_entsize != 0) break;
+          if (section_h->sh_entsize != sizeof(ElfW(Sym)) ||
+              section_h->sh_size % sizeof(ElfW(Sym)) != 0) {
+            LOGW("Invalid SHT_DYNSYM entry size in section %s", sname);
+            break;
+          }
           dynsym_shdr = section_h;
           img->dynsym_offset = section_h->sh_offset;
           img->dynsym_start = offsetOf_Sym(img->header, img->dynsym_offset);
@@ -308,12 +311,14 @@ ElfImg *ElfImg_create(const char *elf, void *base) {
             img->symtab_offset = section_h->sh_offset;
             img->symtab_size = section_h->sh_size;
 
-            if (entsize > 0) img->symtab_count = img->symtab_size / entsize;
-            else {
-              LOGW("Section %s has zero sh_entsize", sname);
+            if (entsize != sizeof(ElfW(Sym)) ||
+                img->symtab_size % sizeof(ElfW(Sym)) != 0) {
+              LOGW("Section %s has invalid symbol entry size", sname);
+              symtab_shdr = NULL;
               img->symtab_count = 0;
+              break;
             }
-
+            img->symtab_count = img->symtab_size / sizeof(ElfW(Sym));
             img->symtab_start = offsetOf_Sym(img->header, img->symtab_offset);
           }
 
