@@ -1493,9 +1493,9 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
     update_mnt_ns(Clean, target_uid, ctx->process, false);
 
   /*
-   * Treat Wheel compatibility features are explicitly opt-in and fail open.
-   * P3/P4 apply to denylisted processes; P5 only applies to non-manager,
-   * non-denylisted processes, matching the upstream feature's scope.
+   * Treat Wheel P3/P4 are enabled by default and can be disabled independently
+   * with their /data/adb/rezygisk/disable-* marker files. They apply to
+   * denylisted processes; P5 remains per-module opt-in.
    */
   if (in_denylist) {
     treat_wheel_hide_frida_traces();
