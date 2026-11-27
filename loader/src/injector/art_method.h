@@ -82,9 +82,14 @@ static inline bool amethod_init(JNIEnv *env) {
   (*env)->DeleteLocalRef(env, constructors);
   if (clazz) (*env)->DeleteLocalRef(env, clazz);
 
+  if (first == 0 || second <= first) {
+    LOGE("Invalid reflected ArtMethod addresses");
+    return false;
+  }
+
   size_t art_method_size = second - first;
   LOGD("ArtMethod size: %zu", art_method_size);
-  if ((4 * 9 + 3 * sizeof(void *)) < art_method_size) {
+  if (art_method_size < 2 * sizeof(void *) || (4 * 9 + 3 * sizeof(void *)) < art_method_size) {
     LOGE("ArtMethod size exceeds maximum assume. There may be something wrong.");
 
     return false;
@@ -99,6 +104,7 @@ static inline bool amethod_init(JNIEnv *env) {
 }
 
 static inline void *amethod_get_data(uintptr_t self) {
+  if (self == 0 || data_offset == 0) return NULL;
   return *(void **)(self + data_offset);
 }
 
