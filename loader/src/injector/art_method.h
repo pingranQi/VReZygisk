@@ -89,7 +89,7 @@ static inline bool amethod_init(JNIEnv *env) {
 
   size_t art_method_size = second - first;
   LOGD("ArtMethod size: %zu", art_method_size);
-  if (art_method_size < 2 * sizeof(void *) || (4 * 9 + 3 * sizeof(void *)) < art_method_size) {
+  if (art_method_size <= 2 * sizeof(void *) || (4 * 9 + 3 * sizeof(void *)) < art_method_size) {
     LOGE("ArtMethod size exceeds maximum assume. There may be something wrong.");
 
     return false;
