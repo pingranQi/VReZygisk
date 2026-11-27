@@ -272,6 +272,10 @@ static bool collect_hide_target(const struct map_entry *map, void *userdata) {
 }
 
 bool hide_module_maps(const struct maps_info *libraries) {
+  if (gettid() != getpid()) {
+    LOGW("Skip anonymous-memory replacement outside the app main thread");
+    return false;
+  }
   if (libraries == NULL || libraries->length == 0) return false;
   if (libraries->maps == NULL) {
     LOGE("Invalid loaded-library table");
