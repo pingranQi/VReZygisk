@@ -320,40 +320,37 @@ with open('jni_hooks.h', 'w') as f:
 static void do_hook_zygote(JNIEnv *env) {
   const char *clz = "com/android/internal/os/Zygote";
 
-  JNINativeMethod hooks[3];
+  JNINativeMethod hooks[64];
   int hooks_count = 0;
 
   int fork_specialize_methods_count = sizeof(nativeForkAndSpecialize_methods) / sizeof(nativeForkAndSpecialize_methods[0]);
+  void **fork_specialize_orig_slots[] = { &nativeForkAndSpecialize_l_orig, &nativeForkAndSpecialize_o_orig, &nativeForkAndSpecialize_p_orig, &nativeForkAndSpecialize_q_alt_orig, &nativeForkAndSpecialize_r_orig, &nativeForkAndSpecialize_u_orig, &nativeForkAndSpecialize_c_orig, &nativeForkAndSpecialize_samsung_m_orig, &nativeForkAndSpecialize_samsung_n_orig, &nativeForkAndSpecialize_samsung_o_orig, &nativeForkAndSpecialize_samsung_p_orig, &nativeForkAndSpecialize_samsung_b_orig, &nativeForkAndSpecialize_grapheneos_u_orig, &nativeForkAndSpecialize_grapheneos_u_alt_orig, &nativeForkAndSpecialize_grapheneos_c_orig };
   hook_jni_methods(env, clz, nativeForkAndSpecialize_methods, fork_specialize_methods_count);
   for (int i = 0; i < fork_specialize_methods_count; i++) {
     if (!nativeForkAndSpecialize_methods[i].fnPtr) continue;
-
-    nativeForkAndSpecialize_orig = nativeForkAndSpecialize_methods[i].fnPtr;
-    hooks[hooks_count++] = nativeForkAndSpecialize_methods[i];
-
-    break;
+    *fork_specialize_orig_slots[i] = nativeForkAndSpecialize_methods[i].fnPtr;
+    if (hooks_count < (int)(sizeof(hooks) / sizeof(hooks[0])))
+      hooks[hooks_count++] = nativeForkAndSpecialize_methods[i];
   }
 
   int specialize_methods_count = sizeof(nativeSpecializeAppProcess_methods) / sizeof(nativeSpecializeAppProcess_methods[0]);
+  void **specialize_orig_slots[] = { &nativeSpecializeAppProcess_q_orig, &nativeSpecializeAppProcess_q_alt_orig, &nativeSpecializeAppProcess_r_orig, &nativeSpecializeAppProcess_u_orig, &nativeSpecializeAppProcess_c_orig, &nativeSpecializeAppProcess_samsung_q_orig, &nativeSpecializeAppProcess_grapheneos_u_orig, &nativeSpecializeAppProcess_grapheneos_c_orig };
   hook_jni_methods(env, clz, nativeSpecializeAppProcess_methods, specialize_methods_count);
   for (int i = 0; i < specialize_methods_count; i++) {
     if (!nativeSpecializeAppProcess_methods[i].fnPtr) continue;
-
-    nativeSpecializeAppProcess_orig = nativeSpecializeAppProcess_methods[i].fnPtr;
-    hooks[hooks_count++] = nativeSpecializeAppProcess_methods[i];
-
-    break;
+    *specialize_orig_slots[i] = nativeSpecializeAppProcess_methods[i].fnPtr;
+    if (hooks_count < (int)(sizeof(hooks) / sizeof(hooks[0])))
+      hooks[hooks_count++] = nativeSpecializeAppProcess_methods[i];
   }
 
   int server_methods_count = sizeof(nativeForkSystemServer_methods) / sizeof(nativeForkSystemServer_methods[0]);
+  void **server_orig_slots[] = { &nativeForkSystemServer_l_orig, &nativeForkSystemServer_samsung_q_orig };
   hook_jni_methods(env, clz, nativeForkSystemServer_methods, server_methods_count);
   for (int i = 0; i < server_methods_count; i++) {
     if (!nativeForkSystemServer_methods[i].fnPtr) continue;
-
-    nativeForkSystemServer_orig = nativeForkSystemServer_methods[i].fnPtr;
-    hooks[hooks_count++] = nativeForkSystemServer_methods[i];
-
-    break;
+    *server_orig_slots[i] = nativeForkSystemServer_methods[i].fnPtr;
+    if (hooks_count < (int)(sizeof(hooks) / sizeof(hooks[0])))
+      hooks[hooks_count++] = nativeForkSystemServer_methods[i];
   }
 
   jni_hook_list_add(clz, hooks, hooks_count);
