@@ -1,5 +1,5 @@
 TMPDIR_FOR_VERIFY="$TMPDIR/.vunzip"
-mkdir "$TMPDIR_FOR_VERIFY"
+mkdir -p "$TMPDIR_FOR_VERIFY"
 
 abort_verify() {
   ui_print "*********************************************************"
@@ -34,7 +34,10 @@ extract() {
   unzip $opts "$zip" "$file.sha256" -d "$TMPDIR_FOR_VERIFY" >&2
   [ -f "$hash_path" ] || abort_verify "$file.sha256 not exists"
 
-  (echo "$(cat "$hash_path")  $file_path" | sha256sum -c -s -) || abort_verify "Failed to verify $file"
+  expected_hash=$(cat "$hash_path")
+  actual_hash=$(sha256sum "$file_path")
+  actual_hash=${actual_hash%% *}
+  [ "$expected_hash" = "$actual_hash" ] || abort_verify "Failed to verify $file"
   ui_print "- Verified $file" >&1
 }
 
@@ -44,7 +47,10 @@ hash_path="$file_path.sha256"
 unzip -o "$ZIPFILE" "META-INF/com/google/android/*" -d "$TMPDIR_FOR_VERIFY" >&2
 [ -f "$file_path" ] || abort_verify "$file not exists"
 if [ -f "$hash_path" ]; then
-  (echo "$(cat "$hash_path")  $file_path" | sha256sum -c -s -) || abort_verify "Failed to verify $file"
+  expected_hash=$(cat "$hash_path")
+  actual_hash=$(sha256sum "$file_path")
+  actual_hash=${actual_hash%% *}
+  [ "$expected_hash" = "$actual_hash" ] || abort_verify "Failed to verify $file"
   ui_print "- Verified $file" >&1
 else
   ui_print "- Download from Magisk app"
