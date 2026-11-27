@@ -96,18 +96,16 @@ extract "$ZIPFILE" 'module.prop'     "$MODPATH"
 extract "$ZIPFILE" 'post-fs-data.sh' "$MODPATH"
 extract "$ZIPFILE" 'service.sh'      "$MODPATH"
 extract "$ZIPFILE" 'uninstall.sh'    "$MODPATH"
+extract "$ZIPFILE" 'rezygisk.sh'     "$MODPATH"
 extract "$ZIPFILE" 'zygisk-init.sh' "$MODPATH"
 extract "$ZIPFILE" 'late-load.sh' "$MODPATH"
 
-cp "$MODPATH/module.prop" "$MODPATH/module.prop.bak"
-
-chmod +x "$MODPATH/uninstall.sh"
+chmod +x "$MODPATH/uninstall.sh" "$MODPATH/rezygisk.sh"
 chmod +x "$MODPATH/zygisk-init.sh" "$MODPATH/late-load.sh"
 
 mv "$TMPDIR/sepolicy.rule" "$MODPATH"
 
-mkdir "$MODPATH/bin"
-mkdir "$MODPATH/lib64"
+mkdir -p "$MODPATH/bin" "$MODPATH/lib64"
 
 CPU_ABIS="$(getprop ro.product.cpu.abilist)"
 case ",$CPU_ABIS," in
@@ -133,3 +131,10 @@ if [ "$HUAWEI_MAPLE_ENABLED" == "1" ]; then
   ui_print "- Add ro.maple.enable=0"
   echo "ro.maple.enable=0" >>"$MODPATH/system.prop"
 fi
+
+# Preserve the pristine module metadata after installation-time changes.
+cp "$MODPATH/module.prop" "$MODPATH/module.prop.bak"
+
+mkdir -p /data/adb/service.d
+cp -af "$MODPATH/rezygisk.sh" /data/adb/service.d/rezygisk.sh
+chmod 0755 /data/adb/service.d/rezygisk.sh
