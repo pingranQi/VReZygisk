@@ -43,6 +43,9 @@ jobs:
       - name: Test mountinfo parser
         run: make -C loader test-mountinfo
 
+      - name: Test ELF parser with ASan and UBSan
+        run: make -C loader test-elf-asan
+
       - name: Build
         run: |
           make all -j$(nproc)
