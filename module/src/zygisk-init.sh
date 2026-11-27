@@ -26,7 +26,10 @@ if ! pidof zygisk-ptrace64 >/dev/null 2>&1; then
   mkdir -p "$TMP_PATH"
   rm -f "$TMP_PATH/init_monitor" "$TMP_PATH/cp64.sock"
   chmod 0555 "$TMP_PATH"
-  chcon u:object_r:system_file:s0 "$TMP_PATH" 2>/dev/null || true
+  if ! chcon u:object_r:system_file:s0 "$TMP_PATH" 2>/dev/null; then
+    echo "ReZygisk: failed to label runtime directory $TMP_PATH" >&2
+    exit 1
+  fi
 
   # Restore a clean module.prop before the monitor starts composing status.
   if [ -f "$MODDIR/module.prop.bak" ]; then
