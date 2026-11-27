@@ -105,6 +105,8 @@ uint32_t rezygiskd_get_process_flags(uid_t uid, const char *const process) {
 }
 
 void rezygiskd_get_info(struct rezygisk_info *info) {
+  if (info == NULL) return;
+  memset(info, 0, sizeof(*info));
   int fd = rezygiskd_connect(1);
   if (fd == -1) {
     info->running = false;
