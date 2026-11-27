@@ -21,7 +21,9 @@
 #include "logging.h"
 #include "mountinfo.h"
 
+#define TW_ENABLE_FRIDA_FILE "/data/adb/rezygisk/enable-frida-trace-cleanup"
 #define TW_DISABLE_FRIDA_FILE "/data/adb/rezygisk/disable-frida-trace-cleanup"
+#define TW_ENABLE_MNTENT_FILE "/data/adb/rezygisk/enable-mntent-buffer-scrub"
 #define TW_DISABLE_MNTENT_FILE "/data/adb/rezygisk/disable-mntent-buffer-scrub"
 #define TW_DISABLE_RVU_FILE "/data/adb/rezygisk/disable-revanced-mount-umount"
 #define TW_MODULES_DIR "/data/adb/modules"
@@ -76,6 +78,10 @@ static bool is_frida_agent_path(const char *path) {
 bool treat_wheel_hide_frida_traces(void) {
   if (access(TW_DISABLE_FRIDA_FILE, F_OK) == 0) {
     LOGD("TreatWheel P3 disabled by %s", TW_DISABLE_FRIDA_FILE);
+    return true;
+  }
+  if (access(TW_ENABLE_FRIDA_FILE, F_OK) != 0) {
+    LOGD("TreatWheel P3 is opt-in; create %s to enable", TW_ENABLE_FRIDA_FILE);
     return true;
   }
 
@@ -267,6 +273,10 @@ bool treat_wheel_scrub_mntent_buffer(void) {
     LOGD("TreatWheel P4 disabled by %s", TW_DISABLE_MNTENT_FILE);
     return true;
   }
+  if (access(TW_ENABLE_MNTENT_FILE, F_OK) != 0) {
+    LOGD("TreatWheel P4 is opt-in; create %s to enable", TW_ENABLE_MNTENT_FILE);
+    return true;
+  }
 
   FILE *mounts = setmntent("/proc/self/mounts", "r");
   if (mounts == NULL) {
@@ -275,9 +285,12 @@ bool treat_wheel_scrub_mntent_buffer(void) {
     return true;
   }
 
-  char *line_buffer = NULL;
+  char line_storage[TW_MNTENT_SCAN_LIMIT];
+  struct mntent entry_storage;
   struct mntent *entry = NULL;
-  while ((entry = getmntent(mounts)) != NULL) {
+  char *line_buffer = NULL;
+  while ((entry = getmntent_r(mounts, &entry_storage, line_storage,
+                              (int)sizeof(line_storage))) != NULL) {
     if (entry->mnt_fsname != NULL) line_buffer = entry->mnt_fsname;
   }
 
