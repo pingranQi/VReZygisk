@@ -370,9 +370,21 @@ void zygiskd_start(char *restrict argv[]) {
   while (1) {
     int client_fd = accept(socket_fd, NULL, NULL);
     if (client_fd == -1) {
+      if (errno == EINTR) continue;
       LOGE("accept: %s", strerror(errno));
+      continue;
+    }
 
-      break;
+    /* The control socket is reserved for root-owned Zygote/ptracer clients. */
+    struct ucred peer_cred;
+    socklen_t peer_cred_len = sizeof(peer_cred);
+    if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED,
+                   &peer_cred, &peer_cred_len) != 0 ||
+        peer_cred_len != sizeof(peer_cred) || peer_cred.uid != 0 ||
+        peer_cred.pid <= 1) {
+      LOGW("Rejecting unauthorized or unverifiable daemon socket peer");
+      close(client_fd);
+      continue;
     }
 
     uint8_t action8 = 0;
