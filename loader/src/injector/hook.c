@@ -1050,13 +1050,14 @@ static void rz_fork_pre(struct zygisk_context *ctx) {
   }
 
   struct dirent *entry;
+  errno = 0;
   while ((entry = readdir(dir))) {
     int fd = parse_int(entry->d_name);
     if (fd == -1) continue;
 
     if (fd >= MAX_FD_SIZE) {
-      close(fd);
-
+      /* Preserve high-numbered descriptors rather than closing valid app fds. */
+      LOGW("FD %d exceeds the sanitizer tracking limit; preserving it", fd);
       continue;
     }
 
@@ -1066,6 +1067,11 @@ static void rz_fork_pre(struct zygisk_context *ctx) {
   /* INFO: The dirfd should not be allowed */
   int dfd = dirfd(dir);
   if (dfd >= 0 && dfd < MAX_FD_SIZE) ctx->allowed_fds[dfd] = 0;
+
+  if (errno != 0) {
+    PLOGE("Failed while enumerating /proc/self/fd; skipping FD sanitization");
+    FLAG_SET(ctx, SKIP_FD_SANITIZATION);
+  }
 
   closedir(dir);
 }
