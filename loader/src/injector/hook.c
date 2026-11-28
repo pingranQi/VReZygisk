@@ -1076,11 +1076,15 @@ static void rz_fork_pre(struct zygisk_context *ctx) {
   closedir(dir);
 }
 
-static void mark_fds_allowed(struct zygisk_context *ctx, JNIEnv *env, jintArray fdsArray) {
-  if (!fdsArray) return;
+static bool mark_fds_allowed(struct zygisk_context *ctx, JNIEnv *env, jintArray fdsArray) {
+  if (!fdsArray) return true;
+
+  jint len = (*env)->GetArrayLength(env, fdsArray);
+  if ((*env)->ExceptionCheck(env) || len < 0) return false;
+  if (len == 0) return true;
 
   jint *arr = (*env)->GetIntArrayElements(env, fdsArray, NULL);
-  jint len = (*env)->GetArrayLength(env, fdsArray);
+  if (!arr || (*env)->ExceptionCheck(env)) return false;
 
   for (jint i = 0; i < len; ++i) {
     int fd = arr[i];
@@ -1088,6 +1092,7 @@ static void mark_fds_allowed(struct zygisk_context *ctx, JNIEnv *env, jintArray 
   }
 
   (*env)->ReleaseIntArrayElements(env, fdsArray, arr, JNI_ABORT);
+  return !(*env)->ExceptionCheck(env);
 }
 
 static void rz_sanitize_fds(struct zygisk_context *ctx) {
@@ -1095,20 +1100,49 @@ static void rz_sanitize_fds(struct zygisk_context *ctx) {
 
   if (FLAG_GET(ctx, APP_FORK_AND_SPECIALIZE)) {
     jintArray fdsToIgnore = ctx->args.app->fds_to_ignore ? *ctx->args.app->fds_to_ignore : NULL;
-    mark_fds_allowed(ctx, ctx->env, fdsToIgnore);
+    if (!mark_fds_allowed(ctx, ctx->env, fdsToIgnore)) {
+      LOGE("Failed to read framework FD allowlist; skipping FD sanitization");
+      FLAG_SET(ctx, SKIP_FD_SANITIZATION);
+      return;
+    }
 
     if (ctx->exempted_fds_count > 0) {
       jint len = fdsToIgnore ? (*ctx->env)->GetArrayLength(ctx->env, fdsToIgnore) : 0;
+      if ((*ctx->env)->ExceptionCheck(ctx->env) || len < 0 ||
+          ctx->exempted_fds_count > (size_t)(INT_MAX - len)) {
+        LOGE("Invalid framework FD allowlist size; skipping FD sanitization");
+        FLAG_SET(ctx, SKIP_FD_SANITIZATION);
+        return;
+      }
       jintArray newArray = (*ctx->env)->NewIntArray(ctx->env, (jsize)(len + ctx->exempted_fds_count));
-      if (newArray) {
+      if (!newArray || (*ctx->env)->ExceptionCheck(ctx->env)) {
+        LOGE("Failed to extend framework FD allowlist; skipping FD sanitization");
+        FLAG_SET(ctx, SKIP_FD_SANITIZATION);
+        return;
+      }
         if (fdsToIgnore && len > 0) {
           jint *arr = (*ctx->env)->GetIntArrayElements(ctx->env, fdsToIgnore, NULL);
+          if (!arr || (*ctx->env)->ExceptionCheck(ctx->env)) {
+            LOGE("Failed to copy framework FD allowlist; skipping FD sanitization");
+            FLAG_SET(ctx, SKIP_FD_SANITIZATION);
+            return;
+          }
           (*ctx->env)->SetIntArrayRegion(ctx->env, newArray, 0, len, arr);
           (*ctx->env)->ReleaseIntArrayElements(ctx->env, fdsToIgnore, arr, JNI_ABORT);
+          if ((*ctx->env)->ExceptionCheck(ctx->env)) {
+            LOGE("Failed to copy framework FD allowlist; skipping FD sanitization");
+            FLAG_SET(ctx, SKIP_FD_SANITIZATION);
+            return;
+          }
           (*ctx->env)->DeleteLocalRef(ctx->env, fdsToIgnore);
         }
 
         (*ctx->env)->SetIntArrayRegion(ctx->env, newArray, len, (jsize)ctx->exempted_fds_count, ctx->exempted_fds);
+        if ((*ctx->env)->ExceptionCheck(ctx->env)) {
+          LOGE("Failed to append exempted FDs; skipping FD sanitization");
+          FLAG_SET(ctx, SKIP_FD_SANITIZATION);
+          return;
+        }
         for (size_t i = 0; i < ctx->exempted_fds_count; i++) {
           int fd = ctx->exempted_fds[i];
           if (fd >= 0 && fd < MAX_FD_SIZE) ctx->allowed_fds[fd] = 1;
