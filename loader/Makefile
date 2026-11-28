@@ -77,6 +77,11 @@ test-mountinfo:
 	$(HOST_CC) -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror -Isrc/include src/common/mountinfo.c tests/test_mountinfo.c -o $(BUILD_DIR)/tests/test_mountinfo
 	$(BUILD_DIR)/tests/test_mountinfo
 
+test-maps-classification:
+	@mkdir -p $(BUILD_DIR)/tests
+	$(HOST_CC) -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror -Isrc/include src/common/map_classification.c tests/test_maps_classification.c -o $(BUILD_DIR)/tests/test_maps_classification
+	$(BUILD_DIR)/tests/test_maps_classification
+
 clean:
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/loader
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/plti
