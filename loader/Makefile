@@ -31,7 +31,7 @@ COMMON_LDFLAGS = -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment       
 				 -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined \
 				 -Qunused-arguments -Wl,--gc-sections
 
-COMMON_SRCS = src/common/daemon.c src/common/elf_util.c src/common/mountinfo.c \
+COMMON_SRCS = src/common/daemon.c src/common/elf_util.c src/common/mountinfo.c src/common/map_classification.c  \
 			  src/common/misc.c src/common/socket_utils.c
 INJECTOR_SRCS = src/injector/alloc.c src/injector/cpp_strings.c src/injector/entry.c \
 				src/injector/hook.c src/injector/hiding.c src/injector/treat_wheel_port.c \
@@ -58,7 +58,7 @@ CSOLOADER_DIR = src/external/csoloader
 COMMON_INCLUDES = -Isrc/include
 INJECTOR_INCLUDES = -Isrc/include -I$(PLTI_DIR)/src -I$(CSOLOADER_DIR)/include
 
-.PHONY: all arch clean test-mountinfo
+.PHONY: all arch clean test-mountinfo test-maps-classification test-page-layout
 
 all:
 	@for arch in $(ARCHS); do                                                                                  \
@@ -76,6 +76,11 @@ test-mountinfo:
 	@mkdir -p $(BUILD_DIR)/tests
 	$(HOST_CC) -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror -Isrc/include src/common/mountinfo.c tests/test_mountinfo.c -o $(BUILD_DIR)/tests/test_mountinfo
 	$(BUILD_DIR)/tests/test_mountinfo
+
+test-maps-classification:
+	@mkdir -p $(BUILD_DIR)/tests
+	$(HOST_CC) -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror -Isrc/include src/common/map_classification.c tests/test_maps_classification.c -o $(BUILD_DIR)/tests/test_maps_classification \
+	$(BUILD_DIR)/tests/test_maps_classification
 
 clean:
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/loader

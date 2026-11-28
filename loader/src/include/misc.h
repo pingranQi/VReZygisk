@@ -33,12 +33,22 @@ struct map_entry {
   char *path;
 };
 
+enum map_backing_kind {
+  MAP_BACKING_ANONYMOUS,
+  MAP_BACKING_MEMFD,
+  MAP_BACKING_SPECIAL,
+  MAP_BACKING_FILE,
+  MAP_BACKING_DELETED_FILE
+};
+
 struct maps_info {
   struct map_entry *maps;
   size_t length;
 };
 
 typedef bool (*maps_visitor)(const struct map_entry *map, void *userdata);
+
+enum map_backing_kind classify_map_backing(const char *path);
 
 int parse_int(const char *str);
 
