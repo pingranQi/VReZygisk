@@ -31,7 +31,7 @@ COMMON_LDFLAGS = -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment       
 				 -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined \
 				 -Qunused-arguments -Wl,--gc-sections
 
-COMMON_SRCS = src/common/daemon.c src/common/elf_util.c src/common/mountinfo.c \
+COMMON_SRCS = src/common/daemon.c src/common/elf_util.c src/common/mountinfo.c src/common/map_classification.c \\
 			  src/common/misc.c src/common/socket_utils.c
 INJECTOR_SRCS = src/injector/alloc.c src/injector/cpp_strings.c src/injector/entry.c \
 				src/injector/hook.c src/injector/hiding.c src/injector/treat_wheel_port.c \
