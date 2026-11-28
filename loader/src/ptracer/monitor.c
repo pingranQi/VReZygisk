@@ -926,28 +926,59 @@ static bool update_status(const char *message) {
   return true;
 }
 
+static bool append_section(char *section, size_t capacity, size_t *used, const char *text) {
+  size_t length = strlen(text);
+  if (length >= capacity - *used) return false;
+
+  memcpy(section + *used, text, length);
+  *used += length;
+  section[*used] = '\0';
+
+  return true;
+}
+
 static bool prepare_environment() {
-  FILE *orig_prop = fopen("/data/adb/modules/rezygisk/module.prop", "r");
+  // module.prop is rewritten with runtime status. Always parse the pristine
+  // installation-time copy so a monitor restart cannot nest old status text.
+  memset(pre_section, 0, sizeof(pre_section));
+  memset(post_section, 0, sizeof(post_section));
+
+  FILE *orig_prop = fopen("/data/adb/modules/rezygisk/module.prop.bak", "r");
   if (orig_prop == NULL) {
-    PLOGE("failed to open orig prop");
+    PLOGE("failed to open module.prop.bak");
 
     return false;
   }
 
   bool after_description = false;
+  size_t pre_used = 0;
+  size_t post_used = 0;
 
   char line[1024];
   while (fgets(line, sizeof(line), orig_prop) != NULL) {
+    bool appended;
     if (strncmp(line, "description=", strlen("description=")) == 0) {
-      strcat(pre_section, "description=");
-      strcat(post_section, line + strlen("description="));
+      appended = append_section(pre_section, sizeof(pre_section), &pre_used, "description=") &&
+                 append_section(post_section, sizeof(post_section), &post_used,
+                                line + strlen("description="));
       after_description = true;
-
-      continue;
+    } else if (after_description) {
+      appended = append_section(post_section, sizeof(post_section), &post_used, line);
+    } else {
+      appended = append_section(pre_section, sizeof(pre_section), &pre_used, line);
     }
 
-    if (after_description) strcat(post_section, line);
-    else strcat(pre_section, line);
+    if (!appended) {
+      PLOGE("module.prop.bak exceeds status buffer capacity");
+      fclose(orig_prop);
+      return false;
+    }
+  }
+
+  if (ferror(orig_prop)) {
+    PLOGE("failed to read module.prop.bak");
+    fclose(orig_prop);
+    return false;
   }
 
   fclose(orig_prop);
