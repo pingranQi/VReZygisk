@@ -25,25 +25,24 @@
 #define SYS_mmap LP_SELECT(__NR_mmap2, __NR_mmap)
 
 #include "socket_utils.h"
+#include "page_layout.h"
 
 #ifndef STT_GNU_IFUNC
   #define STT_GNU_IFUNC 10
 #endif
 
-#ifndef ALIGN_DOWN
-  #define ALIGN_DOWN(x, a) ((x) & ~((a)-1))
-#endif
 #ifndef ALIGN_UP
   #define ALIGN_UP(x, a) (((x) + ((a)-1)) & ~((a)-1))
 #endif
 
 static uintptr_t page_start(uintptr_t addr, size_t page_size) {
-  return ALIGN_DOWN(addr, page_size);
+  uintptr_t aligned = 0;
+  return rz_page_align_down(addr, page_size, &aligned) ? aligned : 0;
 }
 
 static uintptr_t page_end(uintptr_t addr, size_t page_size) {
-  if (page_size == 0 || addr > UINTPTR_MAX - (page_size - 1)) return 0;
-  return ALIGN_DOWN(addr + page_size - 1, page_size);
+  uintptr_t aligned = 0;
+  return rz_page_align_up(addr, page_size, &aligned) ? aligned : 0;
 }
 
 static bool remote_syscall_failed(long result) {
@@ -78,7 +77,7 @@ static bool compute_load_layout(int fd, size_t page_size, ElfW(Ehdr) *eh,
                                 size_t *out_map_size) {
   struct stat st;
   if (!eh || !out_phdr || !out_min_vaddr || !out_map_size ||
-      page_size == 0 || (page_size & (page_size - 1)) != 0 ||
+      !rz_page_size_valid(page_size) ||
       fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(*eh)) {
     LOGE("Invalid ELF input or page size");
     return false;
